@@ -3,6 +3,23 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`scripts/benchmark_suite.py`; history in the dev log).
 
+## 0.2.1 (2026-10-21): project framework
+
+- `CLAUDE.md`: project rules (branches only, commit every change, merge with version bump,
+  test gate, benchmark and report the effect of every change, dev log outside git).
+- Pre-commit hook (`scripts/hooks/`): refuses commits on `main` and failing tests.
+- `pbinner --version`.
+- `scripts/benchmark_suite.py` with `benchmarks/suite.json`: records accuracy, wall time and peak
+  memory per version in the dev log.
+
+**Benchmark effect:** none; no code that changes results. First recorded baseline (0.2.0 code):
+
+| Benchmark | Contaminants found | Flag precision | Put back | Wrongly placed / scenario | Completeness after | Wall time | Peak RAM |
+|---|---|---|---|---|---|---|---|
+| ZymoOral 5–150 kb | 100% | 96.5% | 92.6% | 1.0 | 98.7% | 55 s | 1.0 GB |
+| ZymoOral 2–30 kb | 100% | 99.1% | 89.9% | 0.3 | 98.2% | 57 s | 1.1 GB |
+| Simulated look-alikes | 97.0% | 100% | 0% | 0.7 | 76.1% | 145 s | 2.7 GB |
+
 ## 0.2.0 (2026-10-21): baseline under version control
 
 Everything before this version was developed without version control; the reasoning is in the dev
