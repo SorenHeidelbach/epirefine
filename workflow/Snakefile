@@ -24,6 +24,15 @@ def s(key):
     return lambda wc: SAMPLES[wc.sample][key]
 
 
+def methods_of(sample):
+    """Bin sets compared for a sample: config `methods` (e.g. [original, pbinner] to skip Nanomotif)."""
+    return SAMPLES[sample].get("methods", METHODS)
+
+
+def table_of(sample, method):
+    return SAMPLES[sample]["contig_bin"] if method == "original" else f"{OUT}/{sample}/{method}/new_contig_bin.tsv"
+
+
 def contig_bin_of(wc):
     return {"original": SAMPLES[wc.sample]["contig_bin"],
             "nanomotif": f"{OUT}/{wc.sample}/nanomotif/new_contig_bin.tsv",
@@ -127,24 +136,23 @@ rule checkm2:
 
 rule compare:
     input:
-        reports=expand(f"{OUT}/{{{{sample}}}}/checkm2/{{method}}/quality_report.tsv", method=METHODS),
-        original=s("contig_bin"),
-        nanomotif=f"{OUT}/{{sample}}/nanomotif/new_contig_bin.tsv",
-        pbinner=f"{OUT}/{{sample}}/pbinner/new_contig_bin.tsv",
+        reports=lambda wc: [f"{OUT}/{wc.sample}/checkm2/{m}/quality_report.tsv" for m in methods_of(wc.sample)],
+        tables=lambda wc: [table_of(wc.sample, m) for m in methods_of(wc.sample)],
         lengths=f"{OUT}/{{sample}}/contig_lengths.tsv",
     output:
         summary=f"{OUT}/{{sample}}/comparison/summary.tsv",
         bins=f"{OUT}/{{sample}}/comparison/bins.tsv",
         figure=f"{OUT}/{{sample}}/comparison/bin_refinement.pdf",
+    params:
+        methods=lambda wc: " ".join(methods_of(wc.sample)),
     log:
         f"{OUT}/{{sample}}/logs/compare.log",
     conda:
         "envs/r.yaml"
     shell:
         "Rscript {workflow.basedir}/scripts/compare_bins.R --sample {wildcards.sample} "
-        "--checkm2 {input.reports} --contig-bin {input.original} {input.nanomotif} {input.pbinner} "
-        "--methods original nanomotif pbinner --lengths {input.lengths} "
-        "--out $(dirname {output.summary}) > {log} 2>&1"
+        "--checkm2 {input.reports} --contig-bin {input.tables} --methods {params.methods} "
+        "--lengths {input.lengths} --out $(dirname {output.summary}) > {log} 2>&1"
 
 
 rule contig_lengths:

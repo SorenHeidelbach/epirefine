@@ -1,6 +1,6 @@
 # Samples: assembly, modkit pileup, the binner's contig -> bin table (no header), Nanomotif
 # bin-motifs.tsv. Optional: plasmids (geNomad plasmid_summary.tsv or a list), cache_dir (pbinner's
-# site cache, reused across runs).
+# site cache, reused across runs), methods (bin sets to compare; default original, nanomotif, pbinner).
 outdir: /home/ubuntu/data/workflow_results
 threads: 16
 checkm2_db_dir: /home/ubuntu/tools/databases/checkm2
@@ -28,3 +28,5 @@ samples:
     contig_bin: /home/ubuntu/data/human_gut/contig_bin.tsv
     motifs: /home/ubuntu/data/human_gut/nanomotif_1.1.3/bin-motifs.tsv
     cache_dir: /home/ubuntu/data/human_gut/pbinner_v3/cache
+    # Nanomotif reads the 235 GB pileup as one stream (~3-5 h on this disk): left out here
+    methods: [original, pbinner]
