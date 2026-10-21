@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Refuse commits on main and commits that break the tests (see CLAUDE.md).
+set -e
+root=$(git rev-parse --show-toplevel)
+branch=$(git branch --show-current)
+if [ "$branch" = "main" ] && [ -z "$PBINNER_ALLOW_MAIN" ]; then
+  echo "pre-commit: don't commit on main; work on a branch and merge (set PBINNER_ALLOW_MAIN=1 to override)." >&2
+  exit 1
+fi
+if ! "$root/.venv/bin/python" -m pytest -q "$root/tests" > /tmp/pbinner-pre-commit.log 2>&1; then
+  tail -20 /tmp/pbinner-pre-commit.log >&2
+  echo "pre-commit: tests fail; fix them before committing." >&2
+  exit 1
+fi

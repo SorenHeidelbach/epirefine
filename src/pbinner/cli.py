@@ -6,7 +6,10 @@ from .calibrate import DEFAULT_LENGTHS
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="pbinner", description="Probabilistic plasmid-host assignment from methylation")
+    from . import __version__
+    ap = argparse.ArgumentParser(prog="pbinner", description="Bin refinement (contamination detection, contig inclusion) "
+                                                             "and plasmid-host assignment from nanopore methylation")
+    ap.add_argument("--version", action="version", version=f"pbinner {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("run", help="assign plasmid contigs to host bins")
