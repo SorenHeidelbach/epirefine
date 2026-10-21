@@ -103,7 +103,8 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 
 
 def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=None, score_all=True, min_cov=1,
-        chunk_size=50_000, grid_size=64, p_unknown=None, contamination_threshold=0.5, include_threshold=0.95, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS,
+        chunk_size=50_000, grid_size=64, p_unknown=None, contamination_threshold=0.5, include_threshold=0.95,
+        min_methylome_difference=0.5, min_diff_sites=10, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS,
         frags_per_bin=30, frag_budget=6000, tau=None, temperature=None, delta=None, tau_p=None, rho_base=0.02,
         contam_eps=0.05, min_plasmids_for_fit=5, allow_sharpening=False, min_containment=0.5,
         uninformative_log_bf=3.0, misfit_log_bf=3.0, group_sample_bp=50e6, workers=None, cache_dir=None,
@@ -320,12 +321,21 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
     # bin refinement: contamination of binned contigs, inclusion of unbinned ones
     given = np.array([bin_idx[cb[c]] if c in cb else -1 for c in targets])
     testable = np.array([c in host_set and c not in sole_contig and n_sites[i] > 0 for i, c in enumerate(targets)])
+    # largest methylated-fraction difference between each binned contig and its bin (groups with
+    # >= min_diff_sites sites), the effect size a contamination call needs (D20)
+    phi_obs = _batched_summary(grid, lambda sl: L_t[sl].astype(np.float64), len(targets))
+    phi_bin = grid.summarize(model.log_prof)[0]
+    diff = np.zeros(len(targets))
+    has = given >= 0
+    d = np.abs(phi_obs[0][has] - phi_bin[given[has]])
+    diff[has] = np.where(n_sites_group[has] >= min_diff_sites, d, 0.0).max(1)
     ref = refine(sc.S, sc.Su, given, testable, temperature, contamination_threshold, include_threshold,
+                 methylome_difference=diff, min_difference=min_methylome_difference,
                  p_unknown=p_unknown)
     p_unknown = ref.p_unknown
     params.update(p_unknown=p_unknown, contamination_rate=ref.eps)
     P = posterior(sc.S, sc.Su, p_unknown, temperature)
-    write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P)
+    write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff)
     _log(f"refinement: p_unknown={p_unknown:.3f}, contamination rate={ref.eps:.3f}; "
          f"{int(ref.contaminant.sum())} of {int(testable.sum())} testable binned contigs flagged, "
          f"{int(((ref.include_bin >= 0) & (given < 0)).sum())} of {int((given < 0).sum())} unbinned included, "
@@ -362,7 +372,6 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
                 A_h[j:j + 1], Pw_h[j:j + 1] = model.host_terms(sc, np.array([i]), log_prof=prof)
         A_map[rows_h], Pw_map[rows_h] = A_h, Pw_h
     misfit = sc.Au - A_map  # log BF: "some community host" vs MAP host, per group
-    phi_obs = _batched_summary(grid, lambda sl: L_t[sl].astype(np.float64), len(targets))
 
     def pred(sl):
         lp = np.where(hosted[sl, None, None], model.log_prof[truth[sl]], model.log_pi[None])

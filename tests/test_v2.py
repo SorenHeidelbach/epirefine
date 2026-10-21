@@ -196,3 +196,13 @@ def test_caller_fit_by_bin_recovers_rare_methylated_component():
     counts = sites.group_by("group", "bin", "n", "k").agg(pl.len().alias("w"))
     by_bin = fit_detection_by_bin(counts, {0: "a"})[0]
     assert abs(by_bin.mu1 - 0.85) < 0.05 and abs(by_bin.mu0 - 0.02) < 0.01
+
+
+def test_contamination_needs_a_methylome_difference():
+    from pbinner.refine import refine
+    S = np.array([[-50., -50, -50], [-50., -50, -50]])  # both fit their bin (0) badly, nothing else well
+    Su = np.array([0., 0.])
+    given = np.array([0, 0])
+    small_shift, real = 0.15, 0.9
+    r = refine(S, Su, given, given >= 0, 1.0, methylome_difference=np.array([small_shift, real]), min_difference=0.5)
+    assert r.contaminant.tolist() == [False, True]
