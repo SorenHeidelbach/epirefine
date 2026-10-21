@@ -179,3 +179,20 @@ def test_refine_flags_contaminant_includes_member_and_leaves_orphan():
     assert r.include_bin.tolist() == [-1, 1, -1, 2, -1, -1]
     w, resp = em_weight(np.zeros(100), np.r_[np.full(20, 10.0), np.full(80, -10.0)])
     assert abs(w - 0.2) < 0.01
+
+
+def test_caller_fit_by_bin_recovers_rare_methylated_component():
+    """One motif methylated in 2 of 40 bins: the pooled fit degenerates, the bin-labelled fit doesn't."""
+    from pbinner.detection import fit_detection, fit_detection_by_bin
+    rng = np.random.default_rng(7)
+    rows = []
+    for b in range(40):
+        meth = b < 2
+        n = rng.poisson(25, 300) + 1
+        mu = np.where(meth & (rng.random(300) < 0.95), 0.85, 0.02)
+        k = rng.binomial(n, rng.beta(mu * 12, (1 - mu) * 12))
+        rows.append(pl.DataFrame({"group": 0, "bin": b, "n": n, "k": k}))
+    sites = pl.concat(rows)
+    counts = sites.group_by("group", "bin", "n", "k").agg(pl.len().alias("w"))
+    by_bin = fit_detection_by_bin(counts, {0: "a"})[0]
+    assert abs(by_bin.mu1 - 0.85) < 0.05 and abs(by_bin.mu0 - 0.02) < 0.01

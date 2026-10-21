@@ -20,7 +20,7 @@ from scipy.special import logsumexp
 from . import io as pio
 from .assignability import detectability, margin_vs_competitors
 from .calibrate import DEFAULT_LENGTHS, calibrate, fragment_chunks, fragments_per_bin, select_fragments
-from .detection import detection_table, fit_detection
+from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .model import FittedModel, credible_set, posterior, propagate
 from .motifs import build_records, describe_groups, group_motifs
@@ -169,8 +169,14 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
               .group_by("group", "n", "k").agg(pl.len().alias("w")).collect())
     _log(f"{int(counts['w'].sum())} sites with coverage >= {min_cov}")
     _write(describe_groups(motifs, group_of, counts), out / "motif_groups.tsv")
-    det = fit_detection(counts.select("group", "n", "k", "w"), dict(enumerate(group_modtype)),
-                        workers=workers or min(16, os.cpu_count() or 1))
+    # caller model fitted with the bins as labels (a motif is methylated in some genomes, not in
+    # others); the pooled fit collapses when few of many bins methylate a motif (dev log D19)
+    host_bin = pl.DataFrame({"contig": [cid[c] for c in host_contigs], "bin": [bin_idx[cb[c]] for c in host_contigs]},
+                            schema={"contig": pl.Int32, "bin": pl.Int32})
+    counts_bin = (pl.scan_parquet(parts).filter(pl.col("n") >= min_cov).join(host_bin.lazy(), on="contig")
+                  .group_by("group", "bin", "n", "k").agg(pl.len().alias("w")).collect())
+    det = fit_detection_by_bin(counts_bin, dict(enumerate(group_modtype)),
+                               workers=workers or min(16, os.cpu_count() or 1))
     _write(detection_table(det), out / "detection_model.tsv")
     _log("detection model fitted")
 
