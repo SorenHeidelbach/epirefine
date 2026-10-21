@@ -10,3 +10,4 @@ bench_components/
 sim/
 *.log
 cache/
+.snakemake/
