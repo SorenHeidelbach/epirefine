@@ -1,0 +1,164 @@
+"""Bin refinement with pbinner and Nanomotif, checked with CheckM2.
+
+For each sample: Nanomotif (detect_contamination + include_contigs) and pbinner refine the same bins
+from the same motifs and pileup; the original and both refined bin sets are written as FASTA and
+scored with CheckM2; an R script compares them.
+
+    snakemake -s workflow/Snakefile --configfile workflow/config.yaml --use-conda --cores 16
+
+Outputs per sample in <outdir>/<sample>/: nanomotif/, pbinner/, bins/<method>/, checkm2/<method>/,
+comparison/ (summary.tsv, bins.tsv, figures).
+"""
+from pathlib import Path
+
+REPO = Path(workflow.basedir).parent
+OUT = config.get("outdir", "results")
+SAMPLES = config["samples"]
+METHODS = ["original", "nanomotif", "pbinner"]
+THREADS = config.get("threads", 16)
+DB_DIR = config["checkm2_db_dir"]
+DB = f"{DB_DIR}/CheckM2_database/uniref100.KO.1.dmnd"
+
+
+def s(key):
+    return lambda wc: SAMPLES[wc.sample][key]
+
+
+def methods_of(sample):
+    """Bin sets compared for a sample: config `methods` (e.g. [original, pbinner] to skip Nanomotif)."""
+    return SAMPLES[sample].get("methods", METHODS)
+
+
+def table_of(sample, method):
+    return SAMPLES[sample]["contig_bin"] if method == "original" else f"{OUT}/{sample}/{method}/new_contig_bin.tsv"
+
+
+def contig_bin_of(wc):
+    return {"original": SAMPLES[wc.sample]["contig_bin"],
+            "nanomotif": f"{OUT}/{wc.sample}/nanomotif/new_contig_bin.tsv",
+            "pbinner": f"{OUT}/{wc.sample}/pbinner/new_contig_bin.tsv"}[wc.method]
+
+
+rule all:
+    input:
+        expand(f"{OUT}/{{sample}}/comparison/summary.tsv", sample=SAMPLES),
+
+
+rule nanomotif:
+    input:
+        assembly=s("assembly"), pileup=s("pileup"), contig_bin=s("contig_bin"), motifs=s("motifs"),
+    output:
+        new=f"{OUT}/{{sample}}/nanomotif/new_contig_bin.tsv",
+        contamination=f"{OUT}/{{sample}}/nanomotif/bin_contamination.tsv",
+        include=f"{OUT}/{{sample}}/nanomotif/include_contigs.tsv",
+    params:
+        extra=config.get("nanomotif_extra", ""),
+    log:
+        f"{OUT}/{{sample}}/logs/nanomotif.log",
+    benchmark:
+        f"{OUT}/{{sample}}/benchmarks/nanomotif.tsv"
+    threads: THREADS
+    conda:
+        "envs/nanomotif.yaml"
+    shell:
+        "nanomotif include_contigs --pileup {input.pileup} --assembly {input.assembly} "
+        "--bin_motifs {input.motifs} --contig_bins {input.contig_bin} --run_detect_contamination "
+        "-t {threads} --out $(dirname {output.new}) {params.extra} > {log} 2>&1"
+
+
+rule pbinner:
+    input:
+        assembly=s("assembly"), pileup=s("pileup"), contig_bin=s("contig_bin"), motifs=s("motifs"),
+    output:
+        new=f"{OUT}/{{sample}}/pbinner/new_contig_bin.tsv",
+        contamination=f"{OUT}/{{sample}}/pbinner/bin_contamination.tsv",
+        decisions=f"{OUT}/{{sample}}/pbinner/contig_decisions.tsv",
+    params:
+        exe=config.get("pbinner", str(REPO / ".venv/bin/pbinner")),
+        cache=lambda wc: f"--cache-dir {SAMPLES[wc.sample]['cache_dir']}" if SAMPLES[wc.sample].get("cache_dir") else "",
+        plasmids=lambda wc: f"--plasmids {SAMPLES[wc.sample]['plasmids']}" if SAMPLES[wc.sample].get("plasmids") else "",
+        extra=config.get("pbinner_extra", ""),
+    log:
+        f"{OUT}/{{sample}}/logs/pbinner.log",
+    benchmark:
+        f"{OUT}/{{sample}}/benchmarks/pbinner.tsv"
+    threads: THREADS
+    shell:
+        # pbinner runs from the repository's own environment (see CLAUDE.md), not a conda env
+        "{params.exe} run --assembly {input.assembly} --pileup {input.pileup} --contig-bin {input.contig_bin} "
+        "--motifs {input.motifs} --out $(dirname {output.new}) --workers {threads} {params.cache} "
+        "{params.plasmids} {params.extra} > {log} 2>&1"
+
+
+rule write_bins:
+    input:
+        assembly=s("assembly"),
+        contig_bin=contig_bin_of,
+    output:
+        directory(f"{OUT}/{{sample}}/bins/{{method}}"),
+    params:
+        min_length=config.get("min_bin_length", 0),
+    log:
+        f"{OUT}/{{sample}}/logs/write_bins_{{method}}.log",
+    shell:
+        "python {workflow.basedir}/scripts/write_bins.py --assembly {input.assembly} "
+        "--contig-bin {input.contig_bin} --out {output} --min-length {params.min_length} > {log} 2>&1"
+
+
+rule checkm2_database:
+    output:
+        DB,
+    log:
+        f"{DB_DIR}/download.log",
+    conda:
+        "envs/checkm2.yaml"
+    shell:
+        "checkm2 database --download --path {DB_DIR} > {log} 2>&1"
+
+
+rule checkm2:
+    input:
+        bins=f"{OUT}/{{sample}}/bins/{{method}}",
+        db=DB,
+    output:
+        f"{OUT}/{{sample}}/checkm2/{{method}}/quality_report.tsv",
+    log:
+        f"{OUT}/{{sample}}/logs/checkm2_{{method}}.log",
+    benchmark:
+        f"{OUT}/{{sample}}/benchmarks/checkm2_{{method}}.tsv"
+    threads: THREADS
+    conda:
+        "envs/checkm2.yaml"
+    shell:
+        "checkm2 predict --threads {threads} --input {input.bins} -x fa --database_path {input.db} "
+        "--output-directory $(dirname {output}) --force > {log} 2>&1"
+
+
+rule compare:
+    input:
+        reports=lambda wc: [f"{OUT}/{wc.sample}/checkm2/{m}/quality_report.tsv" for m in methods_of(wc.sample)],
+        tables=lambda wc: [table_of(wc.sample, m) for m in methods_of(wc.sample)],
+        lengths=f"{OUT}/{{sample}}/contig_lengths.tsv",
+    output:
+        summary=f"{OUT}/{{sample}}/comparison/summary.tsv",
+        bins=f"{OUT}/{{sample}}/comparison/bins.tsv",
+        figure=f"{OUT}/{{sample}}/comparison/bin_refinement.pdf",
+    params:
+        methods=lambda wc: " ".join(methods_of(wc.sample)),
+    log:
+        f"{OUT}/{{sample}}/logs/compare.log",
+    conda:
+        "envs/r.yaml"
+    shell:
+        "Rscript {workflow.basedir}/scripts/compare_bins.R --sample {wildcards.sample} "
+        "--checkm2 {input.reports} --contig-bin {input.tables} --methods {params.methods} "
+        "--lengths {input.lengths} --out $(dirname {output.summary}) > {log} 2>&1"
+
+
+rule contig_lengths:
+    input:
+        s("assembly"),
+    output:
+        f"{OUT}/{{sample}}/contig_lengths.tsv",
+    shell:
+        "python {workflow.basedir}/scripts/write_bins.py --assembly {input} --lengths-only {output}"

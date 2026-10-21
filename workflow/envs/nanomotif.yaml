@@ -1,0 +1,10 @@
+# Nanomotif 1.1.2. Its wheels (epimetheus-py) exist only for Python 3.9; datrie and hdbscan come
+# prebuilt from conda-forge so nothing has to be compiled.
+channels: [conda-forge, bioconda]
+dependencies:
+  - python=3.9
+  - pip
+  - datrie
+  - hdbscan
+  - pip:
+      - nanomotif==1.1.2

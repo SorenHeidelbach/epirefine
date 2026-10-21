@@ -3,6 +3,26 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`scripts/benchmark_suite.py`; history in the dev log).
 
+## 0.3.0 (2026-10-21): refinement workflow with CheckM2
+
+- `workflow/Snakefile`: per sample, runs Nanomotif 1.1.2 (`detect_contamination` +
+  `include_contigs`) and pbinner on the same inputs, writes the original and refined bins as FASTA,
+  and scores them with CheckM2 1.1.0 (database downloaded by the workflow). Conda environments are
+  in `workflow/envs/`; per-sample `methods` chooses which bin sets to compare.
+- `workflow/scripts/compare_bins.R`: per-bin and per-method CheckM2 comparison (quality tiers,
+  completeness and contamination change per bin, sequence moved), as tables and a figure page.
+
+**Benchmark effect:** none on pbinner (no pbinner code changed). Workflow results (CheckM2):
+
+| Sample | Bins | High-quality: original → Nanomotif / pbinner | Median completeness | Median contamination |
+|---|---|---|---|---|
+| ZymoOral with planted errors | 10 | 0 → 4 / 9 | 71.4 → 91.8 / 99.8% | 5.7 → 5.7 / 1.7% |
+| ZymoOral as binned | 12 | 11 → 11 / 11 | 100 → 100 / 100% | 0.14 → 0.14 / 0.31% |
+| human_gut (Nanomotif skipped) | 369 | 198 → – / 157 | 93.7 → – / 92.1% | 0.93 → – / 1.06% |
+
+On human_gut pbinner's refinement makes bins worse: its contamination flags mostly hit genuine
+members (see the dev log, D18).
+
 ## 0.2.1 (2026-10-21): project framework
 
 - `CLAUDE.md`: project rules (branches only, commit every change, merge with version bump,

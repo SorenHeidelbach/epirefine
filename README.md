@@ -1,19 +1,25 @@
-# pbinner (v2)
+# pbinner
 
-Probabilistic plasmid–host assignment from nanopore methylation, built on Nanomotif output.
+Bin refinement from nanopore methylation, built on Nanomotif output:
 
-For each plasmid contig it reports:
-- a posterior over host bins **plus an explicit "unknown host" class**, with a 95% credible set
-- a status: `assigned` / `ambiguous` / `host_not_binned` / `uninformative`
-- which motifs the plasmid methylates with **its own MTase**
-- motifs its assigned host fails to explain (misfit)
-- an **assignability** score: how well this contig *could* be assigned at all, computed from site positions and coverage only
+- **contamination detection:** flags binned contigs whose methylation doesn't fit their bin;
+- **contig inclusion:** places unbinned contigs into the bin they belong to.
 
-Calibration is estimated inside each sample from pseudo-plasmids cut from host contigs. Host
-profiles are robust to contaminating contigs in bins.
+Every decision comes with a calibrated posterior, including an explicit "unbinned genome" class, so
+contigs of genomes that have no bin stay out of bins. Outputs include Nanomotif-compatible files
+(`bin_contamination.tsv`, `include_contigs.tsv`, `new_contig_bin.tsv`).
 
-The full method, with equations and the reasoning behind each choice, is in [docs/method.md](docs/method.md).
-The design history, roadmap and session log are in [docs/conversation.md](docs/conversation.md).
+Plasmid-host assignment is an optional mode (`--plasmids`). For each plasmid it reports:
+- a posterior over host bins with a 95% credible set;
+- motifs the plasmid methylates with its own MTase;
+- an assignability score.
+
+Calibration is estimated inside each sample from pseudo-contigs cut from binned contigs.
+
+- Method: [docs/method.md](docs/method.md).
+- Performance work: [docs/scalability.md](docs/scalability.md).
+- Changes per version: [CHANGELOG.md](CHANGELOG.md).
+- Development rules: [CLAUDE.md](CLAUDE.md).
 
 ## Install
 
@@ -52,6 +58,33 @@ pbinner run --assembly asm.fasta --pileup pileup.bed.gz --contig-bin contig_bin.
 
 The pileup must have each contig's rows together (as modkit writes it). Uncompressed pileups are read
 in parallel byte ranges; gzipped ones by a single worker.
+
+## Workflow: pbinner vs Nanomotif, checked with CheckM2
+
+`workflow/Snakefile` runs, per sample:
+1. Nanomotif (`detect_contamination` + `include_contigs`) and pbinner, on the same bins, motifs and
+   pileup;
+2. writes the original and both refined bin sets as FASTA;
+3. scores each set with CheckM2;
+4. compares them in R (`workflow/scripts/compare_bins.R`).
+
+The comparison writes `comparison/summary.tsv` (per method), `comparison/bins.tsv` (per bin) and
+`comparison/bin_refinement.pdf`. The PDF shows bins per quality tier, the sequence each method
+moved, an arrow per changed bin from original to refined quality, and the change per bin.
+
+```bash
+# once: micromamba + a snakemake environment (see the dev log's DATA.md for this server)
+snakemake -s workflow/Snakefile --configfile workflow/config.yaml --use-conda --cores 16
+```
+
+- Samples go in `workflow/config.yaml`: assembly, modkit pileup, the binner's contig-to-bin table and
+  Nanomotif's `bin-motifs.tsv`. Optional per sample: `plasmids` and `cache_dir`, a pbinner site
+  cache reused across runs.
+- The first run creates the conda environments (Nanomotif 1.1.2, CheckM2 1.1.0, R) and downloads
+  the CheckM2 database (3 GB) to `checkm2_db_dir`.
+- pbinner itself runs from the repository's `.venv`.
+- `compare_bins.R` also works on its own: give it CheckM2 reports and contig-to-bin tables for any
+  number of bin sets (the first is the reference).
 
 ## Report
 

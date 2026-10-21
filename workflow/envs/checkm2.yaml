@@ -1,0 +1,3 @@
+channels: [conda-forge, bioconda]
+dependencies:
+  - checkm2=1.1.0

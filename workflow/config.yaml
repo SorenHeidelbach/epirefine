@@ -1,0 +1,32 @@
+# Samples: assembly, modkit pileup, the binner's contig -> bin table (no header), Nanomotif
+# bin-motifs.tsv. Optional: plasmids (geNomad plasmid_summary.tsv or a list), cache_dir (pbinner's
+# site cache, reused across runs), methods (bin sets to compare; default original, nanomotif, pbinner).
+outdir: /home/ubuntu/data/workflow_results
+threads: 16
+checkm2_db_dir: /home/ubuntu/tools/databases/checkm2
+# pbinner: /home/ubuntu/plasmid_binner/.venv/bin/pbinner   # default: the repository's .venv
+min_bin_length: 0
+
+samples:
+  ZymoOral:
+    assembly: /home/ubuntu/data/ZymoOral/ZymoOral/assembly_mmlong2.fasta
+    pileup: /home/ubuntu/data/ZymoOral/modkit.pileup.mmlong2.bed
+    contig_bin: /home/ubuntu/data/ZymoOral/ZymoOral/contig_bin_mmlong2.tsv
+    motifs: /home/ubuntu/data/ZymoOral/ZymoOral/nanomotif_1.1.3/bin-motifs.tsv
+    cache_dir: /home/ubuntu/data/ZymoOral/pbinner_v3/cache
+  # ZymoOral cut into 2-30 kb pieces with known binning errors (benchmark scenario 4): shows what
+  # refinement does to bins that need it
+  ZymoOral_errors:
+    assembly: /home/ubuntu/data/ZymoOral/bench/frag_short/assembly.fasta
+    pileup: /home/ubuntu/data/ZymoOral/bench/frag_short/pileup.bed
+    contig_bin: /home/ubuntu/data/ZymoOral/bench/scen4/contig_bin.tsv
+    motifs: /home/ubuntu/data/ZymoOral/ZymoOral/nanomotif_1.1.3/bin-motifs.tsv
+    cache_dir: /home/ubuntu/data/ZymoOral/bench/pbcache_short
+  human_gut:
+    assembly: /home/ubuntu/data/human_gut/m2_assembly.fasta
+    pileup: /home/ubuntu/data/human_gut/modkit.pileup.mmlong2.bed
+    contig_bin: /home/ubuntu/data/human_gut/contig_bin.tsv
+    motifs: /home/ubuntu/data/human_gut/nanomotif_1.1.3/bin-motifs.tsv
+    cache_dir: /home/ubuntu/data/human_gut/pbinner_v3/cache
+    # Nanomotif reads the 235 GB pileup as one stream (~3-5 h on this disk): left out here
+    methods: [original, pbinner]
