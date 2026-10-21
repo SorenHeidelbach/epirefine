@@ -114,7 +114,8 @@ def confidence(p: float) -> str:
 
 
 def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bins: list[str], ref: Refinement,
-                  n_sites: np.ndarray, sole: set, P: np.ndarray, methylome_difference: np.ndarray | None = None):
+                  n_sites: np.ndarray, sole: set, P: np.ndarray, methylome_difference: np.ndarray | None = None,
+                  redundancy: np.ndarray | None = None):
     """Nanomotif-compatible files + pbinner's per-contig decision table."""
     H = len(bins)
     labels = bins + ["unknown"]
@@ -160,6 +161,8 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
     for i, c in enumerate(contigs):
         if c in sole:
             status[i] = "sole_contig_of_bin"
+    if redundancy is not None:
+        status[~np.isnan(redundancy) & (ref.include_bin < 0)] = "redundant"
     status[(ref.include_bin >= 0) & (given < 0)] = "included"
     status[(ref.include_bin >= 0) & (given >= 0)] = "moved"
     new_bin = np.array([bins[ref.include_bin[i]] if ref.include_bin[i] >= 0
@@ -169,6 +172,7 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
         "contig": contigs, "length": length, "n_sites": n_sites, "given_bin": given_lbl, "status": status,
         "new_bin": new_bin, "p_contaminant": ref.p_foreign,
         "methylome_difference": methylome_difference if methylome_difference is not None else np.full(len(contigs), np.nan),
+        "redundancy_with_bin": redundancy if redundancy is not None else np.full(len(contigs), np.nan),
         "best_alternative": [labels[k] for k in ref.best_alt], "p_best_alternative": ref.p_best_alt,
         "map": [labels[k] for k in P.argmax(1)], "p_map": P.max(1), "p_unknown": P[:, -1],
     }).write_csv(out / "contig_decisions.tsv", separator="\t", float_precision=4)

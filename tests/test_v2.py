@@ -206,3 +206,19 @@ def test_contamination_needs_a_methylome_difference():
     small_shift, real = 0.15, 0.9
     r = refine(S, Su, given, given >= 0, 1.0, methylome_difference=np.array([small_shift, real]), min_difference=0.5)
     assert r.contaminant.tolist() == [False, True]
+
+
+def test_redundancy_containment():
+    from pbinner.motifs import encode
+    from pbinner.redundancy import containment, sketch
+    rng = np.random.default_rng(11)
+    genome = "".join(rng.choice(list("ACGT"), 200_000))
+    variant = list(genome[50_000:80_000])
+    for p in rng.choice(len(variant), int(0.01 * len(variant)), replace=False):  # 99% identity
+        variant[p] = "ACGT"[("ACGT".index(variant[p]) + 1) % 4]
+    other = "".join(rng.choice(list("ACGT"), 30_000))
+    g = sketch(encode(genome))
+    assert containment(sketch(encode("".join(variant))), g) > 0.6
+    assert containment(sketch(encode(other)), g) < 0.05
+    rc = genome[120_000:150_000][::-1].translate(str.maketrans("ACGT", "TGCA"))
+    assert containment(sketch(encode(rc)), g) > 0.95  # canonical k-mers: strand doesn't matter

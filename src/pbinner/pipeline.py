@@ -24,6 +24,7 @@ from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .model import FittedModel, credible_set, posterior, propagate
 from .motifs import build_records, describe_groups, group_motifs
+from .redundancy import inclusion_redundancy
 from .refine import refine, write_outputs
 from .mtase import RhoParams, annotation_levels, bin_levels, estimate_rho, read_mtases
 from .sites import EncodedAssembly, extract_sites, unit_tables
@@ -104,7 +105,7 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 
 def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=None, score_all=True, min_cov=1,
         chunk_size=50_000, grid_size=64, p_unknown=None, contamination_threshold=0.5, include_threshold=0.95,
-        min_methylome_difference=0.5, min_diff_sites=10, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS,
+        min_methylome_difference=0.5, min_diff_sites=10, max_redundancy=0.3, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS,
         frags_per_bin=30, frag_budget=6000, tau=None, temperature=None, delta=None, tau_p=None, rho_base=0.02,
         contam_eps=0.05, min_plasmids_for_fit=5, allow_sharpening=False, min_containment=0.5,
         uninformative_log_bf=3.0, misfit_log_bf=3.0, group_sample_bp=50e6, workers=None, cache_dir=None,
@@ -332,10 +333,23 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
     ref = refine(sc.S, sc.Su, given, testable, temperature, contamination_threshold, include_threshold,
                  methylome_difference=diff, min_difference=min_methylome_difference,
                  p_unknown=p_unknown)
+    # don't include contigs whose sequence the target bin already holds (strain variants, haplotigs):
+    # methylation can't see redundancy (D21)
+    redundancy = np.full(len(targets), np.nan)
+    if max_redundancy < 1:
+        inc = np.flatnonzero(ref.include_bin >= 0)
+        members: dict[int, list[int]] = {}
+        for i, c in enumerate(targets):
+            if given[i] >= 0 and not ref.contaminant[i]:
+                members.setdefault(int(given[i]), []).append(cid[c])
+        redundancy[inc] = inclusion_redundancy(asm, [(cid[targets[i]], int(ref.include_bin[i])) for i in inc], members)
+        drop = inc[redundancy[inc] >= max_redundancy]
+        ref.include_bin[drop] = -1
+        _log(f"redundancy: {len(drop)} of {len(inc)} inclusions dropped (>= {max_redundancy:g} of their k-mers already in the bin)")
     p_unknown = ref.p_unknown
     params.update(p_unknown=p_unknown, contamination_rate=ref.eps)
     P = posterior(sc.S, sc.Su, p_unknown, temperature)
-    write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff)
+    write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff, redundancy)
     _log(f"refinement: p_unknown={p_unknown:.3f}, contamination rate={ref.eps:.3f}; "
          f"{int(ref.contaminant.sum())} of {int(testable.sum())} testable binned contigs flagged, "
          f"{int(((ref.include_bin >= 0) & (given < 0)).sum())} of {int((given < 0).sum())} unbinned included, "

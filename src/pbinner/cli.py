@@ -28,6 +28,9 @@ def main(argv=None):
     r.add_argument("--min-methylome-difference", type=float, default=0.5,
                    help="a contaminant must differ from its bin by at least this in the methylated fraction of "
                         "some motif group (0 = no effect-size requirement)")
+    r.add_argument("--max-redundancy", type=float, default=0.3,
+                   help="don't include a contig when at least this share of its k-mers is already in the bin "
+                        "(1 = no redundancy check)")
     r.add_argument("--include-threshold", type=float, default=0.95,
                    help="include a contig into a bin when that bin's posterior is at least this")
     r.add_argument("--min-cov", type=int, default=1)
@@ -73,7 +76,7 @@ def main(argv=None):
     if a.cmd == "run":
         from .pipeline import run
         run(a.assembly, a.pileup, a.contig_bin, a.motifs, a.out, plasmids=a.plasmids, mtases=a.mtases,
-            score_all=True, contamination_threshold=a.contamination_threshold, min_methylome_difference=a.min_methylome_difference, include_threshold=a.include_threshold, delta=a.delta, tau_p=a.tau_p, rho_base=a.rho_base, contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening,
+            score_all=True, contamination_threshold=a.contamination_threshold, min_methylome_difference=a.min_methylome_difference, max_redundancy=a.max_redundancy, include_threshold=a.include_threshold, delta=a.delta, tau_p=a.tau_p, rho_base=a.rho_base, contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening,
             min_cov=a.min_cov, chunk_size=a.chunk_size, grid_size=a.grid_size, p_unknown=a.p_unknown,
             do_calibrate=not a.no_calibrate, frag_lengths=a.frag_lengths, frags_per_bin=a.frags_per_bin,
             frag_budget=a.frag_budget, workers=a.workers, cache_dir=a.cache_dir, group_sample_bp=a.group_sample_mb * 1e6,
