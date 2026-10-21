@@ -25,9 +25,9 @@ def main(argv=None):
     r.add_argument("--score-all", action="store_true", help="(kept for compatibility: every contig is always scored)")
     r.add_argument("--contamination-threshold", type=float, default=0.5,
                    help="flag a binned contig as contamination when P(foreign) is at least this")
-    r.add_argument("--min-methylome-difference", type=float, default=0.5,
-                   help="a contaminant must differ from its bin by at least this in the methylated fraction of "
-                        "some motif group (0 = no effect-size requirement)")
+    r.add_argument("--min-methylome-difference", type=float, default=0.3,
+                   help="a contaminant's 95%% credible interval for the methylated fraction of some motif group "
+                        "must lie at least this far from its bin's level (0 = no effect-size requirement)")
     r.add_argument("--max-redundancy", type=float, default=0.3,
                    help="don't include a contig when at least this share of its k-mers is already in the bin "
                         "(1 = no redundancy check)")

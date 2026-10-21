@@ -65,14 +65,14 @@ class Refinement:
 def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarray, temperature: float,
            contamination_threshold: float = 0.5, include_threshold: float = 0.95,
            eps_prior=(1.0, 19.0), p_unknown_prior=(1.0, 1.0), p_unknown: float | None = None,
-           methylome_difference: np.ndarray | None = None, min_difference: float = 0.5) -> Refinement:
+           methylome_difference: np.ndarray | None = None, min_difference: float = 0.3) -> Refinement:
     """given[i] = bin index of contig i, -1 if unbinned; testable[i] = binned and scored leave-one-out.
 
-    methylome_difference[i]: the largest difference in methylated fraction between contig i and its
-    bin over motif groups with enough sites. A contaminant must differ by at least min_difference in
-    some group: a foreign genome has a different set of MTases (a motif methylated in one, not the
-    other), whereas small consistent shifts over many sites are within-genome variation that the
-    likelihood alone reads as overwhelming evidence (dev log D20).
+    methylome_difference[i]: over motif groups, the largest distance between the bin's methylated
+    fraction and contig i's 95% credible interval for its own. A contaminant must clear its bin by at
+    least min_difference in some group: a foreign genome has a different set of MTases (a motif
+    methylated in one, not the other), whereas small consistent shifts over many sites are
+    within-genome variation that the likelihood alone reads as overwhelming evidence (dev log D20).
     """
     N, H = S.shape
     Z, Zu = S / temperature, Su / temperature
