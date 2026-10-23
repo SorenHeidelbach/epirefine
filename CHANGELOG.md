@@ -3,6 +3,16 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`scripts/benchmark_suite.py`; history in the dev log).
 
+## 0.4.1 (2026-10-23): faster iteration
+
+- Detectability and the redundancy check run threaded.
+- `benchmarks/benchmark_suite.py --jobs N` runs scenarios in parallel (timings of such runs are
+  marked and not compared with single-job runs).
+
+**Benchmark effect:** results identical (same decisions on all scenarios). The suite takes about a
+third of the wall time with `--jobs 3`; the human_gut timing of the threaded steps is reported with
+the next human_gut run.
+
 ## 0.4.0 (2026-10-23): refinement that holds up on a real gut community
 
 - **Caller model fitted with the bins as labels** (D19). The pooled two-component fit collapsed in
