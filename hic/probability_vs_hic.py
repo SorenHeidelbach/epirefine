@@ -173,6 +173,23 @@ def main():
     x = x.filter(pl.col("genome_outside") >= a.min_outside)
     x.write_csv(out / "contigs.tsv", separator="\t", float_precision=4)
 
+    # one row per contig: the probability each method gives the same statement
+    #   binned:   "the contig belongs to its bin"   pbinner 1 - p_contaminant, Hi-C P(own bin)
+    #   included: "the contig belongs to bin X"     pbinner P(X),             Hi-C P(X)
+    #   unbinned: "the contig belongs to some bin"  pbinner 1 - p_unknown,     Hi-C 1 - P(no bin)
+    own = x.filter(pl.col("comparison") == "own").select("contig", pl.col("p").alias("p_meth"), pl.col("hic_p").alias("p_hic"), "target")
+    inc = x.filter((pl.col("comparison") == "alt") & (pl.col("status") == "included")).select(
+        "contig", pl.col("p").alias("p_meth"), pl.col("hic_p").alias("p_hic"), "target")
+    unb = (base.filter((pl.col("given_bin") == "") & (pl.col("status") != "included") & (pl.col("hic_links") >= a.min_links))
+           .select("contig", (1 - pl.col("p_unknown")).alias("p_meth"), (1 - pl.col("hic_p_none")).alias("p_hic"),
+                   pl.lit("any bin").alias("target")))
+    per = (pl.concat([own.with_columns(pl.lit("binned").alias("statement")),
+                      inc.with_columns(pl.lit("included").alias("statement")),
+                      unb.with_columns(pl.lit("unbinned").alias("statement"))])
+           .join(base.select("contig", "length", "status", "given_bin", "hic_links", "hic_map", "hic_p_map"), on="contig"))
+    per.write_csv(out / "per_contig.tsv", separator="\t", float_precision=4)
+    print("per contig:", dict(per.group_by("status").len().iter_rows()))
+
     rows = []
     for (name,), g in x.group_by("comparison", maintain_order=True):
         idx = np.digitize(g["p"].to_numpy(), EDGES) - 1

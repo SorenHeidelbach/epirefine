@@ -341,4 +341,5 @@ rule hic_probability_plot:
     conda:
         "envs/r.yaml"
     shell:
-        "Rscript {HIC}/plot_probability_vs_hic.R --dir $(dirname {input}) --sample {wildcards.sample} > {log} 2>&1"
+        "(Rscript {HIC}/plot_probability_vs_hic.R --dir $(dirname {input}) --sample {wildcards.sample} && "
+        "Rscript {HIC}/plot_contig_probabilities.R --dir $(dirname {input}) --sample {wildcards.sample}) > {log} 2>&1"
