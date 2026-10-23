@@ -317,7 +317,7 @@ rule hic_probability:
     input:
         decisions=f"{OUT}/{{sample}}/pbinner/contig_decisions.tsv",
         links=f"{OUT}/{{sample}}/hic/contig_bin_links.tsv",
-        calls=f"{OUT}/{{sample}}/hic/hic_calls.tsv",
+        contig_bin=s("contig_bin"),
     output:
         f"{OUT}/{{sample}}/hic_probability/calibration.tsv",
         f"{OUT}/{{sample}}/hic_probability/contigs.tsv",
@@ -327,4 +327,4 @@ rule hic_probability:
         "../hic/env.yaml"
     shell:
         "python {HIC}/probability_vs_hic.py --decisions {input.decisions} --links {input.links} "
-        "--hic-calls {input.calls} --out $(dirname {output[0]}) > {log} 2>&1"
+        "--contig-bin {input.contig_bin} --out $(dirname {output[0]}) > {log} 2>&1"
