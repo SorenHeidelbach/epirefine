@@ -57,15 +57,23 @@ class Refinement:
     p_foreign: np.ndarray      # [N] P(foreign | data) for testable binned contigs, nan otherwise
     best_alt: np.ndarray       # [N] best explanation other than the contig's own bin (H = unknown)
     p_best_alt: np.ndarray     # [N] its probability given that the contig is foreign / unbinned
-    contaminant: np.ndarray    # [N] bool
+    contaminant: np.ndarray    # [N] bool (P(foreign) above threshold and a methylome difference)
     candidate: np.ndarray      # [N] bool: unbinned, or flagged contaminant
     include_bin: np.ndarray    # [N] bin index to include into (high confidence), -1 otherwise
 
 
 def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarray, temperature: float,
            contamination_threshold: float = 0.5, include_threshold: float = 0.95,
-           eps_prior=(1.0, 19.0), p_unknown_prior=(1.0, 1.0), p_unknown: float | None = None) -> Refinement:
-    """given[i] = bin index of contig i, -1 if unbinned; testable[i] = binned and scored leave-one-out."""
+           eps_prior=(1.0, 19.0), p_unknown_prior=(1.0, 1.0), p_unknown: float | None = None,
+           methylome_difference: np.ndarray | None = None, min_difference: float = 0.3) -> Refinement:
+    """given[i] = bin index of contig i, -1 if unbinned; testable[i] = binned and scored leave-one-out.
+
+    methylome_difference[i]: over motif groups, the largest distance between the bin's methylated
+    fraction and contig i's 95% credible interval for its own. A contaminant must clear its bin by at
+    least min_difference in some group: a foreign genome has a different set of MTases (a motif
+    methylated in one, not the other), whereas small consistent shifts over many sites are
+    within-genome variation that the likelihood alone reads as overwhelming evidence (dev log D20).
+    """
     N, H = S.shape
     Z, Zu = S / temperature, Su / temperature
     unb = given < 0
@@ -92,6 +100,8 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     p_foreign[t] = r
     contaminant = np.zeros(N, bool)
     contaminant[t] = r >= contamination_threshold
+    if methylome_difference is not None:
+        contaminant &= methylome_difference >= min_difference
 
     candidate = unb | contaminant
     include_bin = np.where(candidate & (best_alt < H) & (p_best_alt >= include_threshold), best_alt, -1)
@@ -104,7 +114,8 @@ def confidence(p: float) -> str:
 
 
 def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bins: list[str], ref: Refinement,
-                  n_sites: np.ndarray, sole: set, P: np.ndarray):
+                  n_sites: np.ndarray, sole: set, P: np.ndarray, methylome_difference: np.ndarray | None = None,
+                  redundancy: np.ndarray | None = None):
     """Nanomotif-compatible files + pbinner's per-contig decision table."""
     H = len(bins)
     labels = bins + ["unknown"]
@@ -150,6 +161,8 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
     for i, c in enumerate(contigs):
         if c in sole:
             status[i] = "sole_contig_of_bin"
+    if redundancy is not None:
+        status[~np.isnan(redundancy) & (ref.include_bin < 0)] = "redundant"
     status[(ref.include_bin >= 0) & (given < 0)] = "included"
     status[(ref.include_bin >= 0) & (given >= 0)] = "moved"
     new_bin = np.array([bins[ref.include_bin[i]] if ref.include_bin[i] >= 0
@@ -158,6 +171,8 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
     pl.DataFrame({
         "contig": contigs, "length": length, "n_sites": n_sites, "given_bin": given_lbl, "status": status,
         "new_bin": new_bin, "p_contaminant": ref.p_foreign,
+        "methylome_difference": methylome_difference if methylome_difference is not None else np.full(len(contigs), np.nan),
+        "redundancy_with_bin": redundancy if redundancy is not None else np.full(len(contigs), np.nan),
         "best_alternative": [labels[k] for k in ref.best_alt], "p_best_alternative": ref.p_best_alt,
         "map": [labels[k] for k in P.argmax(1)], "p_map": P.max(1), "p_unknown": P[:, -1],
     }).write_csv(out / "contig_decisions.tsv", separator="\t", float_precision=4)

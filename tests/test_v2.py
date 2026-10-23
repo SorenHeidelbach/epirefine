@@ -179,3 +179,46 @@ def test_refine_flags_contaminant_includes_member_and_leaves_orphan():
     assert r.include_bin.tolist() == [-1, 1, -1, 2, -1, -1]
     w, resp = em_weight(np.zeros(100), np.r_[np.full(20, 10.0), np.full(80, -10.0)])
     assert abs(w - 0.2) < 0.01
+
+
+def test_caller_fit_by_bin_recovers_rare_methylated_component():
+    """One motif methylated in 2 of 40 bins: the pooled fit degenerates, the bin-labelled fit doesn't."""
+    from pbinner.detection import fit_detection, fit_detection_by_bin
+    rng = np.random.default_rng(7)
+    rows = []
+    for b in range(40):
+        meth = b < 2
+        n = rng.poisson(25, 300) + 1
+        mu = np.where(meth & (rng.random(300) < 0.95), 0.85, 0.02)
+        k = rng.binomial(n, rng.beta(mu * 12, (1 - mu) * 12))
+        rows.append(pl.DataFrame({"group": 0, "bin": b, "n": n, "k": k}))
+    sites = pl.concat(rows)
+    counts = sites.group_by("group", "bin", "n", "k").agg(pl.len().alias("w"))
+    by_bin = fit_detection_by_bin(counts, {0: "a"})[0]
+    assert abs(by_bin.mu1 - 0.85) < 0.05 and abs(by_bin.mu0 - 0.02) < 0.01
+
+
+def test_contamination_needs_a_methylome_difference():
+    from pbinner.refine import refine
+    S = np.array([[-50., -50, -50], [-50., -50, -50]])  # both fit their bin (0) badly, nothing else well
+    Su = np.array([0., 0.])
+    given = np.array([0, 0])
+    small_shift, real = 0.15, 0.9
+    r = refine(S, Su, given, given >= 0, 1.0, methylome_difference=np.array([small_shift, real]), min_difference=0.5)
+    assert r.contaminant.tolist() == [False, True]
+
+
+def test_redundancy_containment():
+    from pbinner.motifs import encode
+    from pbinner.redundancy import containment, sketch
+    rng = np.random.default_rng(11)
+    genome = "".join(rng.choice(list("ACGT"), 200_000))
+    variant = list(genome[50_000:80_000])
+    for p in rng.choice(len(variant), int(0.01 * len(variant)), replace=False):  # 99% identity
+        variant[p] = "ACGT"[("ACGT".index(variant[p]) + 1) % 4]
+    other = "".join(rng.choice(list("ACGT"), 30_000))
+    g = sketch(encode(genome))
+    assert containment(sketch(encode("".join(variant))), g) > 0.6
+    assert containment(sketch(encode(other)), g) < 0.05
+    rc = genome[120_000:150_000][::-1].translate(str.maketrans("ACGT", "TGCA"))
+    assert containment(sketch(encode(rc)), g) > 0.95  # canonical k-mers: strand doesn't matter
