@@ -1,7 +1,7 @@
 # Changelog
 
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
-effect on the benchmark suite (`scripts/benchmark_suite.py`; history in the dev log).
+effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
 ## 0.3.0 (2026-10-21): refinement workflow with CheckM2
 

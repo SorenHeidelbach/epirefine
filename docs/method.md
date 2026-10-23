@@ -1,5 +1,15 @@
 # pbinner: method
 
+> **Status (0.5.0):** pbinner is now bin refinement only (contamination detection and contig
+> inclusion). This document was written for the plasmid-host version and still describes the
+> shared model (sites, caller model, grid, host profiles, population prior, "unknown", calibration)
+> correctly. Obsolete: own MTases (4.7, 6.5), the plasmid parameters δ and τ_p (6.6), plasmid
+> statuses and detectability (8.2). Not yet described here: the refinement decisions (EM share of
+> foreign contigs per bin, the credible-interval effect size, inclusion posterior), the caller
+> model fitted with bins as labels, the "relative of a bin" unknown, the logit-normal variation
+> kernel and the k-mer redundancy check. Those are documented in the dev log's DECISIONS.md
+> (D11, D19, D20, D21) and in the docstrings of `refine.py`, `detection.py` and `redundancy.py`.
+
 **Probabilistic plasmid–host assignment from nanopore DNA methylation**
 
 This document describes the statistical model behind pbinner v2, how each part is estimated, how

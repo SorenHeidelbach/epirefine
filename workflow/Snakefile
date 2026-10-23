@@ -2,16 +2,19 @@
 
 For each sample: Nanomotif (detect_contamination + include_contigs) and pbinner refine the same bins
 from the same motifs and pileup; the original and both refined bin sets are written as FASTA and
-scored with CheckM2; an R script compares them.
+scored with CheckM2; an R script compares them. Samples with Hi-C reads (`hic_r1`, `hic_r2`) are
+also scored against Hi-C contacts with the scripts in hic/ (rules hic_*).
 
     snakemake -s workflow/Snakefile --configfile workflow/config.yaml --use-conda --cores 16
 
 Outputs per sample in <outdir>/<sample>/: nanomotif/, pbinner/, bins/<method>/, checkm2/<method>/,
-comparison/ (summary.tsv, bins.tsv, figures).
+comparison/ (summary.tsv, bins.tsv, figures), and with Hi-C hic/ (contacts, calls) and
+hic_validation/ (summary.tsv, contigs.tsv).
 """
 from pathlib import Path
 
 REPO = Path(workflow.basedir).parent
+HIC = REPO / "hic"
 OUT = config.get("outdir", "results")
 SAMPLES = config["samples"]
 METHODS = ["original", "nanomotif", "pbinner"]
@@ -39,9 +42,13 @@ def contig_bin_of(wc):
             "pbinner": f"{OUT}/{wc.sample}/pbinner/new_contig_bin.tsv"}[wc.method]
 
 
+HIC_SAMPLES = [x for x in SAMPLES if SAMPLES[x].get("hic_r1")]
+
+
 rule all:
     input:
         expand(f"{OUT}/{{sample}}/comparison/summary.tsv", sample=SAMPLES),
+        expand(f"{OUT}/{{sample}}/hic_validation/summary.tsv", sample=HIC_SAMPLES),
 
 
 rule nanomotif:
@@ -76,7 +83,6 @@ rule pbinner:
     params:
         exe=config.get("pbinner", str(REPO / ".venv/bin/pbinner")),
         cache=lambda wc: f"--cache-dir {SAMPLES[wc.sample]['cache_dir']}" if SAMPLES[wc.sample].get("cache_dir") else "",
-        plasmids=lambda wc: f"--plasmids {SAMPLES[wc.sample]['plasmids']}" if SAMPLES[wc.sample].get("plasmids") else "",
         extra=config.get("pbinner_extra", ""),
     log:
         f"{OUT}/{{sample}}/logs/pbinner.log",
@@ -87,7 +93,7 @@ rule pbinner:
         # pbinner runs from the repository's own environment (see CLAUDE.md), not a conda env
         "{params.exe} run --assembly {input.assembly} --pileup {input.pileup} --contig-bin {input.contig_bin} "
         "--motifs {input.motifs} --out $(dirname {output.new}) --workers {threads} {params.cache} "
-        "{params.plasmids} {params.extra} > {log} 2>&1"
+        "{params.extra} > {log} 2>&1"
 
 
 rule write_bins:
@@ -162,3 +168,86 @@ rule contig_lengths:
         f"{OUT}/{{sample}}/contig_lengths.tsv",
     shell:
         "python {workflow.basedir}/scripts/write_bins.py --assembly {input} --lengths-only {output}"
+
+
+# --- Hi-C validation (scripts in hic/; see hic/README.md) ---
+
+rule hic_index:
+    input:
+        s("assembly"),
+    output:
+        f"{OUT}/{{sample}}/hic/assembly.chromap.index",
+    log:
+        f"{OUT}/{{sample}}/logs/hic_index.log",
+    conda:
+        "../hic/env.yaml"
+    shell:
+        "chromap -i -r {input} -o {output} > {log} 2>&1"
+
+
+def hic_index_of(wc):
+    # a prebuilt index (config hic_index) saves ~20 min on a 2.5 Gb assembly
+    return SAMPLES[wc.sample].get("hic_index", f"{OUT}/{wc.sample}/hic/assembly.chromap.index")
+
+
+rule hic_map:
+    input:
+        assembly=s("assembly"), index=hic_index_of, r1=s("hic_r1"), r2=s("hic_r2"),
+    output:
+        pairs=temp(f"{OUT}/{{sample}}/hic/contacts.pairs"),
+    params:
+        lines=lambda wc: 4 * int(SAMPLES[wc.sample].get("hic_max_pairs", config.get("hic_max_pairs", 100_000_000))),
+        fifo=lambda wc: f"{OUT}/{wc.sample}/hic/fifo",
+    log:
+        f"{OUT}/{{sample}}/logs/hic_map.log",
+    benchmark:
+        f"{OUT}/{{sample}}/benchmarks/hic_map.tsv"
+    threads: THREADS
+    conda:
+        "../hic/env.yaml"
+    shell:
+        # the first hic_max_pairs read pairs, streamed through named pipes (the FASTQs are ~150 GB each)
+        "rm -f {params.fifo}_1 {params.fifo}_2 && mkfifo {params.fifo}_1 {params.fifo}_2 && "
+        "(head -n {params.lines} {input.r1} > {params.fifo}_1 &) && "
+        "(head -n {params.lines} {input.r2} > {params.fifo}_2 &) && "
+        "chromap --preset hic -t {threads} -x {input.index} -r {input.assembly} "
+        "-1 {params.fifo}_1 -2 {params.fifo}_2 -o {output.pairs} > {log} 2>&1; "
+        "status=$?; rm -f {params.fifo}_1 {params.fifo}_2; exit $status"
+
+
+rule hic_contacts:
+    input:
+        pairs=f"{OUT}/{{sample}}/hic/contacts.pairs",
+        contig_bin=s("contig_bin"),
+    output:
+        calls=f"{OUT}/{{sample}}/hic/hic_calls.tsv",
+        links=f"{OUT}/{{sample}}/hic/contig_bin_links.tsv",
+        pairs=f"{OUT}/{{sample}}/hic/contig_pairs.parquet",
+    log:
+        f"{OUT}/{{sample}}/logs/hic_contacts.log",
+    conda:
+        "../hic/env.yaml"
+    shell:
+        "python {HIC}/contacts.py --pairs {input.pairs} --contig-bin {input.contig_bin} "
+        "--out $(dirname {output.calls}) > {log} 2>&1"
+
+
+rule hic_validate:
+    input:
+        calls=f"{OUT}/{{sample}}/hic/hic_calls.tsv",
+        contig_bin=s("contig_bin"),
+        tables=lambda wc: [f"{OUT}/{wc.sample}/{m}/new_contig_bin.tsv" for m in methods_of(wc.sample) if m != "original"],
+    output:
+        summary=f"{OUT}/{{sample}}/hic_validation/summary.tsv",
+        contigs=f"{OUT}/{{sample}}/hic_validation/contigs.tsv",
+    params:
+        methods=lambda wc: " ".join(f"--method {m} {OUT}/{wc.sample}/{m}/new_contig_bin.tsv "
+                                    f"{OUT}/{wc.sample}/{m}/bin_contamination.tsv"
+                                    for m in methods_of(wc.sample) if m != "original"),
+    log:
+        f"{OUT}/{{sample}}/logs/hic_validate.log",
+    conda:
+        "../hic/env.yaml"
+    shell:
+        "python {HIC}/validate.py --hic-calls {input.calls} --contig-bin {input.contig_bin} {params.methods} "
+        "--out $(dirname {output.summary}) > {log} 2>&1"

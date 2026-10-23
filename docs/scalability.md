@@ -18,7 +18,7 @@ argument; the table says which.
 
 ## 2. Measurements
 
-**Benchmark script:** `scripts/scale_components.py`. It times pbinner's real functions at the
+**Benchmark script:** `scripts/scale_components.py` (removed in 0.5.0; the benchmark suite now measures speed). It times pbinner's real functions at the
 target size, scaling linearly from a timed fraction where a full run would exceed the machine.
 
 **Inputs:**
@@ -54,7 +54,7 @@ hundred GB of RAM, so it is infeasible. The bottlenecks are not where big-O alon
 
 ## 3. Prototype timings of the alternatives
 
-Timed with `scripts/speedup_prototypes.py` on this machine (single thread):
+Timed with `dev/speedup_prototypes.py` on this machine (single thread):
 
 | Operation | Current | Alternative | Measured speed-up |
 |---|---|---|---|
@@ -195,7 +195,7 @@ is more efficient code for the same computation.
 | **Total** | **≈ 2 days, several hundred GB RAM** | **≈ 45–75 min on 16 cores, ≈ 10–15 GB RAM** | |
 
 These are estimates. Only the four prototype speed-ups in §3 were measured; the rest follow from the
-measured per-unit costs. After implementation, the end-to-end benchmark (`scripts/scale_bench.py`)
+measured per-unit costs. After implementation, the end-to-end benchmark (`scripts/scale_bench.py`, removed in 0.5.0)
 should be rerun at increasing bin counts to confirm them.
 
 **Scaling after the plan:**
