@@ -5,7 +5,7 @@ varied length. This cuts every contig longer than --max-len into consecutive pie
 log-uniform in [--min-len, --max-len], writes the pieces as a new assembly, rewrites the pileup in
 piece coordinates (same 18 columns), and gives every piece the `expected` bin of its parent contig.
 
-    python scripts/fragment_assembly.py --assembly asm.fasta --pileup pileup.bed \
+    python benchmarks/fragment_assembly.py --assembly asm.fasta --pileup pileup.bed \
         --truth truth_all_contigs.tsv --out zymo_frag
 
 Writes: assembly.fasta, pileup.bed, truth.tsv (contig, parent, start, length, expected, species).

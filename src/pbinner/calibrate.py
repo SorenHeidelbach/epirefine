@@ -1,7 +1,7 @@
-"""Self-calibration with pseudo-plasmids.
+"""Self-calibration with pseudo-contigs.
 
-Host contigs are cut into fragments of plasmid-like lengths. Each fragment is scored as if it were
-a plasmid, with the chunks it overlaps removed from its own bin's profile (leave-one-out), so the
+Binned contigs are cut into fragments of typical contig lengths. Each fragment is scored as if it
+were unbinned, with the chunks it overlaps removed from its own bin's profile (leave-one-out), so the
 true answer is known without external ground truth.
 
 Two tests:
@@ -16,8 +16,6 @@ Uses:
   * accuracy / calibration / credible-set coverage are reported per fragment length, giving a
     sample-specific detection limit.
 
-Caveat: fragments are chromosomal. Plasmid-specific effects (own MTases, under-methylation,
-copy number) are not represented; that is v2.
 """
 from __future__ import annotations
 
@@ -42,7 +40,7 @@ def fragments_per_bin(budget: int, n_lengths: int, n_bins: int, cap: int) -> int
 
 
 def select_fragments(host_contigs: pl.DataFrame, lengths, n_per_bin: int, rng: np.random.Generator) -> pl.DataFrame:
-    """Pseudo-plasmids: up to n_per_bin random tiles of each length per bin.
+    """Pseudo-contigs: up to n_per_bin random tiles of each length per bin.
 
     host_contigs: contig (any id type), bin_idx, length. Returns unit, contig, bin_idx, tile, length, start, end.
     """
@@ -112,18 +110,17 @@ def _reliability(P: np.ndarray, truth: np.ndarray, test: str) -> list[dict]:
 
 
 def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFrame, L_frag,
-              chunks_of, p_unknown, rho_base=0.02, H_frag=None, taus=DEFAULT_TAUS, temps=DEFAULT_TEMPS,
+              chunks_of, p_unknown, H_frag=None, taus=DEFAULT_TAUS, temps=DEFAULT_TEMPS,
               lookalike_dist=0.15, decidable_bf=3.0, etas=DEFAULT_ETAS, lams=DEFAULT_LAMS,
               allow_sharpening=False, n_sites_frag=None, log=print, **model_kw):
     fbin = frags["bin_idx"].to_numpy()
     H = n_bins
-    rho = np.zeros(L_frag.shape[:2])  # pseudo-contigs are chromosomal: no own-MTase explanation
 
     def own_and_scores(model):
-        sc = model.score(L_frag, rho, plasmid=False)
+        sc = model.score(L_frag)
         A_own = np.empty(L_frag.shape[:2])
         for i in range(len(fbin)):
-            A_own[i] = model.loo_rescore(sc, i, fbin[i], chunks_of[i], rho[i])
+            A_own[i] = model.loo_rescore(sc, i, fbin[i], chunks_of[i])
         # fragments from chunks the robust model calls foreign to their bin carry a wrong label
         keep = np.array([bool((model.w[ch] >= 0.5).all()) for ch in chunks_of])
         return sc, A_own, keep
@@ -162,7 +159,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         log(f"  {int((~keep).sum())} fragments excluded: from chunks flagged foreign to their bin")
     kidx = np.flatnonzero(keep)
     S, fbin, frags_k = sc_best.S[kidx], fbin[kidx], frags[kidx]
-    Su_comm, cu, A_own_k = sc_best.Su_comm[kidx], sc_best.cu[kidx], A_own_best[kidx]
+    Su_comm, Au, A_own_k = sc_best.Su_comm[kidx], sc_best.Au[kidx], A_own_best[kidx]
     if H_frag is not None:
         H_frag = (H_frag[0][kidx], H_frag[1][kidx])
 
@@ -185,7 +182,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     # bin over its nearest competitor (Asimov, from site positions and coverage only) >= decidable_bf.
     decidable = np.ones(len(fbin), bool)
     if H_frag is not None and H > 1:
-        m_exp, _, _ = margin_vs_competitors(best_model, *H_frag, fbin, False, 1.0)
+        m_exp, _, _ = margin_vs_competitors(best_model, *H_frag, fbin, 1.0)
         decidable = m_exp >= decidable_bf
     distinct = ~f_look & decidable
     log(f"  test B uses {int(distinct.sum())} of {len(fbin)} fragments (bin decidable from its nearest competitor)")
@@ -194,8 +191,8 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     # group's level from that bin with prob 1 - eta (weight 1 - lam). (eta, lam, T) are fitted together
     # on test A + decidable test B; in test B the removed bin is not offered as a relative either.
     def relatives(eta):
-        _, R = summed_scores(sc_best.Lp[kidx], best_model.log_prof, sc_best.O[kidx], rho[kidx], rel=(eta, cu))
-        R[np.arange(len(fbin)), fbin] = np.logaddexp(np.log1p(-eta) + A_own_k, np.log(eta) + cu).sum(1)  # leave-out
+        _, R = summed_scores(sc_best.Lp[kidx], best_model.log_prof, rel=(eta, Au))
+        R[np.arange(len(fbin)), fbin] = np.logaddexp(np.log1p(-eta) + A_own_k, np.log(eta) + Au).sum(1)  # leave-out
         return R
 
     def logloss(T, Su_a, Su_b):
@@ -221,8 +218,8 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
                                           (eta, lam, T, *logloss(T, Su_a, Su_b)))))
     fit = min(temp_rows, key=lambda r: r["log_loss"])
     fitted_temperature = fit["temperature"]
-    # Never sharpen: pseudo-plasmids are chromosomal and lack plasmid-specific uncertainty, so they
-    # can reveal overconfidence but cannot justify making plasmid posteriors more confident.
+    # Never sharpen: pseudo-contigs are cut from binned contigs, which are easier to place than real
+    # unbinned contigs; they can reveal overconfidence but not justify more confidence.
     if not allow_sharpening:
         fit = min((r for r in temp_rows if r["temperature"] >= 1.0), key=lambda r: r["log_loss"])
     temperature, eta, lam = fit["temperature"], fit["eta"], fit["lam"]
@@ -275,7 +272,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     assign_rows, frag_extra = [], {}
     if H_frag is not None:
         Pa = posterior(S, Su, p_unknown, temperature)
-        margin, nearest, vs_unk = margin_vs_competitors(best_model, *H_frag, fbin, False, temperature)
+        margin, nearest, vs_unk = margin_vs_competitors(best_model, *H_frag, fbin, temperature)
         frag_extra = {"expected_log_bf_vs_nearest": margin, "expected_log_bf_vs_unknown": vs_unk,
                       "posterior_true": Pa[np.arange(len(fbin)), fbin], "map_correct": Pa.argmax(1) == fbin}
         edges = [-np.inf, 0.5, 1, 2, 3, 5, 10, np.inf]

@@ -311,10 +311,10 @@ def _unit_part(part: str, cfg: dict) -> dict:
         sub = pl.DataFrame({"unit": local, "group": grp[rows], "n": n[rows], "k": k[rows]})
         res = {"ids": ids, "L": unit_loglik(sub, len(ids), M, det, grid, dtype=np.float32),
                "n_sites": np.bincount(local, minlength=len(ids))}
-        if with_h:
+        gs = sub.group_by("unit", "group").len()
+        res["n_sites_group"] = (ids[gs["unit"].to_numpy()], gs["group"].to_numpy(), gs["len"].to_numpy())
+        if with_h:  # expected-evidence tables: calibration fragments only
             res["H"] = expected_tables(sub.select("unit", "group", "n"), len(ids), M, det, grid, dtype=np.float32)
-            gs = sub.group_by("unit", "group").len()
-            res["n_sites_group"] = (ids[gs["unit"].to_numpy()], gs["group"].to_numpy(), gs["len"].to_numpy())
         return res
 
     out = {}
@@ -325,7 +325,7 @@ def _unit_part(part: str, cfg: dict) -> dict:
     to = cfg["target_of"][cid]
     rows = np.flatnonzero(to >= 0)
     if len(rows):
-        out["targets"] = tables(to[rows], rows, True)
+        out["targets"] = tables(to[rows], rows, False)
     fr = cfg["frags"]
     if fr is not None and fr.height:
         # a site can lie in several fragments (of different lengths): one row per (site, fragment)
@@ -342,8 +342,8 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
                 frags: pl.DataFrame | None, workers: int | None = None, log=print) -> dict:
     """Likelihood tables for host chunks, targets and calibration fragments, in parallel over parts.
 
-    Returns float32 arrays L_chunks [K, M, G], L_t [U, M, G], H_t = (H1, H0), L_frag, H_frag, and
-    site counts per chunk, per target, per (target, group) and per fragment.
+    Returns float32 arrays L_chunks [K, M, G], L_t [U, M, G], L_frag, H_frag = (H1, H0), and site
+    counts per chunk, per target, per (target, group) and per fragment.
     """
     G = grid_size
     cfg = {"grid_size": G, "n_groups": n_groups, "min_cov": min_cov, "chunk_size": chunk_size,
@@ -354,7 +354,6 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
     res = {"L_chunks": np.zeros((n_chunks, n_groups, G), np.float32),
            "chunk_sites": np.zeros(n_chunks, np.int64),
            "L_t": np.zeros((n_targets, n_groups, G), np.float32),
-           "H_t": (np.zeros((n_targets, n_groups, G), np.float32), np.zeros((n_targets, n_groups, G), np.float32)),
            "n_sites_t": np.zeros(n_targets, np.int64),
            "n_sites_group_t": np.zeros((n_targets, n_groups), np.int32),
            "L_frag": np.zeros((n_frags, n_groups, G), np.float32),
@@ -372,7 +371,6 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
                 if "targets" in r:
                     t = r["targets"]
                     res["L_t"][t["ids"]] = t["L"]; res["n_sites_t"][t["ids"]] = t["n_sites"]
-                    res["H_t"][0][t["ids"]], res["H_t"][1][t["ids"]] = t["H"]
                     u, g, n = t["n_sites_group"]
                     res["n_sites_group_t"][u, g] = n
                 if "frags" in r:

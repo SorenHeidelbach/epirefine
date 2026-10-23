@@ -1,24 +1,22 @@
-"""Hierarchical model linking read counts -> sites -> unit -> host -> population.
+"""Hierarchical model linking read counts -> sites -> unit -> bin -> population.
 
-    k_i | n_i, s_i          ~ BetaBinomial (detection model, see detection.py)
+    k_i | n_i, s_i          ~ BetaBinomial (caller model, see detection.py)
     s_i | phi_u             ~ Bernoulli(phi_u)              site i in unit u methylated?
-    w_um                    ~ Bernoulli(rho_um)             unit carries its own MTase for group m (v2)
-    phi_um | w_um = 1       ~ q_m                           "present" part of the population prior
-    phi_um | w_um = 0, h    ~ Beta(d phi_hm tau, (1 - d phi_hm) tau)
-                                                            d = 1, tau = tau_c for chromosome chunks
-                                                            d = delta, tau = tau_p for plasmids (v2)
+    phi_um | h              ~ kernel around phi_hm          between-unit variation (Beta(tau) or
+                                                            logit-normal(sigma), see grid.py)
     phi_hm                  ~ pi_m                          population prior per motif group (NPMLE)
-    host chunk k            ~ (1 - eps) host + eps foreign  robust host profiles (v2)
+    host chunk k            ~ (1 - eps) bin + eps foreign   robust bin profiles
+    unbinned genome         ~ community draw (lam) or a relative of some bin (1 - lam), whose level
+                              in each group comes from that bin with prob 1 - eta
 
-A "unit" is any stretch of sequence scored as one entity: a plasmid contig, a chunk of a host
-contig, or a pseudo-plasmid fragment. Everything is evaluated on a discrete phi grid.
+A "unit" is any stretch of sequence scored as one entity: a contig, a chunk of a binned contig, or a
+pseudo-contig fragment used for calibration. Everything is evaluated on a discrete phi grid.
 
 Arrays:
     L[u, m, g]   log P(sites of unit u, group m | phi_u = x_g)
     Lp[u, m, g]  log P(sites of unit u, group m | phi_h = x_g)    (phi_u integrated out)
     ell[h, m, g] weighted sum of Lp over the host chunks of bin h
-    A[u, h, m]   log P(sites of u in group m | host h, no own MTase)
-    O[u, m]      log P(sites of u in group m | own MTase)
+    A[u, h, m]   log P(sites of u in group m | bin h)
 """
 from __future__ import annotations
 
@@ -88,15 +86,6 @@ def marginalize_unit(L: np.ndarray, T, batch: int = 2048) -> np.ndarray:
     return out
 
 
-def propagate(log_p: np.ndarray, T) -> np.ndarray:
-    """log density of a unit's phi given log densities of its host's phi: p_unit = p_host @ T, per group."""
-    parts = [(slice(None), T)] if isinstance(T, np.ndarray) else T
-    out = np.empty_like(log_p)
-    for ms, Tm in parts:
-        out[..., ms, :] = np.log(np.maximum(np.exp(log_p[..., ms, :]) @ Tm, 1e-300))
-    return out
-
-
 def transition_spec(grid: Grid, tau, delta: float = 1.0):
     """One transition matrix for a scalar tau, or (groups, matrix) pairs for a per-group tau array."""
     if np.ndim(tau) == 0:
@@ -156,20 +145,6 @@ def fit_population_prior(ell: np.ndarray, group_modtype: list[str], lam: float =
     return (np.log(out), pis) if return_raw else np.log(out)
 
 
-def own_density(log_pi: np.ndarray, grid: Grid, threshold: float = 0.5) -> np.ndarray:
-    """log q[m, g]: phi of a unit methylated by its own MTase = the 'present' part of pi_m.
-
-    Falls back to Beta(20, 2) where the community has no host with the group present.
-    """
-    p = np.exp(log_pi)
-    p[:, grid.x <= threshold] = 0.0
-    fallback = grid.beta_mass(20, 2)
-    empty = p.sum(1) < 1e-9
-    p[empty] = fallback
-    p /= p.sum(1, keepdims=True)
-    return np.log(np.maximum(p, 1e-300))
-
-
 def host_profiles(ell: np.ndarray, log_pi: np.ndarray) -> np.ndarray:
     """log posterior over phi_h per (bin, group)."""
     lp = ell + log_pi[None, :, :]
@@ -196,21 +171,17 @@ def _n_threads():
     return min(16, os.cpu_count() or 1)
 
 
-def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, O: np.ndarray | None = None,
-                  rho: np.ndarray | None = None, rel: tuple | None = None):
-    """S[u, h] = sum_m log P(group m of u | h), optionally mixed with the own-MTase term O.
+def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None):
+    """S[u, h] = sum_m log P(group m of u | h).
 
-    Equal to group_scores(...).sum(-1) (or combine(...)[0]) without the [U, H, M] tensor: groups
-    are accumulated one at a time, split over threads (numpy releases the GIL).
-    rel = (eta, cu[U, M]) also returns R[u, h] = sum_m log((1 - eta) P(group m | h) + eta exp(cu_um)):
+    Equal to group_scores(...).sum(-1) without the [U, H, M] tensor: groups are accumulated one at
+    a time, split over threads (numpy releases the GIL).
+    rel = (eta, Au[U, M]) also returns R[u, h] = sum_m log((1 - eta) P(group m | h) + eta exp(Au_um)):
     the score of an unbinned relative of bin h, whose level in each group is h's with prob 1 - eta
     and the community's otherwise.
     """
     U, M, _ = Lp.shape
     H = log_prof.shape[0]
-    if O is not None:
-        rho = np.clip(rho, 1e-9, 1 - 1e-9)
-        l1, l0 = np.log1p(-rho), np.log(rho) + O
     if rel is not None:
         le1, le0 = np.log1p(-rel[0]), np.log(rel[0]) + rel[1]
 
@@ -219,8 +190,6 @@ def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, O: np.ndarray | None = N
         accR = np.zeros((U, H)) if rel is not None else None
         for m in ms:
             A = _group_term(Lp[:, m, :], log_prof[:, m, :])
-            if O is not None:
-                A = np.logaddexp(A + l1[:, m, None], l0[:, m, None])
             acc += A
             if rel is not None:
                 accR += np.logaddexp(A + le1, le0[:, m, None])
@@ -262,15 +231,6 @@ def score_units(Lp: np.ndarray, log_prof: np.ndarray) -> np.ndarray:
     return summed_scores(Lp, log_prof)
 
 
-def combine(A: np.ndarray, O: np.ndarray, rho: np.ndarray):
-    """Mix host and own-MTase explanations per group. Returns S[u, h] and P(w_um = 1 | u, h)."""
-    rho = np.clip(rho, 1e-9, 1 - 1e-9)
-    la = np.log1p(-rho)[:, None, :] + A
-    lo = np.log(rho)[:, None, :] + O[:, None, :]
-    tot = np.logaddexp(la, lo)
-    return tot.sum(-1), np.exp(lo - tot)
-
-
 def posterior(S_hosts: np.ndarray, S_unknown: np.ndarray, p_unknown: float, temperature: float = 1.0,
               host_mask: np.ndarray | None = None) -> np.ndarray:
     """Posterior over [bins..., unknown]. host_mask[u, h] = False removes bin h as a candidate for unit u."""
@@ -292,15 +252,11 @@ def credible_set(post_row: np.ndarray, labels: list[str], level: float = 0.95) -
 @dataclass
 class Scores:
     S: np.ndarray        # [U, H]   log P(unit | bin)
-    Su: np.ndarray       # [U]      log P(unit | unknown host)
-    Au: np.ndarray       # [U, M]   per-group unknown-host terms (no own MTase)
-    O: np.ndarray        # [U, M]   per-group own-MTase terms
-    Pwu: np.ndarray      # [U, M]   P(own MTase | unit, unknown host)
+    Su: np.ndarray       # [U]      log P(unit | unbinned genome)
+    Au: np.ndarray       # [U, M]   per-group terms under a community draw
     Lp: np.ndarray       # [U, M, G]
-    rho: np.ndarray      # [U, M]
-    Su_comm: np.ndarray | None = None   # [U]     community part of the unknown score
-    cu: np.ndarray | None = None        # [U, M]  per-group unknown terms (own MTase mixed in)
-    R: np.ndarray | None = None         # [U, H]  score as an unbinned relative of each bin
+    Su_comm: np.ndarray  # [U]      community part of the unbinned-genome score
+    R: np.ndarray        # [U, H]   score as an unbinned relative of each bin
 
 
 class FittedModel:
@@ -332,8 +288,6 @@ class FittedModel:
                 self.log_prof = host_profiles(self.ell, self.log_pi)
                 break
         self.raw_pi = raw
-        self.log_q = own_density(self.log_pi, grid)
-        self.set_plasmid_params(1.0, tau)
 
     def _outlier_responsibility(self, eps: float, batch: int = 200) -> np.ndarray:
         """P(chunk is foreign to its bin): leave-chunk-out bin profile vs a random community host.
@@ -362,63 +316,46 @@ class FittedModel:
         with ThreadPoolExecutor(_n_threads()) as ex:
             list(ex.map(fn, slices))
 
-    def set_plasmid_params(self, delta: float, tau_p):
-        self.delta, self.tau_p = delta, tau_p
-        self.Tp = transition_spec(self.grid, tau_p, delta)
+    def marginal(self, L_units):
+        return marginalize_unit(L_units, self.T)
 
-    def marginal(self, L_units, plasmid: bool = False):
-        return marginalize_unit(L_units, self.Tp if plasmid else self.T)
-
-    eta: float | None = None   # unknown = relative of a bin: per-group switch probability
-    lam: float = 1.0           # weight of the community-only part of the unknown model
+    eta: float | None = None   # unbinned genome = relative of a bin: per-group switch probability
+    lam: float = 1.0           # weight of the community-only part of the unbinned-genome model
 
     def set_unknown_params(self, eta: float | None, lam: float):
         self.eta, self.lam = eta, lam
 
-    def score(self, L_units, rho, plasmid: bool = False) -> Scores:
-        Lp = self.marginal(L_units, plasmid)
+    def score(self, L_units) -> Scores:
+        Lp = self.marginal(L_units)
         Au = group_scores(Lp, self.log_pi[None])[:, 0, :]
-        # own MTase sets the level phi_own ~ q; the unit then varies around it like it would
-        # around a host level (same delta / tau), e.g. plasmid under-methylation applies too
-        O = logsumexp(Lp.astype(np.float64) + self.log_q[None], axis=-1)
-        r = np.clip(rho, 1e-9, 1 - 1e-9)
-        cu = np.logaddexp(np.log1p(-r) + Au, np.log(r) + O)
-        S, R = summed_scores(Lp, self.log_prof, O, rho, rel=(self.eta if self.eta else 0.05, cu))
-        Su_comm, Pwu = combine(Au[:, None, :], O, rho)
-        Su_comm = Su_comm[:, 0]
+        S, R = summed_scores(Lp, self.log_prof, rel=(self.eta if self.eta else 0.05, Au))
+        Su_comm = Au.sum(1)
         Su = unknown_score(R, Su_comm, self.eta, self.lam)
-        return Scores(S, Su, Au, O, Pwu[:, 0, :], Lp, rho, Su_comm, cu, R)
+        return Scores(S, Su, Au, Lp, Su_comm, R)
 
     def host_terms(self, sc: Scores, rows: np.ndarray, hosts: np.ndarray | None = None,
-                   log_prof: np.ndarray | None = None, batch: int = 1000):
-        """Per-group terms of units `rows`, each under one host: bin hosts[i], or log_prof[i] if given.
-
-        Returns A[n, M] (host, no own MTase) and Pw[n, M] = P(own MTase | unit, that host).
-        """
+                   log_prof: np.ndarray | None = None, batch: int = 1000) -> np.ndarray:
+        """Per-group terms A[n, M] of units `rows`, each under one bin: hosts[i], or log_prof[i] if given."""
         A = np.empty((len(rows), sc.Lp.shape[1]))
         for s in range(0, len(rows), batch):
             r = rows[s:s + batch]
             prof = self.log_prof[hosts[s:s + batch]] if log_prof is None else log_prof[s:s + batch]
             A[s:s + batch] = logsumexp(sc.Lp[r].astype(np.float64) + prof, -1)
-        _, Pw = combine(A[:, None, :], sc.O[rows], sc.rho[rows])
-        return A, Pw[:, 0, :]
+        return A
 
     def loo_profile(self, bin_idx: int, chunk_ids: np.ndarray) -> np.ndarray:
         ell = self.ell[bin_idx] - (self.w[chunk_ids, None, None] * self.Lp_chunks[chunk_ids]).sum(0)
         return host_profiles(ell[None], self.log_pi)
 
-    def loo_rescore(self, sc: Scores, i: int, bin_idx: int, chunk_ids: np.ndarray, rho_i: np.ndarray):
+    def loo_rescore(self, sc: Scores, i: int, bin_idx: int, chunk_ids: np.ndarray):
         """Replace unit i's score for its own bin with a leave-chunks-out version (in place), and its
         score as a relative of that bin, so neither is built from the unit's own data.
 
-        Returns the per-group host terms A[m] of that leave-out score.
+        Returns the per-group terms A[m] of that leave-out score.
         """
         A = logsumexp(sc.Lp[i].astype(np.float64) + self.loo_profile(bin_idx, chunk_ids)[0], -1)
-        r = np.clip(rho_i, 1e-9, 1 - 1e-9)
-        c = np.logaddexp(np.log1p(-r) + A, np.log(r) + sc.O[i])
-        sc.S[i, bin_idx] = c.sum()
-        if sc.R is not None:
-            eta = self.eta if self.eta else 0.05
-            sc.R[i, bin_idx] = np.logaddexp(np.log1p(-eta) + c, np.log(eta) + sc.cu[i]).sum()
-            sc.Su[i] = unknown_score(sc.R[i:i + 1], sc.Su_comm[i:i + 1], self.eta, self.lam)[0]
+        sc.S[i, bin_idx] = A.sum()
+        eta = self.eta if self.eta else 0.05
+        sc.R[i, bin_idx] = np.logaddexp(np.log1p(-eta) + A, np.log(eta) + sc.Au[i]).sum()
+        sc.Su[i] = unknown_score(sc.R[i:i + 1], sc.Su_comm[i:i + 1], self.eta, self.lam)[0]
         return A

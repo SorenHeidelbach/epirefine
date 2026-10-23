@@ -1,21 +1,14 @@
-"""Assignability: how well *could* a unit be assigned, given only where its sites are and their coverage?
+"""Expected evidence: how well *could* a unit be placed, given only where its sites are and their coverage?
 
 Uses the "Asimov dataset": the observed read counts are replaced by their expectation under a
-hypothesised true host, and the resulting log Bayes factors are expected log BFs (KL divergences
+hypothesised true bin, and the resulting log Bayes factors are expected log BFs (KL divergences
 between predictive distributions). Because the expected per-site log-likelihood is linear in phi,
 
     E_phi[ log P(k_i | n_i, x_g) ] = phi * E1(n_i, g) + (1 - phi) * E0(n_i, g)
 
-so per unit only two tables H1[u, m, g] and H0[u, m, g] are needed, and any host can be plugged in.
-
-Two numbers per unit:
-  * expected log BF of the MAP host over its nearest competitor (bin), and over "unknown".
-  * detectability: max over bins h of the expected log BF of h vs unknown if h were the host.
-    A unit called "unknown" with high detectability means "a binned host would have been
-    recognised, so the host is probably not binned"; low detectability means "no information".
-    With many bins the maximum is taken over a shortlist of bins (`top`) that are most distinct
-    from the community at the unit's informative groups (cheap KL screen); the result is then a
-    lower bound on the full maximum, exact whenever the best bin is on the shortlist.
+so per unit only two tables H1[u, m, g] and H0[u, m, g] are needed, and any bin can be plugged in.
+Calibration uses it to decide which pseudo-contigs could tell their bin from its nearest competitor
+(dev log D12).
 """
 from __future__ import annotations
 
@@ -25,11 +18,9 @@ from scipy.special import gammaln
 
 from .detection import DetectionParams, bb_logpmf
 from .grid import Grid
-from concurrent.futures import ThreadPoolExecutor
-
 from scipy.special import logsumexp
 
-from .model import FittedModel, _n_threads, score_units
+from .model import FittedModel, score_units
 
 
 def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int, DetectionParams],
@@ -72,16 +63,16 @@ def phi_means(model: FittedModel) -> np.ndarray:
     return (p * model.grid.x).sum(-1)  # [H, M]
 
 
-def margin_vs_competitors(model: FittedModel, H1, H0, truth: np.ndarray, plasmid: bool, temperature: float,
+def margin_vs_competitors(model: FittedModel, H1, H0, truth: np.ndarray, temperature: float,
                           batch: int = 2000):
     """Expected log BF of the true bin over (a) its nearest competing bin, (b) unknown."""
     U, H = len(truth), model.n_bins
     vs_bin, nearest, vs_unk = np.full(U, np.inf), np.zeros(U, int), np.zeros(U)
-    phi_h = phi_means(model) * (model.delta if plasmid else 1.0)
+    phi_h = phi_means(model)
     for s in range(0, U, batch):
         sl = slice(s, s + batch)
         t = truth[sl]
-        Lp = model.marginal(asimov(H1[sl], H0[sl], phi_h[t]), plasmid)
+        Lp = model.marginal(asimov(H1[sl], H0[sl], phi_h[t]))
         S = score_units(Lp, model.log_prof)
         Su = score_units(Lp, model.log_pi[None])[:, 0]
         idx = np.arange(len(t))
@@ -92,43 +83,3 @@ def margin_vs_competitors(model: FittedModel, H1, H0, truth: np.ndarray, plasmid
             nearest[sl] = S.argmax(1)
             vs_bin[sl] = (own - S[idx, nearest[sl]]) / temperature
     return vs_bin, nearest, vs_unk
-
-
-def _bern_kl(p, q):
-    p, q = np.clip(p, 1e-6, 1 - 1e-6), np.clip(q, 1e-6, 1 - 1e-6)
-    return p * np.log(p / q) + (1 - p) * np.log((1 - p) / (1 - q))
-
-
-def detectability(model: FittedModel, H1, H0, plasmid: bool, temperature: float,
-                  n_sites_group: np.ndarray | None = None, top: int = 20, batch: int = 250):
-    """max_h expected log BF(h vs unknown) if bin h were the true host, and the argmax.
-
-    With more than `top` bins and site counts given, h ranges over a per-unit shortlist: the bins
-    with the largest sum over groups of min(sites, 30) x KL(Bernoulli(phi_hm) || Bernoulli(mean of pi_m)).
-    """
-    d = model.delta if plasmid else 1.0
-    phi_all = phi_means(model) * d
-    U, H = H1.shape[0], phi_all.shape[0]
-    if n_sites_group is not None and H > top:
-        pbar = (np.exp(model.log_pi) * model.grid.x).sum(-1) * d
-        screen = np.minimum(n_sites_group, 30).astype(float) @ _bern_kl(phi_all, pbar[None]).T
-        cand = np.argpartition(-screen, top - 1, axis=1)[:, :top]
-    else:
-        cand = np.broadcast_to(np.arange(H), (U, H))
-    best, arg = np.full(U, -np.inf), np.zeros(U, int)
-
-    def work(sl):  # batches are independent; numpy releases the GIL, so they run on threads
-        for j in range(cand.shape[1]):
-            h = cand[sl, j]
-            Lp = model.marginal(asimov(H1[sl], H0[sl], phi_all[h]), plasmid).astype(np.float64)
-            s_h = logsumexp(Lp + model.log_prof[h], -1).sum(-1)
-            s_u = logsumexp(Lp + model.log_pi[None], -1).sum(-1)
-            bf = (s_h - s_u) / temperature
-            better = bf > best[sl]
-            best[sl] = np.where(better, bf, best[sl])
-            arg[sl] = np.where(better, h, arg[sl])
-
-    slices = [slice(s, s + batch) for s in range(0, U, batch)]
-    with ThreadPoolExecutor(min(len(slices), _n_threads()) or 1) as ex:
-        list(ex.map(work, slices))
-    return best, arg

@@ -7,7 +7,7 @@ are phase-variable: their methylated fraction varies from contig to contig. Geno
 contigs with log-uniform lengths; reads per site are Poisson around a per-genome coverage, and the
 modification caller is beta-binomial per mod type.
 
-    python scripts/simulate_community.py --motif-pool human_gut/nanomotif_1.1.3/bin-motifs.tsv --out sim1
+    python benchmarks/simulate_community.py --motif-pool human_gut/nanomotif_1.1.3/bin-motifs.tsv --out sim1
 
 Writes assembly.fasta, pileup.bed (modkit bedMethyl, rows at motif sites plus background),
 truth.tsv (contig, length, expected = the genome's bin, genome, clade) and genome_motifs.tsv

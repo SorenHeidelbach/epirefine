@@ -1,8 +1,8 @@
 """Run pbinner on the benchmark suite and record accuracy, speed and memory per version.
 
-    python scripts/benchmark_suite.py                   # default scenarios (~15 min)
-    python scripts/benchmark_suite.py --all             # also optional ones (human_gut, ~1 h)
-    python scripts/benchmark_suite.py --only sim_s1     # chosen scenarios
+    python benchmarks/benchmark_suite.py                   # default scenarios (~15 min)
+    python benchmarks/benchmark_suite.py --all             # also optional ones (human_gut, ~1 h)
+    python benchmarks/benchmark_suite.py --only sim_s1     # chosen scenarios
 
 Scenarios are listed in benchmarks/suite.json. Each run reuses its dataset's site cache, so wall
 time measures everything after the pileup pass unless the cache had to be rebuilt (column
@@ -24,7 +24,7 @@ from pathlib import Path
 import polars as pl
 
 REPO = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO / "scripts"))
+sys.path.insert(0, str(REPO / "benchmarks"))
 from evaluate_refinement import evaluate  # noqa: E402
 
 METRICS = ["contam_recall", "contam_precision", "inclusion_recall", "placed_wrongly", "should_stay_unbinned",

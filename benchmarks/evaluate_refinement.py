@@ -3,7 +3,7 @@
 Works on any tool that writes Nanomotif-style outputs: a contamination table (column `contig`) and
 a refined contig -> bin table (`new_contig_bin.tsv`, header contig, bin).
 
-    python scripts/evaluate_refinement.py --truth scen1/truth_actions.tsv \
+    python benchmarks/evaluate_refinement.py --truth scen1/truth_actions.tsv \
         --contamination out/bin_contamination.tsv --new-bins out/new_contig_bin.tsv --name pbinner
 
 Prints one row of metrics and appends it to --table if given.

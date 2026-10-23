@@ -1,6 +1,6 @@
 """Compare pbinner assignments and Nanomotif include_contigs to a reference truth table.
 
-    python scripts/compare_nanomotif.py --truth truth.tsv --pbinner run/assignments.tsv \
+    python benchmarks/compare_nanomotif.py --truth truth.tsv --pbinner run/assignments.tsv \
         --nanomotif nanomotif_include/include_contigs.tsv --out comparison.tsv
 truth: columns contig, expected (bin or "unknown"), binned_as (empty if unbinned).
 """

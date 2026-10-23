@@ -11,7 +11,7 @@ bin into it. Then:
                   that bin exists.
 Bins keep at least --min-keep correct contigs, so none is emptied.
 
-    python scripts/perturb_bins.py --truth frag/truth.tsv --out scen1 --seed 1
+    python benchmarks/perturb_bins.py --truth frag/truth.tsv --out scen1 --seed 1
 
 Writes contig_bin.tsv (no header, as binners write it) and truth_actions.tsv with columns
 contig, length, true_bin ("" if its genome has no bin), given_bin ("" if unbinned), category.

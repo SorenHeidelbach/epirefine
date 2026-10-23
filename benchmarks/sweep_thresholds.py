@@ -3,7 +3,7 @@
 The thresholds only turn posteriors into decisions, so no rerun is needed: contig_decisions.tsv holds
 P(contaminant) and the best alternative bin with its probability for every contig.
 
-    python scripts/sweep_thresholds.py --run scen1/pbinner --truth scen1/truth_actions.tsv \
+    python benchmarks/sweep_thresholds.py --run scen1/pbinner --truth scen1/truth_actions.tsv \
         --include 0.5 0.8 0.9 0.95 --contamination 0.5 --out sweep.tsv
 """
 from __future__ import annotations
