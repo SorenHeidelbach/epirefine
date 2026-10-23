@@ -25,11 +25,19 @@ import polars as pl
 
 
 def read_pairs(path) -> pl.LazyFrame:
-    # 4DN .pairs: readID chr1 pos1 chr2 pos2 strand1 strand2 [...]; header lines start with '#'
-    return (pl.scan_csv(path, separator="\t", has_header=False, comment_prefix="#",
-                        new_columns=["read", "c1", "p1", "c2", "p2", "s1", "s2"],
-                        schema_overrides={"c1": pl.Utf8, "c2": pl.Utf8}, truncate_ragged_lines=True)
-            .select("c1", "c2"))
+    """Contig pairs of uniquely mapped read pairs.
+
+    4DN .pairs: readID chr1 pos1 chr2 pos2 strand1 strand2 [pair_type ...]; header lines start with
+    '#'. chromap writes pair_type as an 8th column; when it is there only UU (both ends unique) is
+    kept, so reads from repeats shared between genomes can't create contacts between bins.
+    """
+    lf = pl.scan_csv(path, separator="\t", has_header=False, comment_prefix="#", infer_schema=False,
+                     truncate_ragged_lines=True)
+    cols = lf.collect_schema().names()
+    lf = lf.rename({cols[1]: "c1", cols[3]: "c2"})
+    if len(cols) > 7:
+        lf = lf.filter(pl.col(cols[7]) == "UU")
+    return lf.select("c1", "c2")
 
 
 def main():

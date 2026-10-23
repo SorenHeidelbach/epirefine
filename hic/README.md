@@ -6,8 +6,9 @@ into contig contacts and scores bin refinement against them. It is separate from
 from the workflow (`workflow/Snakefile`, rules `hic_*`) for samples with `hic_r1` / `hic_r2` in the
 config.
 
-1. **Mapping** (`chromap --preset hic`): read pairs to the assembly; pairs with MAPQ ≥ 20 on two
-   positions, PCR duplicates removed. `hic_max_pairs` in the config limits the number of read pairs
+1. **Mapping** (`chromap --preset hic`): read pairs to the assembly; chromap keeps pairs whose
+   two reads both map uniquely (pair type `UU`) and removes PCR duplicates. `contacts.py` also keeps
+   only `UU` pairs, in case another mapper's .pairs file is given. `hic_max_pairs` in the config limits the number of read pairs
    used (the first N).
 2. **`contacts.py`**: contacts between different contigs, per contig and bin, against what random
    ligation between cells would give for that bin's overall Hi-C signal (abundance x restriction
