@@ -17,6 +17,15 @@ config.
 3. **`validate.py`**: for each refinement method, contamination flags (confirmed / false / missed)
    and inclusions (correct / wrong / missed) against the confident Hi-C calls.
 
+4. **`refine.py`**: a Hi-C-only refinement (move binned contigs to their Hi-C bin, add unbinned
+   contigs with a confident Hi-C bin), scored with CheckM2 as bin set `hic`.
+5. **`bin_quality.py`**: Hi-C quality per bin and bin set: share of contacts that stay inside the
+   bin, sequence Hi-C places in another bin (foreign) or in this bin from outside (missing), next to
+   CheckM2 completeness and contamination.
+6. **`marker_visibility.py`**: whether CheckM2 can see the contigs Hi-C calls foreign: do they carry
+   single-copy marker genes (derived from the sample's high-quality bins), and are those markers
+   duplicated in the bin (reads as contamination) or new to it (reads as completeness)?
+
 Caveat: the Hi-C library's restriction enzymes may be blocked by some DNA modifications, which would
 make methylated genomes under-represented in contacts. Check contacts per site against the bins'
 methylation before trusting low-contact calls.

@@ -9,12 +9,15 @@ contigs are counted per contig pair; for each contig and bin:
                       that bin's overall Hi-C signal, i.e. abundance x restriction sites)
     enrichment      = links / expected
 
-Hi-C call for a contig: the bin with the highest enrichment, when it has at least `min_links`
-contacts and takes at least `min_share` of the contig's contacts to bins. A binned contig whose
+Hi-C call for a contig: the bin with the most contacts (ties: higher enrichment), confident when
+it has at least `min_links` contacts and takes at least `min_share` of the contig's contacts to
+bins. (Ranking by enrichment instead favours tiny bins, whose expected count is near zero.) A binned contig whose
 Hi-C bin is another bin is contamination evidence; one whose Hi-C bin is its own is a member.
 
-    python hic_contacts.py --pairs out.pairs --contig-bin contig_bin.tsv --out hic/
-Writes contig_pairs.parquet (c1, c2, n), contig_bin_links.tsv and hic_calls.tsv.
+    python hic/contacts.py --pairs out.pairs --out hic/                       # count: contig_pairs.parquet
+    python hic/contacts.py --contig-pairs hic/contig_pairs.parquet --contig-bin contig_bin.tsv --out hic/
+Counting writes contig_pairs.parquet (a, b, n); calling writes contig_bin_links.tsv and hic_calls.tsv.
+Both steps run together when --pairs and --contig-bin are given.
 """
 from __future__ import annotations
 
@@ -42,8 +45,9 @@ def read_pairs(path) -> pl.LazyFrame:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pairs", required=True)
-    ap.add_argument("--contig-bin", required=True)
+    ap.add_argument("--pairs", help=".pairs file to count (writes contig_pairs.parquet)")
+    ap.add_argument("--contig-pairs", help="contig_pairs.parquet from an earlier count")
+    ap.add_argument("--contig-bin", help="contig<TAB>bin: call each contig's Hi-C bin")
     ap.add_argument("--out", required=True)
     ap.add_argument("--min-links", type=int, default=10)
     ap.add_argument("--min-share", type=float, default=0.6)
@@ -51,11 +55,18 @@ def main():
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    pairs = (read_pairs(a.pairs).filter(pl.col("c1") != pl.col("c2"))
-             .select(pl.min_horizontal("c1", "c2").alias("a"), pl.max_horizontal("c1", "c2").alias("b"))
-             .group_by("a", "b").agg(pl.len().alias("n")).collect(engine="streaming"))
-    pairs.write_parquet(out / "contig_pairs.parquet")
+    if a.pairs:
+        pairs = (read_pairs(a.pairs).filter(pl.col("c1") != pl.col("c2"))
+                 .select(pl.min_horizontal("c1", "c2").alias("a"), pl.max_horizontal("c1", "c2").alias("b"))
+                 .group_by("a", "b").agg(pl.len().alias("n")).sort("a", "b").collect(engine="streaming"))
+        pairs.write_parquet(out / "contig_pairs.parquet")
+    elif a.contig_pairs:
+        pairs = pl.read_parquet(a.contig_pairs)
+    else:
+        ap.error("give --pairs or --contig-pairs")
     print(f"{pairs['n'].sum()} inter-contig contacts between {pairs.height} contig pairs")
+    if not a.contig_bin:
+        return
 
     cb = pl.read_csv(a.contig_bin, separator="\t", has_header=False, new_columns=["contig", "bin"])
     cb = cb.filter(~pl.col("contig").is_in(["contig", "contig_id"]))
@@ -72,7 +83,8 @@ def main():
                            (pl.col("links") / pl.col("links").sum().over("c")).alias("share")))
     links.write_csv(out / "contig_bin_links.tsv", separator="\t", float_precision=4)
 
-    best = links.sort("enrichment", descending=True).group_by("c", maintain_order=True).first()
+    best = (links.sort(["c", "links", "enrichment"], descending=[False, True, True])
+            .group_by("c", maintain_order=True).first())
     calls = (best.with_columns(((pl.col("links") >= a.min_links) & (pl.col("share") >= a.min_share)).alias("confident"))
              .join(cb.rename({"contig": "c", "bin": "given_bin"}), on="c", how="left")
              .rename({"c": "contig", "bin": "hic_bin"}))

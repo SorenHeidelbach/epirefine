@@ -37,9 +37,13 @@ def table_of(sample, method):
 
 
 def contig_bin_of(wc):
-    return {"original": SAMPLES[wc.sample]["contig_bin"],
-            "nanomotif": f"{OUT}/{wc.sample}/nanomotif/new_contig_bin.tsv",
-            "pbinner": f"{OUT}/{wc.sample}/pbinner/new_contig_bin.tsv"}[wc.method]
+    # "hic" (Hi-C-only refinement, hic/refine.py) writes hic/new_contig_bin.tsv like the methods do
+    return table_of(wc.sample, wc.method)
+
+
+wildcard_constraints:
+    sample="[^/]+",
+    method="[^/]+",
 
 
 HIC_SAMPLES = [x for x in SAMPLES if SAMPLES[x].get("hic_r1")]
@@ -49,6 +53,7 @@ rule all:
     input:
         expand(f"{OUT}/{{sample}}/comparison/summary.tsv", sample=SAMPLES),
         expand(f"{OUT}/{{sample}}/hic_validation/summary.tsv", sample=HIC_SAMPLES),
+        expand(f"{OUT}/{{sample}}/hic_quality/summary.tsv", sample=HIC_SAMPLES),
 
 
 rule nanomotif:
@@ -215,35 +220,89 @@ rule hic_map:
         "status=$?; rm -f {params.fifo}_1 {params.fifo}_2; exit $status"
 
 
+rule hic_pairs:
+    input:
+        f"{OUT}/{{sample}}/hic/contacts.pairs",
+    output:
+        f"{OUT}/{{sample}}/hic/contig_pairs.parquet",
+    log:
+        f"{OUT}/{{sample}}/logs/hic_pairs.log",
+    conda:
+        "../hic/env.yaml"
+    shell:
+        "python {HIC}/contacts.py --pairs {input} --out $(dirname {output}) > {log} 2>&1"
+
+
 rule hic_contacts:
     input:
-        pairs=f"{OUT}/{{sample}}/hic/contacts.pairs",
+        pairs=f"{OUT}/{{sample}}/hic/contig_pairs.parquet",
         contig_bin=s("contig_bin"),
     output:
         calls=f"{OUT}/{{sample}}/hic/hic_calls.tsv",
         links=f"{OUT}/{{sample}}/hic/contig_bin_links.tsv",
-        pairs=f"{OUT}/{{sample}}/hic/contig_pairs.parquet",
     log:
         f"{OUT}/{{sample}}/logs/hic_contacts.log",
     conda:
         "../hic/env.yaml"
     shell:
-        "python {HIC}/contacts.py --pairs {input.pairs} --contig-bin {input.contig_bin} "
+        "python {HIC}/contacts.py --contig-pairs {input.pairs} --contig-bin {input.contig_bin} "
         "--out $(dirname {output.calls}) > {log} 2>&1"
+
+
+rule hic_refine:
+    input:
+        calls=f"{OUT}/{{sample}}/hic/hic_calls.tsv",
+        contig_bin=s("contig_bin"),
+    output:
+        f"{OUT}/{{sample}}/hic/new_contig_bin.tsv",
+    log:
+        f"{OUT}/{{sample}}/logs/hic_refine.log",
+    conda:
+        "../hic/env.yaml"
+    shell:
+        "python {HIC}/refine.py --hic-calls {input.calls} --contig-bin {input.contig_bin} --out {output} > {log} 2>&1"
+
+
+rule hic_bin_quality:
+    input:
+        pairs=f"{OUT}/{{sample}}/hic/contig_pairs.parquet",
+        calls=f"{OUT}/{{sample}}/hic/hic_calls.tsv",
+        lengths=f"{OUT}/{{sample}}/contig_lengths.tsv",
+        tables=lambda wc: [table_of(wc.sample, m) for m in methods_of(wc.sample)],
+        reports=lambda wc: [f"{OUT}/{wc.sample}/checkm2/{m}/quality_report.tsv" for m in methods_of(wc.sample)],
+        diamond=f"{OUT}/{{sample}}/checkm2/original/quality_report.tsv",
+    output:
+        summary=f"{OUT}/{{sample}}/hic_quality/summary.tsv",
+        bins=f"{OUT}/{{sample}}/hic_quality/bins.tsv",
+        visibility=f"{OUT}/{{sample}}/hic_quality/marker_visibility.tsv",
+    params:
+        sets=lambda wc: " ".join(f"--set {m} {table_of(wc.sample, m)} --checkm2 {m} {OUT}/{wc.sample}/checkm2/{m}/quality_report.tsv"
+                                 for m in methods_of(wc.sample)),
+        contig_bin=s("contig_bin"),
+    log:
+        f"{OUT}/{{sample}}/logs/hic_bin_quality.log",
+    conda:
+        "../hic/env.yaml"
+    shell:
+        "(python {HIC}/bin_quality.py --pairs {input.pairs} --hic-calls {input.calls} --lengths {input.lengths} "
+        "{params.sets} --out $(dirname {output.summary}) && "
+        "python {HIC}/marker_visibility.py --diamond $(dirname {input.diamond})/diamond_output --checkm2 {input.diamond} "
+        "--hic-calls {input.calls} --contig-bin {params.contig_bin} --lengths {input.lengths} "
+        "--out {output.visibility}) > {log} 2>&1"
 
 
 rule hic_validate:
     input:
         calls=f"{OUT}/{{sample}}/hic/hic_calls.tsv",
         contig_bin=s("contig_bin"),
-        tables=lambda wc: [f"{OUT}/{wc.sample}/{m}/new_contig_bin.tsv" for m in methods_of(wc.sample) if m != "original"],
+        tables=lambda wc: [f"{OUT}/{wc.sample}/{m}/new_contig_bin.tsv" for m in methods_of(wc.sample) if m not in ("original", "hic")],
     output:
         summary=f"{OUT}/{{sample}}/hic_validation/summary.tsv",
         contigs=f"{OUT}/{{sample}}/hic_validation/contigs.tsv",
     params:
         methods=lambda wc: " ".join(f"--method {m} {OUT}/{wc.sample}/{m}/new_contig_bin.tsv "
                                     f"{OUT}/{wc.sample}/{m}/bin_contamination.tsv"
-                                    for m in methods_of(wc.sample) if m != "original"),
+                                    for m in methods_of(wc.sample) if m not in ("original", "hic")),
     log:
         f"{OUT}/{{sample}}/logs/hic_validate.log",
     conda:
