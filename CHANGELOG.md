@@ -3,6 +3,47 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.4.1 (2026-10-23): faster iteration
+
+- Detectability and the redundancy check run threaded.
+- `benchmarks/benchmark_suite.py --jobs N` runs scenarios in parallel (timings of such runs are
+  marked and not compared with single-job runs).
+
+**Benchmark effect:** results identical (same decisions on all scenarios). The suite takes about a
+third of the wall time with `--jobs 3`; the human_gut timing of the threaded steps is reported with
+the next human_gut run.
+
+## 0.4.0 (2026-10-23): refinement that holds up on a real gut community
+
+- **Caller model fitted with the bins as labels** (D19). The pooled two-component fit collapsed in
+  365 of 367 motif groups on human_gut (a motif methylated in a few bins looks like noise in the
+  pool); each group is now fitted with bin membership as labels.
+- **A contamination call needs a methylome difference** (D20): besides P(foreign) ≥ 0.5, the
+  contig's 95% credible interval for some motif group's methylated fraction must lie at least
+  `--min-methylome-difference` (0.3) from its bin's level. New column `methylome_difference`.
+- **No inclusion of sequence the bin already holds** (D21): FracMinHash containment of the contig in
+  the bin ≥ `--max-redundancy` (0.3) gives status `redundant` instead of `included`. New column
+  `redundancy_with_bin`.
+- `contig_decisions.tsv` gains `credible_set_95`; `--motif-fit` writes `motif_fit.tsv`.
+
+**Benchmark effect** (vs 0.2.0 code, the last recorded baseline; 3 scenarios each):
+
+| Benchmark | Contaminants found | Flag precision | Put back | Wall time |
+|---|---|---|---|---|
+| ZymoOral 5–150 kb | 100 → 100% | 96.5 → 100% | 92.6 → 86.2% | 55 → 37 s (−32%) |
+| ZymoOral 2–30 kb | 100 → 99.7% | 99.1 → 99.7% | 89.9 → 82.8% | 57 → 37 s (−34%) |
+| Simulated look-alikes | 97.0 → 96.4% | 100 → 100% | 0 → 0% | 145 → 122 s (−16%) |
+
+Fewer contigs are put back (the redundancy filter refuses assembly duplicates that the benchmark
+truth counts as members). human_gut, CheckM2 (369 bins):
+
+| | Original | 0.3.0 | 0.4.0 |
+|---|---|---|---|
+| High-quality bins | 198 | 157 | 204 |
+| Low-quality bins | 1 | 46 | 3 |
+| Median completeness | 93.7% | 92.1% | 95.1% |
+| Median contamination | 0.93% | 1.06% | 1.00% |
+
 ## 0.3.0 (2026-10-21): refinement workflow with CheckM2
 
 - `workflow/Snakefile`: per sample, runs Nanomotif 1.1.2 (`detect_contamination` +
