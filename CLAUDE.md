@@ -2,8 +2,9 @@
 
 pbinner refines metagenome bins from nanopore methylation: it flags binned contigs that don't belong
 to their bin (contamination detection) and places unbinned contigs into bins (contig inclusion), with
-calibrated posteriors and Nanomotif-compatible outputs. Plasmid-host assignment is an optional mode
-(`--plasmids`). It builds on Nanomotif's motif output and a modkit pileup.
+calibrated posteriors and Nanomotif-compatible outputs. It builds on Nanomotif's motif output and a
+modkit pileup. The package does only that; the workflow, Hi-C validation and benchmarks live in
+their own folders and call it.
 
 ## Before changing anything
 
@@ -35,13 +36,13 @@ calibrated posteriors and Nanomotif-compatible outputs. Plasmid-host assignment 
 ## Tests
 
 - `.venv/bin/python -m pytest -q tests` must pass before every commit. The pre-commit hook in
-  `scripts/hooks/pre-commit` enforces this; install it with `scripts/hooks/install.sh` if it's missing.
+  `dev/hooks/pre-commit` enforces this; install it with `dev/hooks/install.sh` if it's missing.
 - Every bug fix comes with a test that fails without the fix.
 - A speed-up must not change results: compare outputs (or the benchmark metrics) before and after.
 
 ## Measuring and reporting the effect of every change
 
-- Run `scripts/benchmark_suite.py --note "<what changed>"` before merging any change to the model,
+- Run `benchmarks/benchmark_suite.py --note "<what changed>"` before merging any change to the model,
   the pipeline or performance. It takes about 15 minutes, records accuracy (contaminants found,
   flag precision, contigs put back, contigs of unbinned genomes wrongly placed, bin completeness
   and contamination), wall time and peak memory, and prints the change against the last recorded
@@ -77,11 +78,19 @@ calibrated posteriors and Nanomotif-compatible outputs. Plasmid-host assignment 
 
 ## Layout
 
-- `src/pbinner/`: the package. `pipeline.py` runs everything; `sites.py` streams the pileup into a
-  site cache; `model.py` holds the likelihood model; `calibrate.py` the pseudo-contig calibration;
-  `refine.py` the contamination and inclusion decisions; `motifs.py` motif matching and grouping.
-- `scripts/`: benchmark tooling (`benchmark_suite.py`, `fragment_assembly.py`, `perturb_bins.py`,
-  `simulate_community.py`, `evaluate_refinement.py`, `sweep_thresholds.py`) and scale tests.
-- `benchmarks/suite.json`: the benchmark scenarios (absolute paths on this server).
+- `src/pbinner/`: the package, bin refinement only. `pipeline.py` runs everything; `sites.py`
+  streams the pileup into a site cache; `model.py` holds the likelihood model; `calibrate.py` the
+  pseudo-contig calibration; `refine.py` the contamination and inclusion decisions; `redundancy.py`
+  the k-mer check against inclusions the bin already holds; `motifs.py` motif matching and grouping.
+  Don't add tooling, plotting or other data types (Hi-C, coverage) here without asking the user.
+- `tests/`: unit tests.
+- `workflow/`: the Snakemake workflow (pbinner, Nanomotif, CheckM2, Hi-C validation) and its
+  scripts (`write_bins.py`, `compare_bins.R`) and conda envs.
+- `hic/`: Hi-C validation (`contacts.py`, `validate.py`, `env.yaml`), run from the workflow. It
+  judges pbinner from outside; keep it independent of the package.
+- `benchmarks/`: `benchmark_suite.py`, `suite.json` (absolute paths on this server) and the scripts
+  that build scenarios (`fragment_assembly.py`, `perturb_bins.py`, `simulate_community.py`,
+  `make_truth.py`, `evaluate_refinement.py`, `sweep_thresholds.py`, `compare_nanomotif.py`).
+- `dev/`: git hooks and speed prototypes.
 - `docs/method.md` (the model), `docs/scalability.md` (performance work).
 - Environment: `.venv` (`uv venv && uv pip install -e ".[dev]"`); run with `.venv/bin/pbinner`.

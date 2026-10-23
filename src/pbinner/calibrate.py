@@ -1,7 +1,7 @@
-"""Self-calibration with pseudo-plasmids.
+"""Self-calibration with pseudo-contigs.
 
-Host contigs are cut into fragments of plasmid-like lengths. Each fragment is scored as if it were
-a plasmid, with the chunks it overlaps removed from its own bin's profile (leave-one-out), so the
+Binned contigs are cut into fragments of typical contig lengths. Each fragment is scored as if it
+were unbinned, with the chunks it overlaps removed from its own bin's profile (leave-one-out), so the
 true answer is known without external ground truth.
 
 Two tests:
@@ -16,8 +16,6 @@ Uses:
   * accuracy / calibration / credible-set coverage are reported per fragment length, giving a
     sample-specific detection limit.
 
-Caveat: fragments are chromosomal. Plasmid-specific effects (own MTases, under-methylation,
-copy number) are not represented; that is v2.
 """
 from __future__ import annotations
 
@@ -29,6 +27,7 @@ from .model import FittedModel, posterior, summed_scores, unknown_score
 
 DEFAULT_LENGTHS = (2_000, 5_000, 10_000, 20_000, 50_000, 100_000)
 DEFAULT_TAUS = (3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 1e4, float("inf"))
+DEFAULT_SIGMAS = (0.0, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5)  # logit-normal kernel
 DEFAULT_ETAS = (0.02, 0.05, 0.1, 0.2, 0.35)
 DEFAULT_LAMS = (0.1, 0.5, 0.9, 1.0)  # 1.0 = community-only unknown (the earlier model)
 DEFAULT_TEMPS = tuple(np.round(np.exp(np.linspace(np.log(0.2), np.log(20), 31)), 3))
@@ -41,7 +40,7 @@ def fragments_per_bin(budget: int, n_lengths: int, n_bins: int, cap: int) -> int
 
 
 def select_fragments(host_contigs: pl.DataFrame, lengths, n_per_bin: int, rng: np.random.Generator) -> pl.DataFrame:
-    """Pseudo-plasmids: up to n_per_bin random tiles of each length per bin.
+    """Pseudo-contigs: up to n_per_bin random tiles of each length per bin.
 
     host_contigs: contig (any id type), bin_idx, length. Returns unit, contig, bin_idx, tile, length, start, end.
     """
@@ -111,18 +110,17 @@ def _reliability(P: np.ndarray, truth: np.ndarray, test: str) -> list[dict]:
 
 
 def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFrame, L_frag,
-              chunks_of, p_unknown, rho_base=0.02, H_frag=None, taus=DEFAULT_TAUS, temps=DEFAULT_TEMPS,
+              chunks_of, p_unknown, H_frag=None, taus=DEFAULT_TAUS, temps=DEFAULT_TEMPS,
               lookalike_dist=0.15, decidable_bf=3.0, etas=DEFAULT_ETAS, lams=DEFAULT_LAMS,
-              allow_sharpening=False, log=print, **model_kw):
+              allow_sharpening=False, n_sites_frag=None, log=print, **model_kw):
     fbin = frags["bin_idx"].to_numpy()
     H = n_bins
-    rho = np.zeros(L_frag.shape[:2])  # pseudo-contigs are chromosomal: no own-MTase explanation
 
     def own_and_scores(model):
-        sc = model.score(L_frag, rho, plasmid=False)
+        sc = model.score(L_frag)
         A_own = np.empty(L_frag.shape[:2])
         for i in range(len(fbin)):
-            A_own[i] = model.loo_rescore(sc, i, fbin[i], chunks_of[i], rho[i])
+            A_own[i] = model.loo_rescore(sc, i, fbin[i], chunks_of[i])
         # fragments from chunks the robust model calls foreign to their bin carry a wrong label
         keep = np.array([bool((model.w[ch] >= 0.5).all()) for ch in chunks_of])
         return sc, A_own, keep
@@ -142,6 +140,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     # per-group tau: each group's own leave-one-out term is maximised separately (groups with
     # intermediate, variable methylation need a finite tau; groups at 0 or 1 an infinite one)
     group_ll = np.array(group_ll)  # [n_taus, M]
+    base = next((k for k, t in enumerate(taus) if grid.is_point(t)), len(taus) - 1)
     tau_g = np.array([taus[k] for k in group_ll.argmax(0)], dtype=float)
     if len(np.unique(tau_g)) > 1:
         model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau_g, **warm, **model_kw)
@@ -154,13 +153,13 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             best = (ll, tau_g, sc, A_own, model, keep_g)
         del model
     tau_groups = pl.DataFrame({"group": np.arange(len(tau_g)), "tau": tau_g,
-                               "loo_loglik_gain_vs_inf": group_ll.max(0) - group_ll[-1]})
+                               "loo_loglik_gain_vs_no_variation": group_ll.max(0) - group_ll[base]})
     _, tau, sc_best, A_own_best, best_model, keep = best
     if (~keep).any():
         log(f"  {int((~keep).sum())} fragments excluded: from chunks flagged foreign to their bin")
     kidx = np.flatnonzero(keep)
     S, fbin, frags_k = sc_best.S[kidx], fbin[kidx], frags[kidx]
-    Su_comm, cu, A_own_k = sc_best.Su_comm[kidx], sc_best.cu[kidx], A_own_best[kidx]
+    Su_comm, Au, A_own_k = sc_best.Su_comm[kidx], sc_best.Au[kidx], A_own_best[kidx]
     if H_frag is not None:
         H_frag = (H_frag[0][kidx], H_frag[1][kidx])
 
@@ -183,7 +182,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     # bin over its nearest competitor (Asimov, from site positions and coverage only) >= decidable_bf.
     decidable = np.ones(len(fbin), bool)
     if H_frag is not None and H > 1:
-        m_exp, _, _ = margin_vs_competitors(best_model, *H_frag, fbin, False, 1.0)
+        m_exp, _, _ = margin_vs_competitors(best_model, *H_frag, fbin, 1.0)
         decidable = m_exp >= decidable_bf
     distinct = ~f_look & decidable
     log(f"  test B uses {int(distinct.sum())} of {len(fbin)} fragments (bin decidable from its nearest competitor)")
@@ -192,8 +191,8 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     # group's level from that bin with prob 1 - eta (weight 1 - lam). (eta, lam, T) are fitted together
     # on test A + decidable test B; in test B the removed bin is not offered as a relative either.
     def relatives(eta):
-        _, R = summed_scores(sc_best.Lp[kidx], best_model.log_prof, sc_best.O[kidx], rho[kidx], rel=(eta, cu))
-        R[np.arange(len(fbin)), fbin] = np.logaddexp(np.log1p(-eta) + A_own_k, np.log(eta) + cu).sum(1)  # leave-out
+        _, R = summed_scores(sc_best.Lp[kidx], best_model.log_prof, rel=(eta, Au))
+        R[np.arange(len(fbin)), fbin] = np.logaddexp(np.log1p(-eta) + A_own_k, np.log(eta) + Au).sum(1)  # leave-out
         return R
 
     def logloss(T, Su_a, Su_b):
@@ -219,13 +218,33 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
                                           (eta, lam, T, *logloss(T, Su_a, Su_b)))))
     fit = min(temp_rows, key=lambda r: r["log_loss"])
     fitted_temperature = fit["temperature"]
-    # Never sharpen: pseudo-plasmids are chromosomal and lack plasmid-specific uncertainty, so they
-    # can reveal overconfidence but cannot justify making plasmid posteriors more confident.
+    # Never sharpen: pseudo-contigs are cut from binned contigs, which are easier to place than real
+    # unbinned contigs; they can reveal overconfidence but not justify more confidence.
     if not allow_sharpening:
         fit = min((r for r in temp_rows if r["temperature"] >= 1.0), key=lambda r: r["log_loss"])
     temperature, eta, lam = fit["temperature"], fit["eta"], fit["lam"]
     Su, Su_b = Su_by[(eta, lam)]
     log(f"  unknown model: eta={eta:g}, lam={lam:g}; temperature fitted {fitted_temperature:g} -> used {temperature:g}")
+
+    # diagnostic: the temperature each fragment length would want. A temperature that rises with
+    # length points to correlated sites (evidence over-counted more, the more sites a unit has)
+    flen = frags_k["length"].to_numpy()
+    by_length = []
+    for Lf in sorted(set(flen.tolist())):
+        sel = flen == Lf
+
+        def ll_len(T):
+            Pa = posterior(S[sel], Su[sel], p_unknown, T)
+            la = -np.log(np.maximum(Pa[np.arange(sel.sum()), truth_a[sel]], 1e-12)).mean()
+            sd = sel & distinct
+            if not sd.any():
+                return la
+            Pb = posterior(S[sd], Su_b[sd], p_unknown, T, host_mask=mask_b[sd])
+            return la - np.log(np.maximum(Pb[:, H], 1e-12)).mean()
+        best_T = min(temps, key=ll_len)
+        by_length.append({"length": int(Lf), "fragments": int(sel.sum()), "temperature": best_T,
+                          "median_sites": float(np.median(n_sites_frag[kidx][sel])) if n_sites_frag is not None else float("nan")})
+    log("  temperature by fragment length: " + ", ".join(f"{r['length'] // 1000} kb {r['temperature']:g}" for r in by_length))
 
     rows, rel = [], []
     for label, T in (("uncalibrated", 1.0), ("fitted_temperature", fitted_temperature), ("calibrated", temperature)):
@@ -253,7 +272,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     assign_rows, frag_extra = [], {}
     if H_frag is not None:
         Pa = posterior(S, Su, p_unknown, temperature)
-        margin, nearest, vs_unk = margin_vs_competitors(best_model, *H_frag, fbin, False, temperature)
+        margin, nearest, vs_unk = margin_vs_competitors(best_model, *H_frag, fbin, temperature)
         frag_extra = {"expected_log_bf_vs_nearest": margin, "expected_log_bf_vs_unknown": vs_unk,
                       "posterior_true": Pa[np.arange(len(fbin)), fbin], "map_correct": Pa.argmax(1) == fbin}
         edges = [-np.inf, 0.5, 1, 2, 3, 5, 10, np.inf]
@@ -273,6 +292,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
                                "max_phi_difference": dist.min(1), "has_lookalike": has_lookalike})
     return {"tau": tau, "eta": float(eta), "lam": float(lam), "temperature": float(temperature), "fitted_temperature": float(fitted_temperature), "summary": pl.DataFrame(rows), "lookalikes": lookalikes,
             "tau_fit": pl.DataFrame(tau_rows), "tau_groups": tau_groups, "temperature_fit": pl.DataFrame(temp_rows),
+            "temperature_by_length": pl.DataFrame(by_length),
             "reliability": pl.DataFrame(rel), "assignability": pl.DataFrame(assign_rows),
             "fragments": frags.with_columns(pl.Series("foreign_excluded", ~keep), **{
                 k: pl.Series(_expand(v, kidx, len(keep))) for k, v in frag_extra.items()}), "model": best_model}

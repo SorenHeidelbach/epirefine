@@ -1,4 +1,4 @@
-"""Micro-benchmarks of the proposed speed-ups (docs/scalability.md section 3). Run: python scripts/speedup_prototypes.py"""
+"""Micro-benchmarks of the proposed speed-ups (docs/scalability.md section 3). Run: python dev/speedup_prototypes.py"""
 import time, numpy as np
 from scipy.special import logsumexp
 rng = np.random.default_rng(0)

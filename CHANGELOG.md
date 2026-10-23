@@ -1,7 +1,30 @@
 # Changelog
 
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
-effect on the benchmark suite (`scripts/benchmark_suite.py`; history in the dev log).
+effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
+
+## 0.5.0 (2026-10-23): bin refinement only; Hi-C validation in the workflow
+
+**Breaking.**
+- The package does bin refinement only (D22). Removed: plasmid-host assignment (`--plasmids`,
+  `--mtases`, `assignments.tsv`, `posteriors.tsv`, `plasmid_param_fit.tsv`), the own-MTase model,
+  detectability, and the `simulate`, `evaluate` and `report` subcommands. `pbinner run` is the only
+  command.
+- Repository layout: `src/pbinner/` (package), `workflow/`, `hic/`, `benchmarks/` (was
+  `scripts/`), `dev/` (hooks, prototypes), `docs/`.
+
+**New.**
+- `--variation logit`: a logit-normal kernel for how a contig's methylated fraction varies around
+  its bin's (default stays `beta`); `calibration/temperature_by_length.tsv` diagnostic.
+- `hic/`: Hi-C contacts per contig and bin, a Hi-C bin call per contig, and scoring of each
+  method's flags and inclusions against it. The workflow runs it (rules `hic_*`) for samples with
+  `hic_r1`/`hic_r2`.
+
+**Benchmark effect:** all 9 scenarios give the same status and bin for every contig as 0.4.0;
+metrics equal to 1e-4. One ZymoOral contig (142 kb) changed P(foreign) 0.38 → 0.97 without a
+status change (the own-MTase term removed; the methylome-difference gate keeps it in its bin).
+The `--variation logit` option gives identical decisions on ZymoOral 2–30 kb; its human_gut test
+is pending.
 
 ## 0.4.1 (2026-10-23): faster iteration
 

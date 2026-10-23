@@ -26,6 +26,8 @@ import numpy as np
 import polars as pl
 from scipy.special import expit, logsumexp
 
+from .model import credible_set
+
 CONFIDENCE = ((0.95, "high_confidence"), (0.8, "medium_confidence"), (0.5, "low_confidence"))
 
 
@@ -175,4 +177,5 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
         "redundancy_with_bin": redundancy if redundancy is not None else np.full(len(contigs), np.nan),
         "best_alternative": [labels[k] for k in ref.best_alt], "p_best_alternative": ref.p_best_alt,
         "map": [labels[k] for k in P.argmax(1)], "p_map": P.max(1), "p_unknown": P[:, -1],
+        "credible_set_95": [",".join(credible_set(row, labels)) for row in P],
     }).write_csv(out / "contig_decisions.tsv", separator="\t", float_precision=4)

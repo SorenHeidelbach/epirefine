@@ -1,4 +1,4 @@
-"""Readers for the inputs: assembly, contig->bin table, Nanomotif motifs, plasmid list, modkit pileup."""
+"""Readers for the inputs: assembly, contig->bin table, Nanomotif motifs, modkit pileup."""
 from __future__ import annotations
 
 import gzip
@@ -67,17 +67,6 @@ def read_motifs(path) -> list[Motif]:
         if has_comp:
             add(row["motif_complement"], row["mod_type"], row["mod_position_complement"])
     return motifs
-
-
-def read_contig_list(path) -> set[str]:
-    """One contig per line, or a geNomad *_plasmid_summary.tsv (column seq_name)."""
-    with _open(path) as fh:
-        first = fh.readline()
-    if "seq_name" in first.split("\t"):
-        df = pl.read_csv(path, separator="\t", infer_schema_length=0)
-        return set(df["seq_name"].to_list())
-    with _open(path) as fh:
-        return {line.split()[0] for line in fh if line.strip() and not line.startswith("#")}
 
 
 # modkit bedMethyl: chrom start end code score strand tstart tend color Nvalid frac Nmod Ncanon ...

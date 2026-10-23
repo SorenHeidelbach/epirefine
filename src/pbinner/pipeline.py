@@ -1,5 +1,5 @@
-"""End-to-end run: motifs -> sites -> detection model -> robust host profiles -> calibration ->
-plasmid parameters -> MTase-aware scoring -> assignability and goodness of fit.
+"""End-to-end run: motif groups -> site cache -> caller model -> robust bin profiles -> calibration
+-> scoring every contig -> contamination and inclusion decisions.
 
 Data flow at scale: motif groups are found on a random sample of the sequence; one parallel pass
 over the pileup writes a compact site cache (sites.extract_sites); a second parallel pass turns it
@@ -15,23 +15,17 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
-from scipy.special import logsumexp
 
 from . import io as pio
-from .assignability import detectability, margin_vs_competitors
-from .calibrate import DEFAULT_LENGTHS, calibrate, fragment_chunks, fragments_per_bin, select_fragments
+from .calibrate import DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate, fragment_chunks, fragments_per_bin, select_fragments
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
-from .model import FittedModel, credible_set, posterior, propagate
+from .model import FittedModel, posterior
 from .motifs import build_records, describe_groups, group_motifs
 from .redundancy import inclusion_redundancy
 from .refine import refine, write_outputs
-from .mtase import RhoParams, annotation_levels, bin_levels, estimate_rho, read_mtases
 from .sites import EncodedAssembly, extract_sites, unit_tables
 
-UNKNOWN = "unknown"
-DEFAULT_DELTAS = (0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0)
-DEFAULT_TAU_P = (10.0, 30.0, 100.0, 300.0, 1000.0, float("inf"))
 
 
 def _log(msg, t0=[time.time()]):
@@ -40,29 +34,6 @@ def _log(msg, t0=[time.time()]):
 
 def _write(df: pl.DataFrame, path, precision=4):
     df.write_csv(path, separator="\t", float_precision=precision)
-
-
-def fit_plasmid_params(model: FittedModel, L, rho, p_unknown, min_sites_mask, deltas=DEFAULT_DELTAS,
-                       taus=DEFAULT_TAU_P, max_units=1000, rng=None, log=print):
-    """Type-II ML of (delta, tau_p) over plasmid candidates, marginalising over their host.
-
-    At most `max_units` informative candidates are used (random subset): enough for two parameters.
-    """
-    idx = np.flatnonzero(min_sites_mask)
-    if len(idx) > max_units:
-        idx = np.sort((rng or np.random.default_rng(0)).choice(idx, max_units, replace=False))
-    rows = []
-    H = model.n_bins
-    prior = np.r_[np.full(H, np.log((1 - p_unknown) / H)), np.log(p_unknown)]
-    for d in deltas:
-        for t in taus:
-            model.set_plasmid_params(d, t)
-            sc = model.score(L[idx], rho[idx], plasmid=True)
-            ll = logsumexp(np.concatenate([sc.S, sc.Su[:, None]], 1) + prior, axis=1).sum()
-            rows.append({"delta": d, "tau_p": t, "marginal_loglik": float(ll), "n_units": len(idx)})
-    best = max(rows, key=lambda r: r["marginal_loglik"])
-    log(f"  plasmid params: delta={best['delta']}, tau_p={best['tau_p']:g} ({len(idx)} candidates)")
-    return best["delta"], best["tau_p"], pl.DataFrame(rows)
 
 
 def _sample_contigs(contigs: dict[str, str], names, sample_bp: float, rng) -> dict[str, str]:
@@ -103,13 +74,11 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
     return [np.concatenate([p[i] for p in parts]) for i in range(4)]
 
 
-def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=None, score_all=True, min_cov=1,
-        chunk_size=50_000, grid_size=64, p_unknown=None, contamination_threshold=0.5, include_threshold=0.95,
-        min_methylome_difference=0.3, max_redundancy=0.3, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS,
-        frags_per_bin=30, frag_budget=6000, tau=None, temperature=None, delta=None, tau_p=None, rho_base=0.02,
-        contam_eps=0.05, min_plasmids_for_fit=5, allow_sharpening=False, min_containment=0.5,
-        uninformative_log_bf=3.0, misfit_log_bf=3.0, group_sample_bp=50e6, workers=None, cache_dir=None,
-        detect_top=20, seed=1):
+def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
+        p_unknown=None, contamination_threshold=0.5, include_threshold=0.95, min_methylome_difference=0.3,
+        max_redundancy=0.3, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
+        tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_containment=0.5,
+        variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
@@ -120,13 +89,11 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
     cb = {c: b for c, b in pio.read_contig_bin(contig_bin).items() if c in contigs}
     bins = sorted(set(cb.values()))
     bin_idx = {b: i for i, b in enumerate(bins)}
-    candidates = pio.read_contig_list(plasmids) & set(contigs) if plasmids else None
-    host_contigs = sorted(c for c in cb if candidates is None or c not in candidates)
+    host_contigs = sorted(cb)
     host_set = set(host_contigs)
     # every contig is scored: binned ones leave-one-out (contamination), unbinned ones against all bins
-    # (inclusion); plasmid parameters apply only to the given plasmid candidates
+    # (inclusion)
     targets = sorted(contigs)
-    is_plasmid = np.array([candidates is not None and c in candidates for c in targets])
     H = len(bins)
     _log(f"{len(contigs)} contigs, {H} bins, {len(host_contigs)} host contigs, {len(targets)} targets")
 
@@ -183,7 +150,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
     _log("detection model fitted")
 
     # units: host chunks (from contig lengths), targets, calibration fragments
-    grid = Grid(grid_size)
+    grid = Grid(grid_size, kernel=variation)
     n_ids = len(asm.names)
     chunk_offset = np.full(n_ids, -1, np.int64)
     n_chunks_of = {c: -(-lengths[c] // chunk_size) for c in host_contigs}
@@ -213,9 +180,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
     remap = np.full(n_chunks_all, -1, np.int64); remap[keep] = np.arange(len(keep))
     L_chunks = tabs.pop("L_chunks")[keep]
     chunk_bin, chunk_contig, chunk_no = chunk_bin_all[keep], chunk_contig[keep], chunk_no[keep]
-    L_t, (H1_t, H0_t), n_sites, n_sites_group = tabs["L_t"], tabs["H_t"], tabs["n_sites_t"], tabs["n_sites_group_t"]
+    L_t, n_sites, n_sites_group = tabs["L_t"], tabs["n_sites_t"], tabs["n_sites_group_t"]
     _log(f"{len(keep)} host chunks of {chunk_size} bp; tables {L_chunks.nbytes / 1e9:.1f} GB (chunks), "
-         f"{3 * L_t.nbytes / 1e9:.1f} GB (targets)")
+         f"{L_t.nbytes / 1e9:.1f} GB (contigs)")
 
     def chunk_index(contig_id, c):
         return int(remap[chunk_offset[contig_id] + c]) if chunk_offset[contig_id] >= 0 and c < n_chunks_of[asm.names[contig_id]] else -1
@@ -225,10 +192,11 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
               "contam_eps": contam_eps}
     model_kw = {"contam_eps": contam_eps}
     if do_calibrate:
-        _log("calibration with pseudo-plasmids")
+        _log("calibration with pseudo-contigs")
         chunks_of = fragment_chunks(frags, chunk_size, chunk_index)
         cal = calibrate(L_chunks, chunk_bin, H, group_modtype, grid, frags, tabs["L_frag"], chunks_of,
-                        p_cal, rho_base=rho_base, H_frag=tabs["H_frag"], allow_sharpening=allow_sharpening,
+                        p_cal, H_frag=tabs["H_frag"], allow_sharpening=allow_sharpening,
+                        taus=DEFAULT_TAUS if variation == "beta" else DEFAULT_SIGMAS, n_sites_frag=tabs["frag_sites"],
                         log=_log, **model_kw)
         names = dict(enumerate(bins))
         cal["lookalikes"] = cal["lookalikes"].select(
@@ -238,7 +206,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
         cal["fragments"] = cal["fragments"].with_columns(
             pl.col("bin_idx").replace_strict(names, return_dtype=pl.Utf8).alias("bin"),
             pl.col("contig").replace_strict(dict(enumerate(asm.names)), return_dtype=pl.Utf8)).drop("bin_idx")
-        for name in ("summary", "tau_fit", "tau_groups", "temperature_fit", "reliability", "lookalikes",
+        for name in ("summary", "tau_fit", "tau_groups", "temperature_fit", "temperature_by_length", "reliability", "lookalikes",
                      "assignability", "fragments"):
             _write(cal[name], out / "calibration" / f"{name}.tsv")
         tau = cal["tau"] if tau is None else tau
@@ -253,7 +221,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
     else:
         warm, unknown_params = {}, (None, 1.0)
     tabs = None
-    tau = 100.0 if tau is None else tau
+    tau = (100.0 if variation == "beta" else 0.3) if tau is None else tau
     temperature = 1.0 if temperature is None else temperature
 
     model = FittedModel(L_chunks, chunk_bin, H, group_modtype, grid, tau, **warm, **model_kw)
@@ -264,46 +232,12 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
            out / "host_chunk_outliers.tsv")
     _log(f"robust host profiles: {int((p_foreign > 0.5).sum())} of {len(p_foreign)} chunks flagged as foreign to their bin")
 
-    # MTase annotations -> rho
-    p_present = np.exp(model.log_prof)[..., grid.x > 0.5].sum(-1)
-    rho_params, rho_report = RhoParams(base=rho_base), {}
-    if mtases:
-        ann = read_mtases(mtases)
-        rho_params, rho_report = estimate_rho(bin_levels(ann, {c: cb[c] for c in host_contigs}, bins, motifs,
-                                                         group_of, group_modtype), p_present, base=rho_base)
-        levels_t = annotation_levels(ann, targets, motifs, group_of, group_modtype)
-        _log(f"MTase annotations: {int((levels_t > 0).any(1).sum())} targets annotated; "
-             f"rho motif={rho_params.motif:.2f} modtype={rho_params.modtype:.2f} base={rho_params.base:.3f}")
-    else:
-        levels_t = np.zeros((len(targets), n_groups), np.int8)
-    rho_t = rho_params.matrix(levels_t)
-    # own-MTase explanations are for plasmids: a chromosome fragment is methylated by its genome's
-    # MTases (they act in trans), so it cannot carry a methylome of its own
-    rho_t[~is_plasmid] = 0.0
+    params.update(tau=tau, temperature=temperature)
 
-    # plasmid-specific delta and tau_p
-    fit_mask = is_plasmid & (n_sites >= 20)
-    if (delta is None or tau_p is None) and fit_mask.sum() >= min_plasmids_for_fit:
-        d_fit, t_fit, pfit = fit_plasmid_params(model, L_t, rho_t, p_cal, fit_mask, rng=rng, log=_log)
-        _write(pfit, out / "plasmid_param_fit.tsv")
-        delta = d_fit if delta is None else delta
-        tau_p = t_fit if tau_p is None else tau_p
-    delta = 1.0 if delta is None else delta
-    tau_p = tau if tau_p is None else tau_p
-    model.set_plasmid_params(delta, tau_p)
-    params.update(tau=tau, temperature=temperature, delta=delta, tau_p=tau_p, rho=rho_report or
-                  {"rho_motif": rho_params.motif, "rho_modtype": rho_params.modtype, "rho_base": rho_params.base})
-
-    # score: plasmid candidates with plasmid parameters, everything else with chromosome ones; binned
-    # contigs leave-one-out, so their own bin's profile is built without them
-    sc = model.score(L_t, rho_t, plasmid=False)
-    if is_plasmid.any():
-        idx = np.flatnonzero(is_plasmid)
-        sc_p = model.score(L_t[idx], rho_t[idx], plasmid=True)
-        for f in ("S", "Su", "Au", "O", "Pwu", "Lp"):
-            getattr(sc, f)[idx] = getattr(sc_p, f)
-        del sc_p
-    sole_contig, loo = set(), {}
+    # score every contig against every bin; binned contigs leave-one-out, so their own bin's profile
+    # is built without them
+    sc = model.score(L_t)
+    sole_contig = set()
     bin_chunks = np.bincount(chunk_bin, minlength=H)
     own_chunks: dict[int, list[int]] = {}
     for u, c in enumerate(chunk_contig):
@@ -314,10 +248,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
         own = np.array(own_chunks.get(cid[c], []), dtype=np.int64)
         b = bin_idx[cb[c]]
         if len(own) and len(own) == bin_chunks[b]:
-            sole_contig.add(c)  # leave-one-out would empty the bin; keep the full (non-independent) score
+            sole_contig.add(c)  # leave-one-out would empty the bin: not an independent test
             continue
-        model.loo_rescore(sc, i, b, own, rho_t[i])
-        loo[i] = (b, own)
+        model.loo_rescore(sc, i, b, own)
 
     # bin refinement: contamination of binned contigs, inclusion of unbinned ones
     given = np.array([bin_idx[cb[c]] if c in cb else -1 for c in targets])
@@ -357,82 +290,18 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
          f"{int(ref.contaminant.sum())} of {int(testable.sum())} testable binned contigs flagged, "
          f"{int(((ref.include_bin >= 0) & (given < 0)).sum())} of {int((given < 0).sum())} unbinned included, "
          f"{int(((ref.include_bin >= 0) & (given >= 0)).sum())} contaminants moved to another bin")
-    labels = bins + [UNKNOWN]
-    logl = np.concatenate([sc.S, sc.Su[:, None]], 1) / temperature
-    map_idx = P.argmax(1)
-    hosted = map_idx < H
-    truth = np.where(hosted, map_idx, 0)
-    _log(f"scored {len(targets)} targets: {int(hosted.sum())} with a bin as MAP")
-
-    # assignability: margins for units with a host MAP, detectability for units with MAP "unknown"
-    margin = np.full(len(targets), np.nan); nearest = np.zeros(len(targets), int); vs_unk = np.full(len(targets), np.nan)
-    detect = np.zeros(len(targets))
-    for flag in (True, False):
-        sel = np.flatnonzero((is_plasmid == flag) & hosted)
-        if len(sel):
-            margin[sel], nearest[sel], vs_unk[sel] = margin_vs_competitors(
-                model, H1_t[sel], H0_t[sel], truth[sel], flag, temperature)
-        sel = np.flatnonzero((is_plasmid == flag) & ~hosted & (n_sites > 0))
-        if len(sel):
-            detect[sel] = detectability(model, H1_t[sel], H0_t[sel], flag, temperature,
-                                        n_sites_group=n_sites_group[sel], top=detect_top)[0]
-    _log("assignability computed")
-
-    # goodness of fit per group, for the MAP explanation
-    rows_h = np.flatnonzero(hosted)
-    A_map, Pw_map = sc.Au.copy(), sc.Pwu.copy()
-    if len(rows_h):
-        A_h, Pw_h = model.host_terms(sc, rows_h, hosts=truth[rows_h])
-        for j, i in enumerate(rows_h):
-            if i in loo and loo[i][0] == truth[i]:
-                prof = model.loo_profile(*loo[i])
-                A_h[j:j + 1], Pw_h[j:j + 1] = model.host_terms(sc, np.array([i]), log_prof=prof)
-        A_map[rows_h], Pw_map[rows_h] = A_h, Pw_h
-    misfit = sc.Au - A_map  # log BF: "some community host" vs MAP host, per group
-
-    def pred(sl):
-        lp = np.where(hosted[sl, None, None], model.log_prof[truth[sl]], model.log_pi[None])
-        return propagate(lp, model.Tp)
-    phi_pred = _batched_summary(grid, pred, len(targets))
-
-    rows, long_rows = [], []
-    for i, c in enumerate(targets):
-        order = np.argsort(-P[i])
-        b1, b2 = order[0], order[1] if len(order) > 1 else order[0]
-        cset = credible_set(P[i], labels)
-        if c in sole_contig:
-            status = "sole_contig_of_bin"  # scored against a profile built from itself: not an independent test
-        elif b1 < H:
-            status = "assigned" if cset == [labels[b1]] else "ambiguous"
-        else:
-            status = "host_not_binned" if detect[i] >= uninformative_log_bf else "uninformative"
-        has = n_sites_group[i] > 0
-        own = [group_label[g] for g in np.flatnonzero(has & (Pw_map[i] > 0.5))]
-        bad = [group_label[g] for g in np.flatnonzero(has & (misfit[i] > misfit_log_bf) & (Pw_map[i] <= 0.5))]
-        rows.append({
-            "contig": c, "length": lengths[c], "binned_as": cb.get(c, ""), "n_sites": int(n_sites[i]),
-            "status": status, "assignment": labels[b1], "posterior": P[i, b1], "p_unknown": P[i, -1],
-            "credible_set_95": ",".join(cset), "runner_up": labels[b2],
-            "log_bf_best_vs_runner_up": logl[i, b1] - logl[i, b2], "log_bf_best_vs_unknown": logl[i, b1] - logl[i, -1],
-            "expected_log_bf_vs_nearest_bin": margin[i] if b1 < H else np.nan,
-            "nearest_competitor": bins[nearest[i]] if b1 < H and H > 1 else "",
-            "expected_log_bf_vs_unknown": vs_unk[i] if b1 < H else np.nan,
-            "detectability": detect[i], "own_mtase_motifs": ";".join(own), "misfit_motifs": ";".join(bad),
-            "mtase_annotated": bool((levels_t[i] > 0).any()),
-        })
-        long_rows.extend({"contig": c, "candidate": labels[j], "posterior": P[i, j], "loglik": logl[i, j]}
-                         for j in order if P[i, j] > 1e-6)
-    _write(pl.DataFrame(rows), out / "assignments.tsv")
-    _write(pl.DataFrame(long_rows), out / "posteriors.tsv", 6)
-    ui, gi = np.nonzero(n_sites_group)
-    _write(pl.DataFrame({
-        "contig": pl.Series(targets)[ui], "explained_by": pl.Series(labels)[map_idx[ui]], "group": gi,
-        "motifs": pl.Series(group_label)[gi], "n_sites": n_sites_group[ui, gi],
-        "phi_observed": phi_obs[0][ui, gi], "phi_observed_lo95": phi_obs[1][ui, gi],
-        "phi_observed_hi95": phi_obs[2][ui, gi], "phi_expected": phi_pred[0][ui, gi],
-        "phi_expected_lo95": phi_pred[1][ui, gi], "phi_expected_hi95": phi_pred[2][ui, gi],
-        "misfit_log_bf": misfit[ui, gi] / temperature, "p_own_mtase": Pw_map[ui, gi],
-        "annotation_level": levels_t[ui, gi].astype(np.int64)}), out / "motif_fit.tsv")
+    if write_motif_fit:
+        # per contig and motif group: the contig's methylated fraction next to its bin's (binned
+        # contigs) or its best alternative bin's (unbinned contigs)
+        ref_bin = np.where(given >= 0, given, np.where(ref.best_alt < H, ref.best_alt, -1))
+        ui, gi = np.nonzero(n_sites_group)
+        rb = ref_bin[ui]
+        _write(pl.DataFrame({
+            "contig": pl.Series(targets)[ui], "group": gi, "motifs": pl.Series(group_label)[gi],
+            "n_sites": n_sites_group[ui, gi], "phi_observed": phi_obs[0][ui, gi],
+            "phi_observed_lo95": phi_obs[1][ui, gi], "phi_observed_hi95": phi_obs[2][ui, gi],
+            "reference_bin": [bins[b] if b >= 0 else "" for b in rb],
+            "phi_bin": np.where(rb >= 0, phi_bin[np.maximum(rb, 0), gi], np.nan)}), out / "motif_fit.tsv")
 
     mean, lo, hi, pp = grid.summarize(np.concatenate([model.log_prof, model.log_pi[None]], 0))
     nb = H + 1

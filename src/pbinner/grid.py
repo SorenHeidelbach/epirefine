@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import numpy as np
 from scipy.special import expit, logit
-from scipy.stats import beta
+from scipy.stats import beta, norm
 
 
 class Grid:
-    def __init__(self, size: int = 64, lo: float = 1e-3):
+    def __init__(self, size: int = 64, lo: float = 1e-3, kernel: str = "beta"):
         z = np.linspace(logit(lo), logit(1 - lo), size)
         self.x = expit(z)
         self.edges = np.concatenate([[0.0], expit((z[:-1] + z[1:]) / 2), [1.0]])
@@ -20,25 +20,45 @@ class Grid:
         self.log1mx = np.log1p(-self.x)
         self.size = size
         self._trans_cache: dict[float, np.ndarray] = {}
+        if kernel not in ("beta", "logit"):
+            raise ValueError(f"unknown variation kernel {kernel!r}")
+        self.kernel = kernel
+        self.no_variation = float("inf") if kernel == "beta" else 0.0  # the parameter meaning "unit = host"
 
     def beta_mass(self, a, b) -> np.ndarray:
         m = np.maximum(np.diff(beta.cdf(self.edges, a, b)), 1e-300)
         return m / m.sum()
 
-    def transition(self, tau: float | None, delta: float = 1.0) -> np.ndarray:
-        """T[i, j] = P(phi_unit in cell j | phi_host = x_i): phi_unit ~ Beta(d x_i tau, (1 - d x_i) tau).
+    def is_point(self, param) -> bool:
+        """True when the variation parameter means no between-unit variation."""
+        if param is None:
+            return True
+        return (not np.isfinite(param)) if self.kernel == "beta" else param <= 0
 
-        delta scales the host level (plasmid under-methylation). tau = None/inf means no
-        between-unit variation (point mass at delta * x_i).
+    def transition(self, param: float | None, delta: float = 1.0) -> np.ndarray:
+        """T[i, j] = P(phi_unit in cell j | phi_host = x_i), with the host level scaled by delta
+        (plasmid under-methylation).
+
+        kernel "beta":  phi_unit ~ Beta(d x_i tau, (1 - d x_i) tau); param = tau, inf = no variation.
+        kernel "logit": logit(phi_unit) ~ Normal(logit(d x_i), sigma^2); param = sigma, 0 = no
+                        variation. Variation is on the log-odds scale, so a level near 0 or 1 barely
+                        moves while intermediate levels vary most (dev log BACKLOG item 1).
         """
-        key = (tau, delta)
+        key = (param, delta)
         if key not in self._trans_cache:
             mean = delta * self.x
-            if tau is None or not np.isfinite(tau):
+            if self.is_point(param):
                 T = np.zeros((self.size, self.size))
                 T[np.arange(self.size), np.clip(np.searchsorted(self.edges, mean) - 1, 0, self.size - 1)] = 1.0
+            elif self.kernel == "beta":
+                T = np.stack([self.beta_mass(m * param, (1 - m) * param) for m in mean])
             else:
-                T = np.stack([self.beta_mass(m * tau, (1 - m) * tau) for m in mean])
+                with np.errstate(divide="ignore"):
+                    ze = logit(self.edges)  # -inf .. inf
+                mz = logit(np.clip(mean, 1e-12, 1 - 1e-12))
+                cdf = norm.cdf((ze[None, :] - mz[:, None]) / param)
+                T = np.maximum(np.diff(cdf, axis=1), 1e-300)
+                T /= T.sum(1, keepdims=True)
             self._trans_cache[key] = T
         return self._trans_cache[key]
 

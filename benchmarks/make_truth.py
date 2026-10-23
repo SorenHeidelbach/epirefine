@@ -13,7 +13,7 @@ from collections import defaultdict
 
 import polars as pl
 
-from pbinner.io import read_contig_bin, read_contig_list, read_fasta
+from pbinner.io import read_contig_bin, read_fasta
 
 
 def union_len(iv):
@@ -37,6 +37,19 @@ a = ap.parse_args()
 asm = {c: len(s) for c, s in read_fasta(a.assembly).items()}
 ref = {c: len(s) for c, s in read_fasta(a.reference).items()}
 cb = read_contig_bin(a.contig_bin)
+
+
+def read_contig_list(path) -> set[str]:
+    """One contig per line, or a geNomad *_plasmid_summary.tsv (column seq_name)."""
+    import polars as pl
+    with open(path) as fh:
+        first = fh.readline()
+    if "seq_name" in first.split("\t"):
+        return set(pl.read_csv(path, separator="\t", infer_schema_length=0)["seq_name"].to_list())
+    with open(path) as fh:
+        return {line.split()[0] for line in fh if line.strip() and not line.startswith("#")}
+
+
 cand = read_contig_list(a.plasmids) if a.plasmids else set()
 cand |= {c.rsplit("_", 1)[0] for c in cand if c not in asm and "_" in c}  # geNomad region names
 

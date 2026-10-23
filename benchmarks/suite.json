@@ -1,5 +1,5 @@
 {
- "description": "Benchmark scenarios for scripts/benchmark_suite.py. Data generation: see the dev log's DATA.md. Optional scenarios run only with --all or --only.",
+ "description": "Benchmark scenarios for benchmarks/benchmark_suite.py. Data generation: see the dev log's DATA.md. Optional scenarios run only with --all or --only.",
  "scenarios": [
   {
    "name": "zymo_long_s1",
