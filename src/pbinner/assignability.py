@@ -25,9 +25,11 @@ from scipy.special import gammaln
 
 from .detection import DetectionParams, bb_logpmf
 from .grid import Grid
+from concurrent.futures import ThreadPoolExecutor
+
 from scipy.special import logsumexp
 
-from .model import FittedModel, score_units
+from .model import FittedModel, _n_threads, score_units
 
 
 def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int, DetectionParams],
@@ -98,7 +100,7 @@ def _bern_kl(p, q):
 
 
 def detectability(model: FittedModel, H1, H0, plasmid: bool, temperature: float,
-                  n_sites_group: np.ndarray | None = None, top: int = 20, batch: int = 2000):
+                  n_sites_group: np.ndarray | None = None, top: int = 20, batch: int = 250):
     """max_h expected log BF(h vs unknown) if bin h were the true host, and the argmax.
 
     With more than `top` bins and site counts given, h ranges over a per-unit shortlist: the bins
@@ -114,8 +116,8 @@ def detectability(model: FittedModel, H1, H0, plasmid: bool, temperature: float,
     else:
         cand = np.broadcast_to(np.arange(H), (U, H))
     best, arg = np.full(U, -np.inf), np.zeros(U, int)
-    for s in range(0, U, batch):
-        sl = slice(s, s + batch)
+
+    def work(sl):  # batches are independent; numpy releases the GIL, so they run on threads
         for j in range(cand.shape[1]):
             h = cand[sl, j]
             Lp = model.marginal(asimov(H1[sl], H0[sl], phi_all[h]), plasmid).astype(np.float64)
@@ -125,4 +127,8 @@ def detectability(model: FittedModel, H1, H0, plasmid: bool, temperature: float,
             better = bf > best[sl]
             best[sl] = np.where(better, bf, best[sl])
             arg[sl] = np.where(better, h, arg[sl])
+
+    slices = [slice(s, s + batch) for s in range(0, U, batch)]
+    with ThreadPoolExecutor(min(len(slices), _n_threads()) or 1) as ex:
+        list(ex.map(work, slices))
     return best, arg
