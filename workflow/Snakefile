@@ -264,6 +264,25 @@ rule hic_refine:
         "python {HIC}/refine.py --hic-calls {input.calls} --contig-bin {input.contig_bin} --out {output} > {log} 2>&1"
 
 
+rule hic_nonredundant:
+    input:
+        assembly=s("assembly"),
+        contig_bin=s("contig_bin"),
+        calls=f"{OUT}/{{sample}}/hic/hic_calls.tsv",
+    output:
+        table=f"{OUT}/{{sample}}/hic_nonredundant/new_contig_bin.tsv",
+        redundancy=f"{OUT}/{{sample}}/hic_quality/hic_change_redundancy.tsv",
+    params:
+        python=str(REPO / ".venv/bin/python"),
+    log:
+        f"{OUT}/{{sample}}/logs/hic_nonredundant.log",
+    threads: THREADS
+    shell:
+        # uses pbinner's k-mer sketches, so it runs in the repository's environment
+        "{params.python} {HIC}/nonredundant.py --assembly {input.assembly} --contig-bin {input.contig_bin} "
+        "--hic-calls {input.calls} --threads {threads} --out-redundancy {output.redundancy} --out {output.table} > {log} 2>&1"
+
+
 rule hic_bin_quality:
     input:
         pairs=f"{OUT}/{{sample}}/hic/contig_pairs.parquet",

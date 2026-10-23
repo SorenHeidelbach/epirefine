@@ -41,5 +41,7 @@ samples:
     hic_r2: /home/ubuntu/data/ZymoFecal/HiC/HiC_ZymoFecal_R2.fastq
     hic_index: /home/ubuntu/data/ZymoFecal/hic_map/m2_assembly.chromap.index
     # Nanomotif left out for now (330 GB pileup, single stream): pbinner against Hi-C first.
-    # hic = Hi-C-only refinement (hic/refine.py), scored with CheckM2 as a reference
-    methods: [original, pbinner, hic]
+    # hic = Hi-C-only refinement (hic/refine.py), scored with CheckM2 as a reference;
+    # hic_nonredundant = the same without changes whose contig is >= 30% contained in the target bin
+    # (hic/nonredundant.py, the same k-mer containment test as pbinner D21)
+    methods: [original, pbinner, hic, hic_nonredundant]
