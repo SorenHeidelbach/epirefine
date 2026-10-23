@@ -29,6 +29,7 @@ from .model import FittedModel, posterior, summed_scores, unknown_score
 
 DEFAULT_LENGTHS = (2_000, 5_000, 10_000, 20_000, 50_000, 100_000)
 DEFAULT_TAUS = (3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 1e4, float("inf"))
+DEFAULT_SIGMAS = (0.0, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5)  # logit-normal kernel
 DEFAULT_ETAS = (0.02, 0.05, 0.1, 0.2, 0.35)
 DEFAULT_LAMS = (0.1, 0.5, 0.9, 1.0)  # 1.0 = community-only unknown (the earlier model)
 DEFAULT_TEMPS = tuple(np.round(np.exp(np.linspace(np.log(0.2), np.log(20), 31)), 3))
@@ -113,7 +114,7 @@ def _reliability(P: np.ndarray, truth: np.ndarray, test: str) -> list[dict]:
 def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFrame, L_frag,
               chunks_of, p_unknown, rho_base=0.02, H_frag=None, taus=DEFAULT_TAUS, temps=DEFAULT_TEMPS,
               lookalike_dist=0.15, decidable_bf=3.0, etas=DEFAULT_ETAS, lams=DEFAULT_LAMS,
-              allow_sharpening=False, log=print, **model_kw):
+              allow_sharpening=False, n_sites_frag=None, log=print, **model_kw):
     fbin = frags["bin_idx"].to_numpy()
     H = n_bins
     rho = np.zeros(L_frag.shape[:2])  # pseudo-contigs are chromosomal: no own-MTase explanation
@@ -142,6 +143,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     # per-group tau: each group's own leave-one-out term is maximised separately (groups with
     # intermediate, variable methylation need a finite tau; groups at 0 or 1 an infinite one)
     group_ll = np.array(group_ll)  # [n_taus, M]
+    base = next((k for k, t in enumerate(taus) if grid.is_point(t)), len(taus) - 1)
     tau_g = np.array([taus[k] for k in group_ll.argmax(0)], dtype=float)
     if len(np.unique(tau_g)) > 1:
         model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau_g, **warm, **model_kw)
@@ -154,7 +156,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             best = (ll, tau_g, sc, A_own, model, keep_g)
         del model
     tau_groups = pl.DataFrame({"group": np.arange(len(tau_g)), "tau": tau_g,
-                               "loo_loglik_gain_vs_inf": group_ll.max(0) - group_ll[-1]})
+                               "loo_loglik_gain_vs_no_variation": group_ll.max(0) - group_ll[base]})
     _, tau, sc_best, A_own_best, best_model, keep = best
     if (~keep).any():
         log(f"  {int((~keep).sum())} fragments excluded: from chunks flagged foreign to their bin")
@@ -227,6 +229,26 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     Su, Su_b = Su_by[(eta, lam)]
     log(f"  unknown model: eta={eta:g}, lam={lam:g}; temperature fitted {fitted_temperature:g} -> used {temperature:g}")
 
+    # diagnostic: the temperature each fragment length would want. A temperature that rises with
+    # length points to correlated sites (evidence over-counted more, the more sites a unit has)
+    flen = frags_k["length"].to_numpy()
+    by_length = []
+    for Lf in sorted(set(flen.tolist())):
+        sel = flen == Lf
+
+        def ll_len(T):
+            Pa = posterior(S[sel], Su[sel], p_unknown, T)
+            la = -np.log(np.maximum(Pa[np.arange(sel.sum()), truth_a[sel]], 1e-12)).mean()
+            sd = sel & distinct
+            if not sd.any():
+                return la
+            Pb = posterior(S[sd], Su_b[sd], p_unknown, T, host_mask=mask_b[sd])
+            return la - np.log(np.maximum(Pb[:, H], 1e-12)).mean()
+        best_T = min(temps, key=ll_len)
+        by_length.append({"length": int(Lf), "fragments": int(sel.sum()), "temperature": best_T,
+                          "median_sites": float(np.median(n_sites_frag[kidx][sel])) if n_sites_frag is not None else float("nan")})
+    log("  temperature by fragment length: " + ", ".join(f"{r['length'] // 1000} kb {r['temperature']:g}" for r in by_length))
+
     rows, rel = [], []
     for label, T in (("uncalibrated", 1.0), ("fitted_temperature", fitted_temperature), ("calibrated", temperature)):
         Pa = posterior(S, Su, p_unknown, T)
@@ -273,6 +295,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
                                "max_phi_difference": dist.min(1), "has_lookalike": has_lookalike})
     return {"tau": tau, "eta": float(eta), "lam": float(lam), "temperature": float(temperature), "fitted_temperature": float(fitted_temperature), "summary": pl.DataFrame(rows), "lookalikes": lookalikes,
             "tau_fit": pl.DataFrame(tau_rows), "tau_groups": tau_groups, "temperature_fit": pl.DataFrame(temp_rows),
+            "temperature_by_length": pl.DataFrame(by_length),
             "reliability": pl.DataFrame(rel), "assignability": pl.DataFrame(assign_rows),
             "fragments": frags.with_columns(pl.Series("foreign_excluded", ~keep), **{
                 k: pl.Series(_expand(v, kidx, len(keep))) for k, v in frag_extra.items()}), "model": best_model}

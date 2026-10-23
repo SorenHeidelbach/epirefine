@@ -222,3 +222,13 @@ def test_redundancy_containment():
     assert containment(sketch(encode(other)), g) < 0.05
     rc = genome[120_000:150_000][::-1].translate(str.maketrans("ACGT", "TGCA"))
     assert containment(sketch(encode(rc)), g) > 0.95  # canonical k-mers: strand doesn't matter
+
+
+def test_logit_kernel_spreads_intermediate_levels_more_than_extremes():
+    g = Grid(64, kernel="logit")
+    T = g.transition(0.5)
+    assert np.allclose(T.sum(1), 1)
+    sd = lambda i: np.sqrt((T[i] * (g.x - (T[i] * g.x).sum()) ** 2).sum())
+    lo, mid = np.argmin(abs(g.x - 0.003)), np.argmin(abs(g.x - 0.5))
+    assert sd(lo) < 0.005 < 0.08 < sd(mid)
+    assert np.allclose(g.transition(0.0), np.eye(64))  # sigma 0 = no variation

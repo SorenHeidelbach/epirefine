@@ -19,7 +19,7 @@ from scipy.special import logsumexp
 
 from . import io as pio
 from .assignability import detectability, margin_vs_competitors
-from .calibrate import DEFAULT_LENGTHS, calibrate, fragment_chunks, fragments_per_bin, select_fragments
+from .calibrate import DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate, fragment_chunks, fragments_per_bin, select_fragments
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .model import FittedModel, credible_set, posterior, propagate
@@ -32,6 +32,7 @@ from .sites import EncodedAssembly, extract_sites, unit_tables
 UNKNOWN = "unknown"
 DEFAULT_DELTAS = (0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.0)
 DEFAULT_TAU_P = (10.0, 30.0, 100.0, 300.0, 1000.0, float("inf"))
+DEFAULT_SIGMA_P = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0)  # logit-normal kernel
 
 
 def _log(msg, t0=[time.time()]):
@@ -108,7 +109,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
         min_methylome_difference=0.3, max_redundancy=0.3, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS,
         frags_per_bin=30, frag_budget=6000, tau=None, temperature=None, delta=None, tau_p=None, rho_base=0.02,
         contam_eps=0.05, min_plasmids_for_fit=5, allow_sharpening=False, min_containment=0.5,
-        uninformative_log_bf=3.0, misfit_log_bf=3.0, group_sample_bp=50e6, workers=None, cache_dir=None,
+        uninformative_log_bf=3.0, misfit_log_bf=3.0, variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None,
         detect_top=20, seed=1):
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
@@ -183,7 +184,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
     _log("detection model fitted")
 
     # units: host chunks (from contig lengths), targets, calibration fragments
-    grid = Grid(grid_size)
+    grid = Grid(grid_size, kernel=variation)
     n_ids = len(asm.names)
     chunk_offset = np.full(n_ids, -1, np.int64)
     n_chunks_of = {c: -(-lengths[c] // chunk_size) for c in host_contigs}
@@ -229,6 +230,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
         chunks_of = fragment_chunks(frags, chunk_size, chunk_index)
         cal = calibrate(L_chunks, chunk_bin, H, group_modtype, grid, frags, tabs["L_frag"], chunks_of,
                         p_cal, rho_base=rho_base, H_frag=tabs["H_frag"], allow_sharpening=allow_sharpening,
+                        taus=DEFAULT_TAUS if variation == "beta" else DEFAULT_SIGMAS, n_sites_frag=tabs["frag_sites"],
                         log=_log, **model_kw)
         names = dict(enumerate(bins))
         cal["lookalikes"] = cal["lookalikes"].select(
@@ -238,7 +240,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
         cal["fragments"] = cal["fragments"].with_columns(
             pl.col("bin_idx").replace_strict(names, return_dtype=pl.Utf8).alias("bin"),
             pl.col("contig").replace_strict(dict(enumerate(asm.names)), return_dtype=pl.Utf8)).drop("bin_idx")
-        for name in ("summary", "tau_fit", "tau_groups", "temperature_fit", "reliability", "lookalikes",
+        for name in ("summary", "tau_fit", "tau_groups", "temperature_fit", "temperature_by_length", "reliability", "lookalikes",
                      "assignability", "fragments"):
             _write(cal[name], out / "calibration" / f"{name}.tsv")
         tau = cal["tau"] if tau is None else tau
@@ -253,7 +255,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
     else:
         warm, unknown_params = {}, (None, 1.0)
     tabs = None
-    tau = 100.0 if tau is None else tau
+    tau = (100.0 if variation == "beta" else 0.3) if tau is None else tau
     temperature = 1.0 if temperature is None else temperature
 
     model = FittedModel(L_chunks, chunk_bin, H, group_modtype, grid, tau, **warm, **model_kw)
@@ -284,7 +286,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, plasmids=None, mtases=No
     # plasmid-specific delta and tau_p
     fit_mask = is_plasmid & (n_sites >= 20)
     if (delta is None or tau_p is None) and fit_mask.sum() >= min_plasmids_for_fit:
-        d_fit, t_fit, pfit = fit_plasmid_params(model, L_t, rho_t, p_cal, fit_mask, rng=rng, log=_log)
+        d_fit, t_fit, pfit = fit_plasmid_params(model, L_t, rho_t, p_cal, fit_mask, rng=rng, log=_log,
+                                                taus=DEFAULT_TAU_P if variation == "beta" else DEFAULT_SIGMA_P)
         _write(pfit, out / "plasmid_param_fit.tsv")
         delta = d_fit if delta is None else delta
         tau_p = t_fit if tau_p is None else tau_p

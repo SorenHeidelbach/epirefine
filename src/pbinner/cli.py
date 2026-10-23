@@ -47,7 +47,10 @@ def main(argv=None):
     r.add_argument("--cache-dir", help="site cache (default: <out>/cache); reused when inputs are unchanged")
     r.add_argument("--group-sample-mb", type=float, default=50,
                    help="Mb of sequence sampled to measure motif overlap for grouping")
-    r.add_argument("--tau", type=float, help="override calibrated tau")
+    r.add_argument("--variation", choices=["beta", "logit"], default="beta",
+                   help="how a contig's methylated fraction varies around its bin's: Beta(tau) or "
+                        "logit-normal(sigma); --tau then sets tau or sigma")
+    r.add_argument("--tau", type=float, help="override the calibrated variation parameter (tau or sigma)")
     r.add_argument("--temperature", type=float, help="override calibrated temperature")
     r.add_argument("--delta", type=float, help="override fitted plasmid under-methylation factor")
     r.add_argument("--tau-p", type=float, help="override fitted plasmid-vs-host concentration")
@@ -80,7 +83,7 @@ def main(argv=None):
             min_cov=a.min_cov, chunk_size=a.chunk_size, grid_size=a.grid_size, p_unknown=a.p_unknown,
             do_calibrate=not a.no_calibrate, frag_lengths=a.frag_lengths, frags_per_bin=a.frags_per_bin,
             frag_budget=a.frag_budget, workers=a.workers, cache_dir=a.cache_dir, group_sample_bp=a.group_sample_mb * 1e6,
-            tau=a.tau, temperature=a.temperature, min_containment=a.min_containment, seed=a.seed)
+            tau=a.tau, variation=a.variation, temperature=a.temperature, min_containment=a.min_containment, seed=a.seed)
     elif a.cmd == "simulate":
         from .simulate import simulate
         simulate(a.out, seed=a.seed)
