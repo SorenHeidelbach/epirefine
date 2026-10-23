@@ -40,3 +40,5 @@ samples:
     hic_r1: /home/ubuntu/data/ZymoFecal/HiC/HiC_ZymoFecal_R1.fastq
     hic_r2: /home/ubuntu/data/ZymoFecal/HiC/HiC_ZymoFecal_R2.fastq
     hic_index: /home/ubuntu/data/ZymoFecal/hic_map/m2_assembly.chromap.index
+    # Nanomotif left out for now (330 GB pileup, single stream): pbinner against Hi-C first
+    methods: [original, pbinner]
