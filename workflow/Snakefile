@@ -54,7 +54,7 @@ rule all:
         expand(f"{OUT}/{{sample}}/comparison/summary.tsv", sample=SAMPLES),
         expand(f"{OUT}/{{sample}}/hic_validation/summary.tsv", sample=HIC_SAMPLES),
         expand(f"{OUT}/{{sample}}/hic_quality/summary.tsv", sample=HIC_SAMPLES),
-        expand(f"{OUT}/{{sample}}/hic_probability/calibration.tsv", sample=HIC_SAMPLES),
+        expand(f"{OUT}/{{sample}}/hic_probability/probability_vs_hic.pdf", sample=HIC_SAMPLES),
 
 
 rule nanomotif:
@@ -328,3 +328,16 @@ rule hic_probability:
     shell:
         "python {HIC}/probability_vs_hic.py --decisions {input.decisions} --links {input.links} "
         "--contig-bin {input.contig_bin} --out $(dirname {output[0]}) > {log} 2>&1"
+
+
+rule hic_probability_plot:
+    input:
+        f"{OUT}/{{sample}}/hic_probability/calibration.tsv",
+    output:
+        f"{OUT}/{{sample}}/hic_probability/probability_vs_hic.pdf",
+    log:
+        f"{OUT}/{{sample}}/logs/hic_probability_plot.log",
+    conda:
+        "envs/r.yaml"
+    shell:
+        "Rscript {HIC}/plot_probability_vs_hic.R --dir $(dirname {input}) --sample {wildcards.sample} > {log} 2>&1"
