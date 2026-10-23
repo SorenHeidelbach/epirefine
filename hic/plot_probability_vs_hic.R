@@ -62,8 +62,8 @@ pA <- ggplot(grid, aes(px, hy)) +
   facet_wrap(~comp, nrow = 1, labeller = as_labeller(function(x) ifelse(x %in% names(stripA), stripA[x], x))) +
   labs(x = "pbinner probability for the bin", y = "Hi-C probability for the same bin",
        title = "A  pbinner probability against Hi-C contact-map probability",
-       subtitle = sprintf("Contigs with >= %d contacts to binned contigs; Hi-C model: within-genome contact share f = %.2f, Dirichlet-multinomial alpha = %.0f, prior P(no bin) = %.1f",
-                          as.integer(pv["min_links"]), pv["f"], pv["alpha"], pv["prior_none"])) +
+       subtitle = sprintf("Contigs with >= %d contacts to binned contigs.\nHi-C model: within-genome contact share f ~ Beta(%.2f, %.2f) (mean %.2f), contacts to other bins in proportion to their Hi-C signal, prior P(no bin) = %.1f",
+                          as.integer(pv["min_links"]), pv["f_beta_a"], pv["f_beta_b"], pv["f_mean"], pv["prior_none"])) +
   theme(axis.text.x = element_text(angle = 40, hjust = 1), panel.grid.major = element_blank())
 
 # ---- B: calibration ------------------------------------------------------------------------------
