@@ -40,11 +40,11 @@ def version() -> str:
     return m.group(1) if m else "unknown"
 
 
-def run_scenario(sc: dict, out_root: Path) -> dict:
+def run_scenario(sc: dict, out_root: Path, workers: int = 16) -> dict:
     out = out_root / sc["name"]
     out.mkdir(parents=True, exist_ok=True)
     cmd = ["/usr/bin/time", "-v", str(REPO / ".venv/bin/pbinner"), "run", "--assembly", sc["assembly"], "--pileup", sc["pileup"],
-           "--contig-bin", sc["contig_bin"], "--motifs", sc["motifs"], "--out", str(out), "--workers", "16"]
+           "--contig-bin", sc["contig_bin"], "--motifs", sc["motifs"], "--out", str(out), "--workers", str(workers)]
     if sc.get("cache"):
         cmd += ["--cache-dir", sc["cache"]]
     t0 = time.time()
@@ -72,6 +72,8 @@ def main():
     ap.add_argument("--all", action="store_true", help="include optional scenarios")
     ap.add_argument("--only", nargs="+", help="run only these scenario names")
     ap.add_argument("--note", default="", help="what changed, stored with the history row")
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="scenarios run at once (faster; timings then aren't comparable with jobs=1 records)")
     a = ap.parse_args()
     scen = json.loads(Path(a.suite).read_text())["scenarios"]
     scen = [s for s in scen if (s["name"] in a.only if a.only else a.all or not s.get("optional"))]
@@ -80,13 +82,28 @@ def main():
     tag = f"{ver}_{sha}{'-dirty' if dirty else ''}"
     out_root = Path(a.out_root) / tag
     rows = []
-    for sc in scen:
+    workers = max(1, 16 // a.jobs)
+
+    def one(sc):
         print(f"[{datetime.now():%H:%M:%S}] {sc['name']} ...", flush=True)
-        rows.append(run_scenario(sc, out_root))
-        r = rows[-1]
-        print(f"    {r['status']}, {r['wall_s']} s, {r['peak_rss_gb']} GB" +
+        r = run_scenario(sc, out_root, workers)
+        print(f"    {sc['name']}: {r['status']}, {r['wall_s']} s, {r['peak_rss_gb']} GB" +
               (f", contaminants found {r['contam_recall']:.3f}, put back {r['inclusion_recall']:.3f}, "
                f"wrongly placed {r['placed_wrongly']}" if "contam_recall" in r else ""), flush=True)
+        return r
+
+    if a.jobs > 1:
+        # scenarios sharing a site cache must not build it at the same time: one per cache first
+        first, rest, seen = [], [], set()
+        for sc in scen:
+            (rest if sc.get("cache") in seen else first).append(sc)
+            seen.add(sc.get("cache"))
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(a.jobs) as ex:
+            rows = list(ex.map(one, first)) + list(ex.map(one, rest))
+    else:
+        rows = [one(sc) for sc in scen]
+    rows = [dict(r, jobs=a.jobs) for r in rows]
     df = pl.DataFrame(rows, infer_schema_length=None)
     bdir = Path(a.devlog) / "benchmarks"
     (bdir / "runs").mkdir(parents=True, exist_ok=True)
@@ -95,12 +112,12 @@ def main():
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
     cols = [c for c in METRICS if c in df.columns]
     summ = (df.group_by("group", maintain_order=True)
-            .agg(pl.len().alias("scenarios"), *[pl.col(c).mean() for c in cols])
+            .agg(pl.len().alias("scenarios"), *[pl.col(c).mean() for c in cols], pl.col("jobs").first())
             .with_columns(pl.lit(ver).alias("version"), pl.lit(sha + ("-dirty" if dirty else "")).alias("commit"),
                           pl.lit(now).alias("date"), pl.lit(a.note).alias("note")))
     hist_path = bdir / "history.tsv"
     hist = pl.read_csv(hist_path, separator="\t") if hist_path.exists() else None
-    summ = summ.select("date", "version", "commit", "group", "scenarios", *cols, "note")
+    summ = summ.select("date", "version", "commit", "group", "scenarios", *cols, "jobs", "note")
     if hist is not None:
         print("\nChange against the last recorded version of each benchmark:")
         for r in summ.iter_rows(named=True):
@@ -110,8 +127,9 @@ def main():
                 continue
             p = prev.row(-1, named=True)
             parts = []
+            same_jobs = (p.get("jobs") or 1) == r["jobs"]
             for c in cols:
-                if p.get(c) is None or r[c] is None:
+                if p.get(c) is None or r[c] is None or (c in ("wall_s", "peak_rss_gb") and not same_jobs):
                     continue
                 d = r[c] - p[c]
                 parts.append(f"{c} {r[c]:.4g} ({d:+.3g})")

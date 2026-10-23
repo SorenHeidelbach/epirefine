@@ -8,6 +8,9 @@ bin's k-mers measures that: about 0.81 at 99% identity, 0.53 at 97% and 0.34 at 
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 
 K = 21
@@ -57,9 +60,14 @@ def inclusion_redundancy(asm, candidates: list[tuple[int, int]], members: dict[i
     by_bin: dict[int, list[int]] = {}
     for i, (_, b) in enumerate(candidates):
         by_bin.setdefault(b, []).append(i)
-    for b, idx in by_bin.items():
+
+    def work(item):  # one bin at a time; numpy releases the GIL, so bins run on threads
+        b, idx = item
         bin_sk = np.unique(np.concatenate([sketch(np.asarray(asm.seq(c))) for c in members.get(b, [])] or
                                           [np.empty(0, np.uint64)]))
         for i in idx:
             out[i] = containment(sketch(np.asarray(asm.seq(candidates[i][0]))), bin_sk)
+
+    with ThreadPoolExecutor(min(16, os.cpu_count() or 1)) as ex:
+        list(ex.map(work, by_bin.items()))
     return out
