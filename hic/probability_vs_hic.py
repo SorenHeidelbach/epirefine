@@ -1,5 +1,9 @@
 """pbinner's assignment probabilities against the confidence of the Hi-C contact map, per contig.
 
+Only contigs whose Hi-C call is confident (hic/contacts.py: enough contacts, a clear majority to one
+bin, several distinct partner contigs, not explained by random ligation) are scored: elsewhere the
+mapping doesn't support a Hi-C statement strong enough to judge pbinner by.
+
 Hi-C probability: the contact map turned into a posterior over bins (model in hic_posterior), so
 it reads on the same scale as pbinner's. Its prior uses neither methylation nor the binning: P(no
 bin) = --prior-none, the rest uniform over bins. Few contacts give a Hi-C probability near the
@@ -129,6 +133,7 @@ def main():
     ap.add_argument("--links", required=True, help="contig_bin_links.tsv from hic/contacts.py")
     ap.add_argument("--contig-bin", required=True, help="the original contig -> bin table (to estimate f)")
     ap.add_argument("--lengths", required=True, help="contig<TAB>length with header (workflow contig_lengths.tsv)")
+    ap.add_argument("--hic-calls", required=True, help="hic_calls.tsv: only contigs with a confident call are scored")
     ap.add_argument("--min-links", type=int, default=10)
     ap.add_argument("--prior-none", type=float, default=0.5)
     ap.add_argument("--min-outside", type=float, default=0.1,
@@ -149,7 +154,11 @@ def main():
     print(f"Hi-C within-genome share f ~ Beta({fa:.2f}, {fb:.2f}), mean {fa / (fa + fb):.3f}; prior P(none) = {a.prior_none}")
     hic_map = (post.filter(pl.col("genome_outside") >= a.min_outside).sort(["contig", "hic_p"], descending=[False, True]).group_by("contig", maintain_order=True).first()
                .select("contig", pl.col("bin").alias("hic_map"), pl.col("hic_p").alias("hic_p_map"), pl.col("n").alias("hic_links")))
-    base = d.join(hic_map, on="contig", how="inner").join(none, on="contig", how="left")
+    calls = (pl.read_csv(a.hic_calls, separator="\t", infer_schema_length=0).filter(pl.col("confident") == "true")
+             .select("contig", pl.col("hic_bin").alias("hic_call")))
+    base = (d.join(hic_map, on="contig", how="inner").join(none, on="contig", how="left")
+            .join(calls, on="contig", how="inner"))
+    print(f"{base.height} contigs with a confident (well-supported) Hi-C call are scored")
 
     def compare(name, rows, bin_col, p_expr):
         return (rows.with_columns(pl.col(bin_col).alias("target"), p_expr.alias("p"), pl.lit(name).alias("comparison"))

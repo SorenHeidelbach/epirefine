@@ -1,7 +1,8 @@
 # Samples: assembly, modkit pileup, the binner's contig -> bin table (no header), Nanomotif
 # bin-motifs.tsv. Optional: cache_dir (pbinner's site cache, reused across runs), methods (bin sets
 # to compare; default original, nanomotif, pbinner), hic_r1/hic_r2 (Hi-C FASTQs: adds Hi-C
-# validation), hic_index (prebuilt chromap index), hic_max_pairs (read pairs mapped; default 100M).
+# validation), hic_index (prebuilt chromap index), hic_max_pairs (read pairs mapped; default 100M),
+# hic_mapq (minimum MAPQ of both reads of a Hi-C pair; default 20).
 outdir: /home/ubuntu/data/workflow_results
 threads: 16
 checkm2_db_dir: /home/ubuntu/tools/databases/checkm2
