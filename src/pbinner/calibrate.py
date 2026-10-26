@@ -1,8 +1,11 @@
 """Self-calibration with pseudo-contigs.
 
 Binned contigs are cut into fragments of typical contig lengths. Each fragment is scored as if it
-were unbinned, with the chunks it overlaps removed from its own bin's profile (leave-one-out), so the
-true answer is known without external ground truth.
+were unbinned, with every chunk of its source contig removed from its own bin's profile (leave the
+contig out, as contig decisions do), so the true answer is known without external ground truth.
+Removing only the chunks a fragment overlaps left the rest of its own contig in the profile (a
+median 33% of it on ZymoFecal, 52% on human_gut): calibration then measured agreement within a
+contig, saw no between-contig variation (tau = inf) and under-estimated the temperature.
 
 Two tests:
   A  host present:  candidates are all bins; the right answer is the source bin.
@@ -72,6 +75,16 @@ def select_fragments(host_contigs: pl.DataFrame, lengths, n_per_bin: int, rng: n
         (pl.col("tile") * pl.col("length")).alias("start"), ((pl.col("tile") + 1) * pl.col("length")).alias("end"))
 
 
+def contig_chunks(frag_contigs, chunk_contig: np.ndarray) -> list[np.ndarray]:
+    """All host chunks of each fragment's source contig (chunk_contig[u] = contig id of chunk u)."""
+    order = np.argsort(chunk_contig, kind="stable")
+    ids, starts = np.unique(chunk_contig[order], return_index=True)
+    ends = np.r_[starts[1:], len(order)]
+    of = {int(c): order[s:e] for c, s, e in zip(ids, starts, ends)}
+    empty = np.empty(0, dtype=np.int64)
+    return [of.get(int(c), empty).astype(np.int64) for c in frag_contigs]
+
+
 def fragment_chunks(frags: pl.DataFrame, chunk_size: int, chunk_index) -> list[np.ndarray]:
     """Host chunks each fragment overlaps; chunk_index(contig, chunk number) -> unit or -1."""
     out = []
@@ -112,17 +125,24 @@ def _reliability(P: np.ndarray, truth: np.ndarray, test: str) -> list[dict]:
 def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFrame, L_frag,
               chunks_of, p_unknown, H_frag=None, taus=DEFAULT_TAUS, temps=DEFAULT_TEMPS,
               lookalike_dist=0.15, decidable_bf=3.0, etas=DEFAULT_ETAS, lams=DEFAULT_LAMS,
-              allow_sharpening=False, n_sites_frag=None, log=print, **model_kw):
+              allow_sharpening=False, n_sites_frag=None, leave_out=None, log=print, **model_kw):
+    """chunks_of[i]: host chunks fragment i overlaps (to check its label); leave_out[i]: chunks removed
+    from its bin's profile when scoring it (default chunks_of; the pipeline passes the whole source
+    contig)."""
     fbin = frags["bin_idx"].to_numpy()
     H = n_bins
+    leave_out = chunks_of if leave_out is None else leave_out
+    bin_chunks = np.bincount(chunk_bin, minlength=H)
+    # a fragment whose contig is its whole bin has no independent profile to be scored against
+    has_rest = np.array([len(lo) < bin_chunks[b] for lo, b in zip(leave_out, fbin)])
 
     def own_and_scores(model):
         sc = model.score(L_frag)
-        A_own = np.empty(L_frag.shape[:2])
-        for i in range(len(fbin)):
-            A_own[i] = model.loo_rescore(sc, i, fbin[i], chunks_of[i])
+        A_own = np.zeros(L_frag.shape[:2])
+        for i in np.flatnonzero(has_rest):
+            A_own[i] = model.loo_rescore(sc, i, fbin[i], leave_out[i])
         # fragments from chunks the robust model calls foreign to their bin carry a wrong label
-        keep = np.array([bool((model.w[ch] >= 0.5).all()) for ch in chunks_of])
+        keep = has_rest & np.array([bool((model.w[ch] >= 0.5).all()) for ch in chunks_of])
         return sc, A_own, keep
 
     tau_rows, best, warm, group_ll = [], None, {}, []
