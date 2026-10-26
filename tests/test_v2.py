@@ -45,12 +45,13 @@ def test_transition_delta_shifts_mean():
     assert Ti.sum(1).max() == 1 and abs(G.x[Ti[i].argmax()] - 0.72) < 0.05
 
 
-def test_cross_group_records_dropped():
+def test_cross_group_record_goes_to_most_specific_group():
     m = [Motif("TCGA", 3, "a"), Motif("GANTC", 1, "a")]
-    seq = "TTTCGACTCTT"  # TCGA at 2 (A at 5) and GACTC at 4 (A at 5): shared record
+    seq = "TTTCGACTCTT" + "GAATC" * 3  # TCGA at 2 (A at 5) and GACTC at 4 (A at 5): shared record
     recs = build_records({"c": seq}, m)
     sites = assign_sites(recs, [0, 1])  # separate groups (in a real genome overlap is ~1/16)
-    assert not ((sites["pos"] == 5) & (sites["strand"] == "+")).any()
+    shared = sites.filter((pl.col("pos") == 5) & (pl.col("strand") == "+"))
+    assert shared.height == 1 and shared["group"][0] == 0  # TCGA has fewer records: more specific
 
 
 def test_robust_profiles_flag_contaminant():

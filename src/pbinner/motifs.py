@@ -225,8 +225,15 @@ def build_records(contigs: dict[str, str], motifs: list[Motif], matcher: MotifMa
     return pl.concat(frames)
 
 
-def group_motifs(records: pl.DataFrame, motifs: list[Motif], min_containment: float = 0.5) -> list[int]:
-    """Union-find over motifs: same mod type and (reverse-complement pair or site containment >= x)."""
+def group_motifs(records: pl.DataFrame, motifs: list[Motif], min_jaccard: float = 0.9) -> list[int]:
+    """Union-find over motifs: same mod type and (reverse-complement pair or near-identical site sets).
+
+    Motifs are merged only when they describe the same sites (Jaccard >= min_jaccard), not when one
+    contains the other: merging by containment chained short degenerate motifs (CCNGG, CCAG, ...) with
+    everything they contain into groups of up to 53-70 motifs, of which a bin methylates one, so the
+    group's methylated fraction measured which member a genome carries rather than whether an MTase
+    is active. Positions matched by several groups go to the most specific one (assign_sites).
+    """
     n = len(motifs)
     parent = list(range(n))
 
@@ -243,8 +250,8 @@ def group_motifs(records: pl.DataFrame, motifs: list[Motif], min_containment: fl
     for i, c in enumerate(canon):
         union(i, c)
 
-    # containment from shared records: count, per motif pair, the records both match (one pass
-    # over records matched by >= 2 motifs) instead of intersecting every pair of record sets
+    # overlap from shared records: count, per motif pair, the records both match (one pass over
+    # records matched by >= 2 motifs) instead of intersecting every pair of record sets
     contig_ids = {c: i for i, c in enumerate(records["contig"].unique().to_list())}
     keyed = records.select(
         (pl.col("contig").replace_strict(contig_ids, return_dtype=pl.Int64) * (1 << 34)
@@ -254,7 +261,7 @@ def group_motifs(records: pl.DataFrame, motifs: list[Motif], min_containment: fl
     pairs = (multi.join(multi, on="rkey", suffix="_b").filter(pl.col("motif") < pl.col("motif_b"))
              .group_by("motif", "motif_b").len())
     for i, j, inter in pairs.iter_rows():
-        if motifs[i].mod_type == motifs[j].mod_type and inter / min(sizes[i], sizes[j]) >= min_containment:
+        if motifs[i].mod_type == motifs[j].mod_type and inter / (sizes[i] + sizes[j] - inter) >= min_jaccard:
             union(i, j)
     # number groups by their first member, so the numbering does not depend on union order
     first: dict[int, int] = {}
@@ -264,14 +271,25 @@ def group_motifs(records: pl.DataFrame, motifs: list[Motif], min_containment: fl
     return [rid[find(i)] for i in range(n)]
 
 
+def group_sizes(group_of: list[int], motif_rank) -> list[int]:
+    """Records per group (sum over its motifs): the 'specificity' order of assign_sites."""
+    out = [0] * (max(group_of) + 1)
+    for g, r in zip(group_of, motif_rank):
+        out[g] += int(r)
+    return out
+
+
 def assign_sites(records: pl.DataFrame, group_of: list[int], motif_rank: dict[int, int] | None = None) -> pl.DataFrame:
     """Deduplicate records across motifs and give each a (group, site) id.
 
-    Records matching motifs of *different* groups (e.g. the A in TCGANTC, shared by TCGA and
-    GANTC) are dropped: their methylation can come from either MTase, which would leak one
-    group's signal into the other. Within a group, a record shared by several motifs is claimed
-    by the motif with the most records (most general). `motif_rank` (motif -> record count in the
-    whole assembly or a sample of it) keeps that choice consistent when records come in batches.
+    A record matching motifs of *different* groups (e.g. the A in TCGANTC, shared by TCGA and GANTC;
+    or a CCWGG site, which CCNGG also matches) goes to the most specific of them, the group with the
+    fewest records. Its methylation can come from either MTase, but the specific group's sites then
+    measure "either", and the general group's remaining sites measure the general MTase alone, so
+    both stay informative; dropping such records lost half of all positions on ZymoFecal. Within a
+    group, a record shared by several motifs is claimed by the motif with the most records (most
+    general). `motif_rank` (motif -> record count in the whole assembly or a sample of it) keeps both
+    choices consistent when records come in batches.
     """
     keys = ["contig", "pos", "strand", "mod_type"]
     if motif_rank is None:
@@ -279,11 +297,13 @@ def assign_sites(records: pl.DataFrame, group_of: list[int], motif_rank: dict[in
     else:
         sizes = pl.DataFrame({"motif": list(motif_rank), "motif_n": list(motif_rank.values())},
                              schema={"motif": pl.Int32, "motif_n": pl.Int64})
+    rank = dict(sizes.iter_rows())
+    gsize = group_sizes(group_of, [rank.get(i, 0) for i in range(len(group_of))])
     rec = (
         records.join(sizes, on="motif", how="left").with_columns(pl.col("motif_n").fill_null(0))
         .with_columns(pl.col("motif").replace_strict(dict(enumerate(group_of)), return_dtype=pl.Int32).alias("group"))
-        .filter(pl.col("group").n_unique().over(keys) == 1)
-        .sort(["motif_n", "motif"], descending=[True, False])
+        .with_columns(pl.col("group").replace_strict(dict(enumerate(gsize)), return_dtype=pl.Int64).alias("group_n"))
+        .sort(["group_n", "group", "motif_n", "motif"], descending=[False, False, True, False])
         .unique(subset=["contig", "pos", "strand", "mod_type"], keep="first", maintain_order=True)
         .with_columns((pl.col("occ_motif").cast(pl.Int64) * (1 << 40) + pl.col("occ")).alias("site"))
         .with_columns(pl.when(pl.col("strand") == 0).then(pl.lit("+")).otherwise(pl.lit("-")).alias("strand"))

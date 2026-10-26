@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from .motifs import Motif, MotifMatcher, _CODE
+from .motifs import Motif, MotifMatcher, _CODE, group_sizes
 
 MOD_CODE = {"a": 0, "m": 1, "21839": 2, "h": 3}
 SITE_SCHEMA = {"contig": pl.Int32, "group": pl.Int32, "pos": pl.Int64, "n": pl.Int32, "k": pl.Int32}
@@ -151,6 +151,7 @@ class _Worker:
         self.matcher = MotifMatcher(self.motifs)
         self.group = np.array(cfg["group_of"], np.int32)
         self.rank = np.array(cfg["motif_rank"], np.int64)
+        self.gsize = np.array(group_sizes(cfg["group_of"], cfg["motif_rank"]), np.int64)
         self.modc = np.array([MOD_CODE.get(m.mod_type, 3) for m in self.motifs], np.int64)
         self.wanted = cfg["wanted"]  # contig ids to keep (None = all)
         self.sep = int(max(len(m.seq) for m in self.motifs))
@@ -170,11 +171,11 @@ class _Worker:
         occ = rec["occ"] - 2 * offsets[cidx]
         mi = rec["motif"]
         key = (cidx.astype(np.int64) << 36) | (pos << 3) | (rec["strand"].astype(np.int64) << 2) | self.modc[mi]
-        df = pl.DataFrame({"key": key, "group": self.group[mi], "rank": self.rank[mi], "motif": mi,
+        g = self.group[mi]
+        df = pl.DataFrame({"key": key, "group": g, "gsize": self.gsize[g], "rank": self.rank[mi], "motif": mi,
                            "site": (cidx.astype(np.int64) << 50) | (rec["occ_motif"].astype(np.int64) << 36) | occ})
-        # same rules as motifs.assign_sites: drop records claimed by >1 group, keep most general motif
-        return (df.filter(pl.col("group").n_unique().over("key") == 1)
-                .sort(["key", "rank", "motif"], descending=[False, True, False])
+        # same rules as motifs.assign_sites: most specific group, then its most general motif
+        return (df.sort(["key", "gsize", "group", "rank", "motif"], descending=[False, False, False, True, False])
                 .unique(subset="key", keep="first")
                 .select("key", "group", "site"))
 

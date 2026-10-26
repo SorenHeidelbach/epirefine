@@ -79,7 +79,7 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.95, min_methylome_difference=0.3,
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
-        tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_containment=0.5,
+        tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
@@ -104,7 +104,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     relevant = sorted(host_set | set(targets))
     sample = _sample_contigs(contigs, relevant, group_sample_bp, rng)
     records = build_records(sample, motifs)
-    group_of = group_motifs(records, motifs, min_containment)
+    group_of = group_motifs(records, motifs, min_jaccard)
     rank_d = dict(records.group_by("motif").len().iter_rows())
     motif_rank = [int(rank_d.get(i, 0)) for i in range(len(motifs))]
     del records
@@ -116,11 +116,11 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     n_groups = max(group_of) + 1
     group_modtype = [next(motifs[i].mod_type for i in range(len(motifs)) if group_of[i] == g) for g in range(n_groups)]
     group_label = [",".join(motifs[i].key for i in range(len(motifs)) if group_of[i] == g) for g in range(n_groups)]
-    _log(f"{len(motifs)} motifs -> {n_groups} groups (containment from {sum(map(len, sample.values())) / 1e6:.0f} Mb)")
+    _log(f"{len(motifs)} motifs -> {n_groups} groups (overlap from {sum(map(len, sample.values())) / 1e6:.0f} Mb)")
 
     # pass 1: pileup -> site cache (reused when inputs are unchanged)
     man = _manifest(assembly=assembly, pileup=pileup, motifs=[m.key for m in motifs], group_of=group_of,
-                    motif_rank=motif_rank, relevant=len(relevant))
+                    motif_rank=motif_rank, relevant=len(relevant), shared_sites="most_specific_group")
     if cached and cached.get("inputs") == man:
         parts = [str(cache / "sites" / Path(f).name) for f in cached["parts"]]  # wherever the cache now lives
         asm = EncodedAssembly(cache / "asm")

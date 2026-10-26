@@ -52,7 +52,9 @@ def main(argv=None):
     r.add_argument("--min-cov", type=int, default=1)
     r.add_argument("--chunk-size", type=int, default=50_000, help="binned contigs are split into chunks of this size")
     r.add_argument("--grid-size", type=int, default=64)
-    r.add_argument("--min-containment", type=float, default=0.5, help="site overlap needed to merge motifs")
+    r.add_argument("--min-jaccard", type=float, default=0.9,
+                   help="merge motifs whose site sets overlap this much (Jaccard); positions shared by motifs "
+                        "of different groups go to the most specific group")
     r.add_argument("--group-sample-mb", type=float, default=50,
                    help="Mb of sequence sampled to measure motif overlap for grouping")
     r.add_argument("--workers", type=int, help="processes for the pileup and table passes (default: CPUs, max 16)")
@@ -69,7 +71,7 @@ def main(argv=None):
             include_threshold=a.include_threshold, min_methylome_difference=a.min_methylome_difference,
             max_redundancy=a.max_redundancy, min_evidence=a.min_evidence, min_contig_coverage=a.min_contig_coverage, do_calibrate=not a.no_calibrate, frag_lengths=a.frag_lengths,
             frags_per_bin=a.frags_per_bin, frag_budget=a.frag_budget, tau=a.tau, temperature=a.temperature,
-            contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, min_containment=a.min_containment,
+            contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, min_jaccard=a.min_jaccard,
             variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
             cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed)
 
