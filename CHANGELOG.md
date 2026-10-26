@@ -3,6 +3,21 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.6.0 (2026-10-26): calibration leaves the whole contig out
+
+- Calibration scores each pseudo-contig against its bin's profile with *every* chunk of its source
+  contig removed, as contig decisions already did. Before, only the chunks the fragment overlapped
+  were removed, so the rest of its own contig (a median 33-52% of the profile) stayed in, and
+  calibration measured agreement within a contig. Fragments whose contig is its whole bin are skipped.
+
+**Benchmark effect:** ZymoOral and simulated benchmarks identical (mock genomes have no
+between-contig variation). ZymoFecal (real gut community, checked against Hi-C, MAPQ >= 20 and strict
+calls): the unknown-genome model no longer absorbs everything (share of unbinned contigs from bin-less
+genomes 0.995 -> 0.822); inclusions 5 -> 495; of the 380 unbinned contigs Hi-C places confidently, 42
+included, all in Hi-C's bin (was 1); flags 460 -> 431, Hi-C precision of flags 31% -> 36%.
+human_gut: CheckM2 203 vs 204 high-quality bins, median completeness 95.0 vs 95.1%, contamination 1.00%
+(unchanged within noise); run time 25 vs 36 min.
+
 ## 0.5.0 (2026-10-23): bin refinement only; Hi-C validation in the workflow
 
 **Breaking.**

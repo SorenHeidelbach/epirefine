@@ -17,7 +17,8 @@ import numpy as np
 import polars as pl
 
 from . import io as pio
-from .calibrate import DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate, fragment_chunks, fragments_per_bin, select_fragments
+from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate, contig_chunks, fragment_chunks,
+                        fragments_per_bin, select_fragments)
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .model import FittedModel, posterior
@@ -196,6 +197,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         chunks_of = fragment_chunks(frags, chunk_size, chunk_index)
         cal = calibrate(L_chunks, chunk_bin, H, group_modtype, grid, frags, tabs["L_frag"], chunks_of,
                         p_cal, H_frag=tabs["H_frag"], allow_sharpening=allow_sharpening,
+                        leave_out=contig_chunks(frags["contig"].to_numpy(), chunk_contig),
                         taus=DEFAULT_TAUS if variation == "beta" else DEFAULT_SIGMAS, n_sites_frag=tabs["frag_sites"],
                         log=_log, **model_kw)
         names = dict(enumerate(bins))
