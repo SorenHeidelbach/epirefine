@@ -1,7 +1,8 @@
 # Samples: assembly, modkit pileup, the binner's contig -> bin table (no header), Nanomotif
 # bin-motifs.tsv. Optional: cache_dir (pbinner's site cache, reused across runs), methods (bin sets
 # to compare; default original, nanomotif, pbinner), hic_r1/hic_r2 (Hi-C FASTQs: adds Hi-C
-# validation), hic_index (prebuilt chromap index), hic_max_pairs (read pairs mapped; default 100M).
+# validation), hic_index (prebuilt chromap index), hic_max_pairs (read pairs mapped; default 100M),
+# hic_mapq (minimum MAPQ of both reads of a Hi-C pair; default 20).
 outdir: /home/ubuntu/data/workflow_results
 threads: 16
 checkm2_db_dir: /home/ubuntu/tools/databases/checkm2
@@ -40,3 +41,8 @@ samples:
     hic_r1: /home/ubuntu/data/ZymoFecal/HiC/HiC_ZymoFecal_R1.fastq
     hic_r2: /home/ubuntu/data/ZymoFecal/HiC/HiC_ZymoFecal_R2.fastq
     hic_index: /home/ubuntu/data/ZymoFecal/hic_map/m2_assembly.chromap.index
+    # Nanomotif left out for now (330 GB pileup, single stream): pbinner against Hi-C first.
+    # hic = Hi-C-only refinement (hic/refine.py), scored with CheckM2 as a reference;
+    # hic_nonredundant = the same without changes whose contig is >= 30% contained in the target bin
+    # (hic/nonredundant.py, the same k-mer containment test as pbinner D21)
+    methods: [original, pbinner, hic, hic_nonredundant]
