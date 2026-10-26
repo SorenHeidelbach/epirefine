@@ -55,6 +55,7 @@ rule all:
         expand(f"{OUT}/{{sample}}/hic_validation/summary.tsv", sample=HIC_SAMPLES),
         expand(f"{OUT}/{{sample}}/hic_quality/summary.tsv", sample=HIC_SAMPLES),
         expand(f"{OUT}/{{sample}}/hic_probability/probability_vs_hic.pdf", sample=HIC_SAMPLES),
+        expand(f"{OUT}/{{sample}}/hic_within/within_vs_outside.pdf", sample=HIC_SAMPLES),
 
 
 rule nanomotif:
@@ -368,3 +369,24 @@ rule hic_probability_plot:
     shell:
         "(Rscript {HIC}/plot_probability_vs_hic.R --dir $(dirname {input}) --sample {wildcards.sample} && "
         "Rscript {HIC}/plot_contig_probabilities.R --dir $(dirname {input}) --sample {wildcards.sample}) > {log} 2>&1"
+
+
+rule hic_within:
+    input:
+        pairs=f"{OUT}/{{sample}}/hic/contig_pairs.parquet",
+        contig_bin=s("contig_bin"),
+        decisions=f"{OUT}/{{sample}}/pbinner/contig_decisions.tsv",
+        tables=lambda wc: [table_of(wc.sample, m) for m in methods_of(wc.sample)],
+    output:
+        f"{OUT}/{{sample}}/hic_within/within_vs_outside.pdf",
+    params:
+        sets=lambda wc: " ".join(f"--set {m} {table_of(wc.sample, m)}" for m in methods_of(wc.sample)),
+    log:
+        f"{OUT}/{{sample}}/logs/hic_within.log",
+    conda:
+        "envs/r.yaml"
+    shell:
+        # polars is not in the R env: the table step runs in the repository's environment
+        "({REPO}/.venv/bin/python {HIC}/within_vs_outside.py --pairs {input.pairs} --contig-bin {input.contig_bin} "
+        "--decisions {input.decisions} {params.sets} --out $(dirname {output}) && "
+        "Rscript {HIC}/plot_within_vs_outside.R --dir $(dirname {output}) --sample {wildcards.sample}) > {log} 2>&1"
