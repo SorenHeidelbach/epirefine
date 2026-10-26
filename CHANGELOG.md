@@ -3,6 +3,27 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.6.1 (2026-10-26): Hi-C validation of refinement (workflow and hic/ only)
+
+No change to the pbinner package. Workflow and `hic/`:
+- **Strict Hi-C calls.** Pairs need MAPQ >= 20 on both reads (`hic_mapq`; chromap's Hi-C preset
+  used 1) and the `.pairs` file is kept. A contig's Hi-C bin is the bin with most contacts; a call
+  is confident only with >= 20 contacts, >= 80% of the contig's contacts to bins, >= 3 distinct
+  partner contigs, >= 10 contacts without its strongest partner, and P(random ligation) <= 1e-6.
+  On ZymoFecal contigs of CheckM2 high-quality bins: 0 of 139 called to another bin (the earlier
+  rule: 33 of 343, nearly all resting on a single partner contig).
+- `contacts.py` counting and calling are separate steps (rules `hic_pairs`, `hic_contacts`).
+- New analyses: `refine.py` (Hi-C-only refinement as a CheckM2 reference), `nonredundant.py`,
+  `bin_quality.py`, `marker_visibility.py` (can CheckM2 see Hi-C-foreign contigs?),
+  `within_vs_outside.py` (contacts inside vs outside the bin), `probability_vs_hic.py` (Hi-C
+  posterior per contig), `calibrate_with_hic.py` (pbinner P(contaminant) -> Hi-C-foreign rate),
+  with R plots and workflow rules.
+- ZymoFecal sample in the config (original, pbinner and Hi-C bin sets; Nanomotif left out).
+
+**Findings (ZymoFecal):** CheckM2 can't see most Hi-C-foreign sequence (78% carries no duplicated
+single-copy marker); pbinner flags are Hi-C-foreign 36-44% of the time against a base rate of 11%.
+**Benchmark effect:** none (no package change).
+
 ## 0.6.0 (2026-10-26): calibration leaves the whole contig out
 
 - Calibration scores each pseudo-contig against its bin's profile with *every* chunk of its source
