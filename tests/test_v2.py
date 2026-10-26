@@ -193,3 +193,10 @@ def test_logit_kernel_spreads_intermediate_levels_more_than_extremes():
     lo, mid = np.argmin(abs(g.x - 0.003)), np.argmin(abs(g.x - 0.5))
     assert sd(lo) < 0.005 < 0.08 < sd(mid)
     assert np.allclose(g.transition(0.0), np.eye(64))  # sigma 0 = no variation
+
+
+def test_calibration_leaves_the_whole_source_contig_out():
+    from pbinner.calibrate import contig_chunks
+    chunk_contig = np.array([7, 7, 3, 7, 3, 9])
+    got = contig_chunks(np.array([7, 3, 5]), chunk_contig)
+    assert got[0].tolist() == [0, 1, 3] and got[1].tolist() == [2, 4] and got[2].tolist() == []
