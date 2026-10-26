@@ -389,4 +389,5 @@ rule hic_within:
         # polars is not in the R env: the table step runs in the repository's environment
         "({REPO}/.venv/bin/python {HIC}/within_vs_outside.py --pairs {input.pairs} --contig-bin {input.contig_bin} "
         "--decisions {input.decisions} {params.sets} --out $(dirname {output}) && "
-        "Rscript {HIC}/plot_within_vs_outside.R --dir $(dirname {output}) --sample {wildcards.sample}) > {log} 2>&1"
+        "Rscript {HIC}/plot_within_vs_outside.R --dir $(dirname {output}) --sample {wildcards.sample} && "
+        "Rscript {HIC}/plot_ratio_vs_contamination.R --dir $(dirname {output}) --sample {wildcards.sample}) > {log} 2>&1"
