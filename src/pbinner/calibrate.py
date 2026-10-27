@@ -215,14 +215,21 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         R[np.arange(len(fbin)), fbin] = np.logaddexp(np.log1p(-eta) + A_own_k, np.log(eta) + Au).sum(1)  # leave-out
         return R
 
-    def logloss(T, Su_a, Su_b):
+    def fragment_losses(T, Su_a, Su_b):
+        """Per-fragment log loss in test A, and in test B over the decidable fragments."""
         Pa = posterior(S, Su_a, p_unknown, T)
-        la = -np.log(np.maximum(Pa[np.arange(len(fbin)), truth_a], 1e-12)).mean()
+        la = -np.log(np.maximum(Pa[np.arange(len(fbin)), truth_a], 1e-12))
         if not distinct.any():
-            return la, la, np.nan
-        Pb = posterior(S[distinct], Su_b[distinct], p_unknown, T, host_mask=mask_b[distinct])
-        lb = -np.log(np.maximum(Pb[:, H], 1e-12)).mean()
-        return la + lb, la, lb
+            return la, np.empty(0)
+        Tb = T[distinct] if np.ndim(T) else T
+        Pb = posterior(S[distinct], Su_b[distinct], p_unknown, Tb, host_mask=mask_b[distinct])
+        return la, -np.log(np.maximum(Pb[:, H], 1e-12))
+
+    def logloss(T, Su_a, Su_b):
+        la, lb = fragment_losses(T, Su_a, Su_b)
+        if not len(lb):
+            return la.mean(), la.mean(), np.nan
+        return la.mean() + lb.mean(), la.mean(), lb.mean()
 
     temp_rows, Su_by = [], {}
     for eta in etas:
@@ -242,6 +249,27 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     # unbinned contigs; they can reveal overconfidence but not justify more confidence.
     if not allow_sharpening:
         fit = min((r for r in temp_rows if r["temperature"] >= 1.0), key=lambda r: r["log_loss"])
+    # Parsimony: the community-only unknown (lam = 1) is kept unless a model with relatives fits
+    # better by more than chance. The choice between them rests on ~1% of the log loss (ZymoFecal:
+    # 1.641 vs 1.661), trading worse test A for better test B, and flipped with unrelated changes;
+    # the flexible model then absorbed nearly all unbinned contigs (p_unknown 0.98-0.995; inclusions
+    # 1-16 of the 380 that Hi-C places, against 42 of 42 correct with lam = 1).
+    simple = [r for r in temp_rows if r["lam"] >= 1 and (allow_sharpening or r["temperature"] >= 1.0)]
+    if fit["lam"] < 1 and simple:
+        alt = min(simple, key=lambda r: r["log_loss"])
+        la1, lb1 = fragment_losses(fit["temperature"], *Su_by[(fit["eta"], fit["lam"])])
+        la0, lb0 = fragment_losses(alt["temperature"], *Su_by[(alt["eta"], alt["lam"])])
+        dA, dB = la0 - la1, lb0 - lb1   # > 0: the flexible model is better on that fragment
+        gain = dA.mean() + (dB.mean() if len(dB) else 0.0)
+        brng = np.random.default_rng(0)
+        boots = [dA[brng.integers(0, len(dA), len(dA))].mean()
+                 + (dB[brng.integers(0, len(dB), len(dB))].mean() if len(dB) else 0.0) for _ in range(200)]
+        se = float(np.std(boots))
+        keep_flexible = gain > 2 * se
+        log(f"  unknown model: relatives (eta={fit['eta']:g}, lam={fit['lam']:g}) vs community only: log-loss gain "
+            f"{gain:.4f} +- {se:.4f} -> {'relatives' if keep_flexible else 'community only (not significant)'}")
+        if not keep_flexible:
+            fit = alt
     temperature, eta, lam = fit["temperature"], fit["eta"], fit["lam"]
     Su, Su_b = Su_by[(eta, lam)]
     log(f"  unknown model: eta={eta:g}, lam={lam:g}; temperature fitted {fitted_temperature:g} -> used {temperature:g}")
