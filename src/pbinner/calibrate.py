@@ -125,7 +125,7 @@ def _reliability(P: np.ndarray, truth: np.ndarray, test: str) -> list[dict]:
 def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFrame, L_frag,
               chunks_of, p_unknown, H_frag=None, taus=DEFAULT_TAUS, temps=DEFAULT_TEMPS,
               lookalike_dist=0.15, decidable_bf=3.0, etas=DEFAULT_ETAS, lams=DEFAULT_LAMS,
-              allow_sharpening=False, n_sites_frag=None, leave_out=None, target_lengths=None, log=print, **model_kw):
+              allow_sharpening=False, n_sites_frag=None, leave_out=None, log=print, **model_kw):
     """chunks_of[i]: host chunks fragment i overlaps (to check its label); leave_out[i]: chunks removed
     from its bin's profile when scoring it (default chunks_of; the pipeline passes the whole source
     contig)."""
@@ -215,23 +215,6 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         R[np.arange(len(fbin)), fbin] = np.logaddexp(np.log1p(-eta) + A_own_k, np.log(eta) + Au).sum(1)  # leave-out
         return R
 
-    # weight fragments so their lengths follow the sample's unbinned contigs (the units whose
-    # inclusion the unknown model decides), not the even spread over DEFAULT_LENGTHS, in which the
-    # long fragments, easy to place, dominate the fit
-    flen_k = frags_k["length"].to_numpy()
-    wf = np.ones(len(fbin))
-    if target_lengths is not None and len(target_lengths):
-        classes = np.array(sorted(set(flen_k.tolist())), float)
-        nearest = np.abs(np.log(np.asarray(target_lengths, float))[:, None] - np.log(classes)[None]).argmin(1)
-        want = np.bincount(nearest, minlength=len(classes)) / len(nearest)
-        have = np.array([(flen_k == c).mean() for c in classes])
-        per = np.where(have > 0, want / np.maximum(have, 1e-12), 0.0)
-        wf = per[np.searchsorted(classes, flen_k)]
-        wf = wf / wf.mean() if wf.sum() > 0 else np.ones(len(fbin))
-        log("  fragment weights by length (unbinned contigs' distribution): " + ", ".join(
-            f"{int(c) // 1000} kb {w:.2f}" for c, w in zip(classes, per / max(per.mean(), 1e-12))))
-    wb = wf[distinct] / wf[distinct].mean() if distinct.any() and wf[distinct].sum() > 0 else wf[distinct]
-
     def fragment_losses(T, Su_a, Su_b):
         """Per-fragment log loss in test A, and in test B over the decidable fragments."""
         Pa = posterior(S, Su_a, p_unknown, T)
@@ -244,11 +227,9 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
 
     def logloss(T, Su_a, Su_b):
         la, lb = fragment_losses(T, Su_a, Su_b)
-        ma = float(np.average(la, weights=wf))
         if not len(lb):
-            return ma, ma, np.nan
-        mb = float(np.average(lb, weights=wb))
-        return ma + mb, ma, mb
+            return la.mean(), la.mean(), np.nan
+        return la.mean() + lb.mean(), la.mean(), lb.mean()
 
     temp_rows, Su_by = [], {}
     for eta in etas:
@@ -278,7 +259,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         alt = min(simple, key=lambda r: r["log_loss"])
         la1, lb1 = fragment_losses(fit["temperature"], *Su_by[(fit["eta"], fit["lam"])])
         la0, lb0 = fragment_losses(alt["temperature"], *Su_by[(alt["eta"], alt["lam"])])
-        dA, dB = (la0 - la1) * wf, (lb0 - lb1) * wb   # > 0: the flexible model is better (weighted)
+        dA, dB = la0 - la1, lb0 - lb1   # > 0: the flexible model is better on that fragment
         gain = dA.mean() + (dB.mean() if len(dB) else 0.0)
         brng = np.random.default_rng(0)
         boots = [dA[brng.integers(0, len(dA), len(dA))].mean()
