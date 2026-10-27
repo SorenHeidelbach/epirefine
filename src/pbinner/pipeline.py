@@ -136,6 +136,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     del contigs, sample
     cid = asm.index
 
+    # contig coverage (median reads per motif site, all sites): contigs below min_contig_coverage get
+    # no decision at all (status low_coverage) and don't feed the calibration fragments. Against Hi-C
+    # on ZymoFecal, flags on contigs below 5x were confirmed for 12.5% (81% at >= 10x).
+    cov_of = dict(pl.scan_parquet(parts).group_by("contig").agg(pl.col("n").median()).collect().iter_rows())
     counts = (pl.scan_parquet(parts).filter(pl.col("n") >= min_cov)
               .group_by("group", "n", "k").agg(pl.len().alias("w")).collect())
     _log(f"{int(counts['w'].sum())} sites with coverage >= {min_cov}")
@@ -168,8 +172,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         target_of[cid[c]] = i
     frags = None
     if do_calibrate:
-        hc = pl.DataFrame({"contig": [cid[c] for c in host_contigs], "bin_idx": [bin_idx[cb[c]] for c in host_contigs],
-                           "length": [lengths[c] for c in host_contigs]}, schema={"contig": pl.Int32, "bin_idx": pl.Int64, "length": pl.Int64})
+        hc_ok = [c for c in host_contigs if cov_of.get(cid[c], 0.0) >= min_contig_coverage]
+        _log(f"calibration fragments from {len(hc_ok)} of {len(host_contigs)} host contigs with >= {min_contig_coverage:g}x")
+        hc = pl.DataFrame({"contig": [cid[c] for c in hc_ok], "bin_idx": [bin_idx[cb[c]] for c in hc_ok],
+                           "length": [lengths[c] for c in hc_ok]}, schema={"contig": pl.Int32, "bin_idx": pl.Int64, "length": pl.Int64})
         per_bin = fragments_per_bin(frag_budget, len(frag_lengths), H, frags_per_bin)
         frags = select_fragments(hc, frag_lengths, per_bin, rng)
         _log(f"{frags.height} calibration fragments ({per_bin} per bin and length)")
@@ -268,11 +274,12 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # contamination calls only on contigs with enough coverage: against Hi-C on ZymoFecal, flags were
     # confirmed for 81% of contigs at >= 10x, 36% at 5-9x and 12.5% below 5x (most sites there have
     # 1-2 reads); inclusions were right at every coverage, so they are not restricted
-    low_cov = np.nan_to_num(coverage, nan=0.0) < min_contig_coverage
-    testable = np.array([c in host_set and c not in sole_contig and n_sites[i] > 0 and not low_cov[i]
-                         for i, c in enumerate(targets)])
-    _log(f"coverage: {int((low_cov & (given >= 0)).sum())} of {int((given >= 0).sum())} binned contigs below "
-         f"{min_contig_coverage:g}x median site coverage: not tested for contamination")
+    coverage = np.array([cov_of.get(cid[c], 0.0) for c in targets])
+    low_cov = coverage < min_contig_coverage
+    testable = np.array([c in host_set and c not in sole_contig and n_sites[i] > 0 for i, c in enumerate(targets)])
+    _log(f"coverage: {int((low_cov & (given >= 0)).sum())} of {int((given >= 0).sum())} binned and "
+         f"{int((low_cov & (given < 0)).sum())} of {int((given < 0).sum())} unbinned contigs below "
+         f"{min_contig_coverage:g}x median site coverage: no decision (low_coverage)")
     # effect size a contamination call needs (D20): over motif groups, the largest distance between
     # the bin's methylated fraction and the contig's 95% credible interval for its own. Short
     # contigs with a real difference have wide intervals that still clear the bin's level; long
@@ -286,7 +293,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     diff[has] = np.where(n_sites_group[has] > 0, gap, 0.0).max(1)
     ref = refine(sc.S, sc.Su, given, testable, temperature, contamination_threshold, include_threshold,
                  methylome_difference=diff, min_difference=min_methylome_difference,
-                 p_unknown=p_unknown)
+                 p_unknown=p_unknown, decidable=~low_cov)
     # don't include contigs whose sequence the target bin already holds (strain variants, haplotigs):
     # methylation can't see redundancy (D21)
     redundancy = np.full(len(targets), np.nan)
@@ -304,7 +311,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     params.update(p_unknown=p_unknown, contamination_rate=ref.eps)
     P = posterior(sc.S, sc.Su, p_unknown, temperature)
     write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff, redundancy,
-                  evidence=evidence, min_evidence=min_evidence, coverage=coverage, low_coverage=low_cov & (given >= 0))
+                  evidence=evidence, min_evidence=min_evidence, coverage=coverage, low_coverage=low_cov)
     _write(bin_evidence_table(bins, grid.summarize(model.log_prof), n_sites_group, given), out / "bin_evidence.tsv")
     _log(f"refinement: p_unknown={p_unknown:.3f}, contamination rate={ref.eps:.3f}; "
          f"{int(ref.contaminant.sum())} of {int(testable.sum())} testable binned contigs flagged, "

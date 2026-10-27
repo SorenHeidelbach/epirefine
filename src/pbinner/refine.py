@@ -67,8 +67,11 @@ class Refinement:
 def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarray, temperature: float,
            contamination_threshold: float = 0.5, include_threshold: float = 0.95,
            eps_prior=(1.0, 19.0), p_unknown_prior=(1.0, 1.0), p_unknown: float | None = None,
-           methylome_difference: np.ndarray | None = None, min_difference: float = 0.3) -> Refinement:
+           methylome_difference: np.ndarray | None = None, min_difference: float = 0.3,
+           decidable: np.ndarray | None = None) -> Refinement:
     """given[i] = bin index of contig i, -1 if unbinned; testable[i] = binned and scored leave-one-out.
+    decidable[i] = False: no decision about contig i at all (e.g. coverage too low): it is neither
+    flagged nor included and doesn't enter the estimates of p_unknown and the contamination rate.
 
     methylome_difference[i]: over motif groups, the largest distance between the bin's methylated
     fraction and contig i's 95% credible interval for its own. A contaminant must clear its bin by at
@@ -77,8 +80,11 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     within-genome variation that the likelihood alone reads as overwhelming evidence (dev log D20).
     """
     N, H = S.shape
-    Z, Zu = S / temperature, Su / temperature
-    unb = given < 0
+    T = np.asarray(temperature, float)  # scalar or one per contig
+    Z, Zu = S / (T[:, None] if T.ndim == 1 else T), Su / T
+    dec = np.ones(N, bool) if decidable is None else np.asarray(decidable, bool)
+    testable = testable & dec
+    unb = (given < 0) & dec
     # p_u from the unbinned contigs: "some bin, uniformly" vs "an unbinned genome"
     l_bins = logsumexp(Z, axis=1) - np.log(H)
     if p_unknown is None:
@@ -105,7 +111,7 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     if methylome_difference is not None:
         contaminant &= methylome_difference >= min_difference
 
-    candidate = unb | contaminant
+    candidate = unb | contaminant  # unb already excludes contigs without a decision
     include_bin = np.where(candidate & (best_alt < H) & (p_best_alt >= include_threshold), best_alt, -1)
     return Refinement(float(p_unknown), float(eps), p_foreign, best_alt, p_best_alt, contaminant, candidate,
                       include_bin)
@@ -202,8 +208,8 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
         weak = np.isin(status, ["kept", "unbinned"]) & ~(np.nan_to_num(evidence, nan=0.0) >= min_evidence)
         status[weak] = "no_methylation_evidence"
     if low_coverage is not None:
-        # binned contigs below the coverage cutoff were not tested for contamination
-        status[low_coverage & np.isin(status, ["kept", "no_methylation_evidence"])] = "low_coverage"
+        # coverage too low: no decision was made about these contigs (binned or not)
+        status[low_coverage] = "low_coverage"
     new_bin = np.array([bins[ref.include_bin[i]] if ref.include_bin[i] >= 0
                         else (given_lbl[i] if given[i] >= 0 and not ref.contaminant[i] else "")
                         for i in range(len(contigs))], dtype=object)

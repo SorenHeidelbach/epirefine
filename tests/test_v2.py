@@ -237,3 +237,13 @@ def test_low_coverage_binned_contigs_are_not_judged(tmp_path):
     d = pl.read_csv(tmp_path / "contig_decisions.tsv", separator="\t")
     assert dict(d.select("contig", "status").iter_rows()) == {"a": "kept", "b": "low_coverage", "c": "included"}
     assert d["coverage"].to_list() == [12.0, 2.0, 3.0]
+
+
+def test_no_decision_below_coverage_cutoff():
+    from pbinner.refine import refine
+    S = np.array([[0., -50, -50], [-50, 0., -50], [-50, -50, 0.], [-50, -50, 0.]])
+    given = np.array([0, 0, -1, -1])
+    dec = np.array([True, False, True, False])  # contigs 1 and 3: coverage too low
+    r = refine(S, np.array([-40., -40, -40, -40]), given, given >= 0, temperature=1.0, decidable=dec)
+    assert r.contaminant.tolist() == [False, False, False, False]  # contig 1 fits bin 1 but isn't judged
+    assert r.include_bin.tolist() == [-1, -1, 2, -1]              # contig 3 fits bin 2 but isn't included

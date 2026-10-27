@@ -29,8 +29,8 @@ def main(argv=None):
                    help="contigs whose expected methylation evidence (log BF of their bin vs a random community "
                         "genome) is below this get status no_methylation_evidence instead of kept/unbinned")
     r.add_argument("--min-contig-coverage", type=float, default=5.0,
-                   help="binned contigs whose median reads per motif site is below this are not tested for "
-                        "contamination (status low_coverage); 0 tests all")
+                   help="contigs whose median reads per motif site is below this get no decision (neither "
+                        "flagged nor included; status low_coverage) and give no calibration fragments; 0 decides all")
     r.add_argument("--max-redundancy", type=float, default=0.3,
                    help="don't include a contig when at least this share of its k-mers is already in the bin "
                         "(1 = no redundancy check)")
