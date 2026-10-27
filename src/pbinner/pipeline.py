@@ -78,7 +78,7 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.95, min_methylome_difference=0.3,
-        max_redundancy=0.3, min_evidence=3.0, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
+        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_containment=0.5,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
     out = Path(out)
@@ -257,7 +257,22 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
 
     # bin refinement: contamination of binned contigs, inclusion of unbinned ones
     given = np.array([bin_idx[cb[c]] if c in cb else -1 for c in targets])
-    testable = np.array([c in host_set and c not in sole_contig and n_sites[i] > 0 for i, c in enumerate(targets)])
+    # expected methylation evidence (assignability) per contig, for its own bin (binned) or its best
+    # bin (unbinned), and its coverage (median reads per motif site)
+    best_bin = np.where(given >= 0, given, sc.S.argmax(1))
+    evidence, _, coverage = contig_evidence(parts, {cid[c]: i for i, c in enumerate(targets)}, best_bin, model, det,
+                                            grid, float(np.median(np.atleast_1d(temperature))), min_cov,
+                                            workers=workers or 8)
+    _log(f"methylation evidence: {int((np.nan_to_num(evidence, nan=0.0) < min_evidence).sum())} of {len(targets)} "
+         f"contigs below {min_evidence:g} (expected log BF vs a community genome)")
+    # contamination calls only on contigs with enough coverage: against Hi-C on ZymoFecal, flags were
+    # confirmed for 81% of contigs at >= 10x, 36% at 5-9x and 12.5% below 5x (most sites there have
+    # 1-2 reads); inclusions were right at every coverage, so they are not restricted
+    low_cov = np.nan_to_num(coverage, nan=0.0) < min_contig_coverage
+    testable = np.array([c in host_set and c not in sole_contig and n_sites[i] > 0 and not low_cov[i]
+                         for i, c in enumerate(targets)])
+    _log(f"coverage: {int((low_cov & (given >= 0)).sum())} of {int((given >= 0).sum())} binned contigs below "
+         f"{min_contig_coverage:g}x median site coverage: not tested for contamination")
     # effect size a contamination call needs (D20): over motif groups, the largest distance between
     # the bin's methylated fraction and the contig's 95% credible interval for its own. Short
     # contigs with a real difference have wide intervals that still clear the bin's level; long
@@ -288,15 +303,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     p_unknown = ref.p_unknown
     params.update(p_unknown=p_unknown, contamination_rate=ref.eps)
     P = posterior(sc.S, sc.Su, p_unknown, temperature)
-    # expected methylation evidence (assignability) per contig, for its own bin (binned) or its best
-    # bin (unbinned): contigs whose sites couldn't show where they belong are reported as such
-    best_bin = np.where(given >= 0, given, sc.S.argmax(1))
-    evidence, _ = contig_evidence(parts, {cid[c]: i for i, c in enumerate(targets)}, best_bin, model, det, grid,
-                                  float(np.median(np.atleast_1d(temperature))), min_cov)
-    _log(f"methylation evidence: {int((np.nan_to_num(evidence, nan=0.0) < min_evidence).sum())} of {len(targets)} "
-         f"contigs below {min_evidence:g} (expected log BF vs a community genome)")
     write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff, redundancy,
-                  evidence=evidence, min_evidence=min_evidence)
+                  evidence=evidence, min_evidence=min_evidence, coverage=coverage, low_coverage=low_cov & (given >= 0))
     _write(bin_evidence_table(bins, grid.summarize(model.log_prof), n_sites_group, given), out / "bin_evidence.tsv")
     _log(f"refinement: p_unknown={p_unknown:.3f}, contamination rate={ref.eps:.3f}; "
          f"{int(ref.contaminant.sum())} of {int(testable.sum())} testable binned contigs flagged, "

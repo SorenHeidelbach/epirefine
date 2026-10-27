@@ -223,3 +223,17 @@ def test_low_evidence_contigs_get_their_own_status(tmp_path):
                   np.array([100, 2, 100, 1]), set(), P, evidence=np.array([20.0, 0.5, 20.0, np.nan]))
     st = dict(pl.read_csv(tmp_path / "contig_decisions.tsv", separator="\t").select("contig", "status").iter_rows())
     assert st == {"a": "kept", "b": "no_methylation_evidence", "c": "included", "d": "no_methylation_evidence"}
+
+
+def test_low_coverage_binned_contigs_are_not_judged(tmp_path):
+    from pbinner.refine import refine, write_outputs
+    S = np.array([[0., -50, -50], [0., -50, -50], [-50, -50, 0.]])
+    given = np.array([0, 0, -1])
+    low = np.array([False, True, False])
+    r = refine(S, np.array([-40., -40, -40]), given, (given >= 0) & ~low, temperature=1.0)
+    write_outputs(tmp_path, ["a", "b", "c"], {"a": 10, "b": 10, "c": 10}, given, ["x", "y", "z"], r,
+                  np.array([100, 100, 100]), set(), np.full((3, 4), 0.25), evidence=np.array([20.0, 20.0, 20.0]),
+                  coverage=np.array([12.0, 2.0, 3.0]), low_coverage=low)
+    d = pl.read_csv(tmp_path / "contig_decisions.tsv", separator="\t")
+    assert dict(d.select("contig", "status").iter_rows()) == {"a": "kept", "b": "low_coverage", "c": "included"}
+    assert d["coverage"].to_list() == [12.0, 2.0, 3.0]

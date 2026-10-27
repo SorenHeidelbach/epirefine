@@ -86,48 +86,62 @@ def margin_vs_competitors(model: FittedModel, H1, H0, truth: np.ndarray, tempera
 
 
 def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray, model: FittedModel,
-                    det: dict[int, DetectionParams], grid: Grid, temperature: float, min_cov: int = 1):
-    """Expected methylation evidence per target contig: the expected log BF (tempered) that the
-    contig's sites would give for bin truth[u] over a random genome of the community, had the contig
-    come from that bin (assignability, D12). Low values mean its sites can't show where it belongs,
-    whatever their reads say: too few sites, too few reads, or a bin without a distinctive methylome.
+                    det: dict[int, DetectionParams], grid: Grid, temperature: float, min_cov: int = 1,
+                    workers: int = 8):
+    """Expected methylation evidence and coverage per target contig.
+
+    Evidence: the expected log BF (tempered) that the contig's sites would give for bin truth[u] over a
+    random genome of the community, had the contig come from that bin (assignability, D12). Low
+    values mean its sites can't show where it belongs, whatever their reads say: too few sites, too
+    few reads, or a bin without a distinctive methylome. Coverage: median reads per motif site (all
+    sites, before min_cov).
 
     parts: site-cache parquet files (contig, group, pos, n, k); unit_of: cache contig id -> target
-    index. Streams one part at a time; contigs split across parts are evaluated together at the end.
-    Returns (vs_unknown [U], vs_nearest_bin [U]); NaN where truth < 0 or the contig has no sites.
+    index. Parts are processed on threads; contigs split across parts are evaluated together at the
+    end. Returns (vs_unknown [U], vs_nearest_bin [U], coverage [U]); NaN where truth < 0 or no sites.
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     U = len(truth)
-    vs_unk, vs_bin = np.full(U, np.nan), np.full(U, np.nan)
+    vs_unk, vs_bin, cov = np.full(U, np.nan), np.full(U, np.nan), np.full(U, np.nan)
     want = pl.Series(list(unit_of), dtype=pl.Int32)
     seen: dict[int, int] = {}
     for f in parts:
         for c in pl.read_parquet(f, columns=["contig"])["contig"].unique().to_list():
             seen[c] = seen.get(c, 0) + 1
-    split = {c for c, k in seen.items() if k > 1}
+    split = pl.Series(sorted(c for c, k in seen.items() if k > 1), dtype=pl.Int32)
 
     def evaluate(sites: pl.DataFrame):
-        sites = sites.filter(pl.col("contig").is_in(want) & (pl.col("n") >= min_cov))
+        sites = sites.filter(pl.col("contig").is_in(want))
         if not sites.height:
             return
-        units = np.array([unit_of[c] for c in sites["contig"].unique().sort().to_list()])
-        units = units[truth[units] >= 0]
-        if not len(units):
+        med = sites.group_by("contig").agg(pl.col("n").median())
+        for c, m in med.iter_rows():
+            cov[unit_of[c]] = m
+        sites = sites.filter(pl.col("n") >= min_cov)
+        contigs = [c for c in sites["contig"].unique().sort().to_list() if truth[unit_of[c]] >= 0]
+        if not contigs:
             return
-        local = {int(u): i for i, u in enumerate(units)}
-        inv = {c: local[unit_of[c]] for c in sites["contig"].unique().to_list() if unit_of[c] in local}
-        s = (sites.filter(pl.col("contig").is_in(list(inv)))
+        units = np.array([unit_of[c] for c in contigs])
+        inv = {c: i for i, c in enumerate(contigs)}
+        s = (sites.filter(pl.col("contig").is_in(contigs))
              .select(pl.col("contig").replace_strict(inv, return_dtype=pl.Int64).alias("unit"), "group", "n"))
         H1, H0 = expected_tables(s, len(units), model.log_prof.shape[1], det, grid, dtype=np.float32)
         b, _, u = margin_vs_competitors(model, H1, H0, truth[units], temperature)
-        vs_bin[units], vs_unk[units] = b, u
+        vs_bin[units], vs_unk[units] = b, u   # each contig is evaluated in exactly one call
 
-    held = []
-    for f in parts:
+    def one(f):
         d = pl.read_parquet(f, columns=["contig", "group", "n"])
-        if split:
-            held.append(d.filter(pl.col("contig").is_in(list(split))))
-            d = d.filter(~pl.col("contig").is_in(list(split)))
+        if split.len():
+            held = d.filter(pl.col("contig").is_in(split))
+            d = d.filter(~pl.col("contig").is_in(split))
+        else:
+            held = None
         evaluate(d)
+        return held
+
+    with ThreadPoolExecutor(max(1, workers)) as ex:
+        held = [h for h in ex.map(one, parts) if h is not None and h.height]
     if held:
         evaluate(pl.concat(held))
-    return vs_unk, vs_bin
+    return vs_unk, vs_bin, cov

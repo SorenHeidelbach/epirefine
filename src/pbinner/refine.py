@@ -145,7 +145,8 @@ def bin_evidence_table(bins: list[str], summary, n_sites_group: np.ndarray, give
 
 def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bins: list[str], ref: Refinement,
                   n_sites: np.ndarray, sole: set, P: np.ndarray, methylome_difference: np.ndarray | None = None,
-                  redundancy: np.ndarray | None = None, evidence: np.ndarray | None = None, min_evidence: float = 3.0):
+                  redundancy: np.ndarray | None = None, evidence: np.ndarray | None = None, min_evidence: float = 3.0,
+                  coverage: np.ndarray | None = None, low_coverage: np.ndarray | None = None):
     """Nanomotif-compatible files + pbinner's per-contig decision table."""
     H = len(bins)
     labels = bins + ["unknown"]
@@ -200,6 +201,9 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
         # community genome below min_evidence, or no sites at all)
         weak = np.isin(status, ["kept", "unbinned"]) & ~(np.nan_to_num(evidence, nan=0.0) >= min_evidence)
         status[weak] = "no_methylation_evidence"
+    if low_coverage is not None:
+        # binned contigs below the coverage cutoff were not tested for contamination
+        status[low_coverage & np.isin(status, ["kept", "no_methylation_evidence"])] = "low_coverage"
     new_bin = np.array([bins[ref.include_bin[i]] if ref.include_bin[i] >= 0
                         else (given_lbl[i] if given[i] >= 0 and not ref.contaminant[i] else "")
                         for i in range(len(contigs))], dtype=object)
@@ -212,4 +216,5 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
         "map": [labels[k] for k in P.argmax(1)], "p_map": P.max(1), "p_unknown": P[:, -1],
         "credible_set_95": [",".join(credible_set(row, labels)) for row in P],
         "expected_evidence": evidence if evidence is not None else np.full(len(contigs), np.nan),
+        "coverage": coverage if coverage is not None else np.full(len(contigs), np.nan),
     }).write_csv(out / "contig_decisions.tsv", separator="\t", float_precision=4)
