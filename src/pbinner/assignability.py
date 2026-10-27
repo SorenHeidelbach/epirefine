@@ -94,7 +94,7 @@ def margin_vs_competitors(model: FittedModel, H1, H0, truth: np.ndarray, tempera
 
 def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray, model: FittedModel,
                     det: dict[int, DetectionParams], grid: Grid, temperature: float, min_cov: int = 1,
-                    workers: int = 8):
+                    workers: int = 1):
     """Expected methylation evidence and coverage per target contig.
 
     Evidence: the expected log BF (tempered) that the contig's sites would give for bin truth[u] over a
@@ -104,8 +104,9 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
     sites, before min_cov).
 
     parts: site-cache parquet files (contig, group, pos, n, k); unit_of: cache contig id -> target
-    index. Parts are processed on threads; contigs split across parts are evaluated together at the
-    end. Returns (vs_unknown [U], vs_nearest_bin [U], coverage [U]); NaN where truth < 0 or no sites.
+    index. Parts are processed one after another (BLAS uses the cores inside each): running parts
+    on threads put 12 x 16 BLAS threads over OpenBLAS's limit and corrupted the heap (ZymoFecal,
+    2026-10-27). Contigs split across parts are evaluated together at the end. Returns (vs_unknown [U], vs_nearest_bin [U], coverage [U]); NaN where truth < 0 or no sites.
     """
     from concurrent.futures import ThreadPoolExecutor
 

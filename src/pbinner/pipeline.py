@@ -267,8 +267,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # bin (unbinned), and its coverage (median reads per motif site)
     best_bin = np.where(given >= 0, given, sc.S.argmax(1))
     evidence, _, coverage = contig_evidence(parts, {cid[c]: i for i, c in enumerate(targets)}, best_bin, model, det,
-                                            grid, float(np.median(np.atleast_1d(temperature))), min_cov,
-                                            workers=workers or 8)
+                                            grid, float(np.median(np.atleast_1d(temperature))), min_cov)
     _log(f"methylation evidence: {int((np.nan_to_num(evidence, nan=0.0) < min_evidence).sum())} of {len(targets)} "
          f"contigs below {min_evidence:g} (expected log BF vs a community genome)")
     # contamination calls only on contigs with enough coverage: against Hi-C on ZymoFecal, flags were
