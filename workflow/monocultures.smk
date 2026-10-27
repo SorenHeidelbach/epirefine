@@ -52,6 +52,17 @@ rule modkit_pileup:
         "modkit pileup {input.bam} {output} --threads {threads} --log-filepath {log}"
 
 
+rule assembly_copy:
+    # a fresh copy for Nanomotif: pyfastx builds an index (.fxi) beside the FASTA, and stale indexes in
+    # the isolate folders (older than their assembly) made it read garbage (Burkholderia, 2026-10-27)
+    input:
+        lambda wc: asm(wc.iso),
+    output:
+        OUT / "inputs" / "{iso}" / "assembly.fasta",
+    shell:
+        "cp {input} {output}"
+
+
 rule contig_bin:
     input:
         lambda wc: asm(wc.iso),
@@ -64,7 +75,8 @@ rule contig_bin:
 
 rule nanomotif:
     input:
-        assembly=lambda wc: asm(wc.iso), pileup=pileup_of, contig_bin=OUT / "inputs" / "{iso}" / "contig_bin.tsv",
+        assembly=OUT / "inputs" / "{iso}" / "assembly.fasta", pileup=pileup_of,
+        contig_bin=OUT / "inputs" / "{iso}" / "contig_bin.tsv",
     output:
         OUT / "inputs" / "{iso}" / "nanomotif" / "bin-motifs.tsv",
     log:
