@@ -115,9 +115,37 @@ def confidence(p: float) -> str:
     return next((name for lo, name in CONFIDENCE if p >= lo), "")
 
 
+def bin_evidence_table(bins: list[str], summary, n_sites_group: np.ndarray, given: np.ndarray,
+                       lo_methylated: float = 0.5, hi_unmethylated: float = 0.5) -> pl.DataFrame:
+    """Per bin: is there methylation evidence for its methylome?
+
+    methylated               some motif group's 95% interval lies above lo_methylated
+    no_methylation_detected  every group with sites is confidently below hi_unmethylated (an
+                             unmethylated genome: still a profile other bins can be told from)
+    no_methylation_evidence  neither: the intervals are too wide to say (too few sites or reads)
+    """
+    mean, lo, hi, _ = summary
+    sites = np.zeros((len(bins), n_sites_group.shape[1]), np.int64)
+    for b in range(len(bins)):
+        sel = given == b
+        if sel.any():
+            sites[b] = n_sites_group[sel].sum(0)
+    rows = []
+    for b, name in enumerate(bins):
+        has = sites[b] > 0
+        meth = has & (lo[b] >= lo_methylated)
+        unmeth = has & (hi[b] < hi_unmethylated)
+        status = ("methylated" if meth.any() else
+                  "no_methylation_detected" if has.any() and unmeth[has].all() else "no_methylation_evidence")
+        rows.append({"bin": name, "status": status, "groups_with_sites": int(has.sum()),
+                     "groups_methylated": int(meth.sum()), "groups_confidently_unmethylated": int(unmeth.sum()),
+                     "groups_undetermined": int((has & ~meth & ~unmeth).sum()), "sites": int(sites[b].sum())})
+    return pl.DataFrame(rows)
+
+
 def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bins: list[str], ref: Refinement,
                   n_sites: np.ndarray, sole: set, P: np.ndarray, methylome_difference: np.ndarray | None = None,
-                  redundancy: np.ndarray | None = None):
+                  redundancy: np.ndarray | None = None, evidence: np.ndarray | None = None, min_evidence: float = 3.0):
     """Nanomotif-compatible files + pbinner's per-contig decision table."""
     H = len(bins)
     labels = bins + ["unknown"]
@@ -167,6 +195,11 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
         status[~np.isnan(redundancy) & (ref.include_bin < 0)] = "redundant"
     status[(ref.include_bin >= 0) & (given < 0)] = "included"
     status[(ref.include_bin >= 0) & (given >= 0)] = "moved"
+    if evidence is not None:
+        # kept / unbinned only because nothing could be seen: say so (expected log BF vs a random
+        # community genome below min_evidence, or no sites at all)
+        weak = np.isin(status, ["kept", "unbinned"]) & ~(np.nan_to_num(evidence, nan=0.0) >= min_evidence)
+        status[weak] = "no_methylation_evidence"
     new_bin = np.array([bins[ref.include_bin[i]] if ref.include_bin[i] >= 0
                         else (given_lbl[i] if given[i] >= 0 and not ref.contaminant[i] else "")
                         for i in range(len(contigs))], dtype=object)
@@ -178,4 +211,5 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
         "best_alternative": [labels[k] for k in ref.best_alt], "p_best_alternative": ref.p_best_alt,
         "map": [labels[k] for k in P.argmax(1)], "p_map": P.max(1), "p_unknown": P[:, -1],
         "credible_set_95": [",".join(credible_set(row, labels)) for row in P],
+        "expected_evidence": evidence if evidence is not None else np.full(len(contigs), np.nan),
     }).write_csv(out / "contig_decisions.tsv", separator="\t", float_precision=4)

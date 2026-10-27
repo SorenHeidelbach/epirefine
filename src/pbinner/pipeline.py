@@ -21,10 +21,11 @@ from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate
                         fragments_per_bin, select_fragments)
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
+from .assignability import contig_evidence
 from .model import FittedModel, posterior
 from .motifs import build_records, describe_groups, group_motifs
 from .redundancy import inclusion_redundancy
-from .refine import refine, write_outputs
+from .refine import bin_evidence_table, refine, write_outputs
 from .sites import EncodedAssembly, extract_sites, unit_tables
 
 
@@ -77,7 +78,7 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.95, min_methylome_difference=0.3,
-        max_redundancy=0.3, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
+        max_redundancy=0.3, min_evidence=3.0, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_containment=0.5,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
     out = Path(out)
@@ -287,7 +288,16 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     p_unknown = ref.p_unknown
     params.update(p_unknown=p_unknown, contamination_rate=ref.eps)
     P = posterior(sc.S, sc.Su, p_unknown, temperature)
-    write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff, redundancy)
+    # expected methylation evidence (assignability) per contig, for its own bin (binned) or its best
+    # bin (unbinned): contigs whose sites couldn't show where they belong are reported as such
+    best_bin = np.where(given >= 0, given, sc.S.argmax(1))
+    evidence, _ = contig_evidence(parts, {cid[c]: i for i, c in enumerate(targets)}, best_bin, model, det, grid,
+                                  float(np.median(np.atleast_1d(temperature))), min_cov)
+    _log(f"methylation evidence: {int((np.nan_to_num(evidence, nan=0.0) < min_evidence).sum())} of {len(targets)} "
+         f"contigs below {min_evidence:g} (expected log BF vs a community genome)")
+    write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff, redundancy,
+                  evidence=evidence, min_evidence=min_evidence)
+    _write(bin_evidence_table(bins, grid.summarize(model.log_prof), n_sites_group, given), out / "bin_evidence.tsv")
     _log(f"refinement: p_unknown={p_unknown:.3f}, contamination rate={ref.eps:.3f}; "
          f"{int(ref.contaminant.sum())} of {int(testable.sum())} testable binned contigs flagged, "
          f"{int(((ref.include_bin >= 0) & (given < 0)).sum())} of {int((given < 0).sum())} unbinned included, "

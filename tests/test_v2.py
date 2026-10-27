@@ -200,3 +200,26 @@ def test_calibration_leaves_the_whole_source_contig_out():
     chunk_contig = np.array([7, 7, 3, 7, 3, 9])
     got = contig_chunks(np.array([7, 3, 5]), chunk_contig)
     assert got[0].tolist() == [0, 1, 3] and got[1].tolist() == [2, 4] and got[2].tolist() == []
+
+
+def test_bin_evidence_status():
+    from pbinner.refine import bin_evidence_table
+    mean = np.array([[0.95, 0.02], [0.02, 0.01], [0.4, 0.3]])
+    lo = np.array([[0.9, 0.0], [0.0, 0.0], [0.05, 0.02]])
+    hi = np.array([[0.99, 0.05], [0.05, 0.03], [0.9, 0.8]])
+    nsg = np.array([[10, 10], [10, 10], [2, 2]])
+    t = bin_evidence_table(["a", "b", "c"], (mean, lo, hi, None), nsg, np.array([0, 1, 2]))
+    assert t["status"].to_list() == ["methylated", "no_methylation_detected", "no_methylation_evidence"]
+
+
+def test_low_evidence_contigs_get_their_own_status(tmp_path):
+    from pbinner.refine import refine, write_outputs
+    S = np.array([[0., -50, -50], [0., -50, -50], [-50, -50, 0.], [-1., -1, -1]])
+    Su = np.array([-40., -40, -40, -1])
+    given = np.array([0, 0, -1, -1])
+    r = refine(S, Su, given, given >= 0, temperature=1.0)
+    P = np.full((4, 4), 0.25)
+    write_outputs(tmp_path, ["a", "b", "c", "d"], {"a": 10, "b": 10, "c": 10, "d": 10}, given, ["x", "y", "z"], r,
+                  np.array([100, 2, 100, 1]), set(), P, evidence=np.array([20.0, 0.5, 20.0, np.nan]))
+    st = dict(pl.read_csv(tmp_path / "contig_decisions.tsv", separator="\t").select("contig", "status").iter_rows())
+    assert st == {"a": "kept", "b": "no_methylation_evidence", "c": "included", "d": "no_methylation_evidence"}

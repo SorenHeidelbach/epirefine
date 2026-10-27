@@ -25,6 +25,9 @@ def main(argv=None):
                         "must lie at least this far from its bin's level (0 = no effect-size requirement)")
     r.add_argument("--include-threshold", type=float, default=0.95,
                    help="include a contig into a bin when that bin's posterior is at least this")
+    r.add_argument("--min-evidence", type=float, default=3.0,
+                   help="contigs whose expected methylation evidence (log BF of their bin vs a random community "
+                        "genome) is below this get status no_methylation_evidence instead of kept/unbinned")
     r.add_argument("--max-redundancy", type=float, default=0.3,
                    help="don't include a contig when at least this share of its k-mers is already in the bin "
                         "(1 = no redundancy check)")
@@ -61,7 +64,7 @@ def main(argv=None):
         run(a.assembly, a.pileup, a.contig_bin, a.motifs, a.out, min_cov=a.min_cov, chunk_size=a.chunk_size,
             grid_size=a.grid_size, p_unknown=a.p_unknown, contamination_threshold=a.contamination_threshold,
             include_threshold=a.include_threshold, min_methylome_difference=a.min_methylome_difference,
-            max_redundancy=a.max_redundancy, do_calibrate=not a.no_calibrate, frag_lengths=a.frag_lengths,
+            max_redundancy=a.max_redundancy, min_evidence=a.min_evidence, do_calibrate=not a.no_calibrate, frag_lengths=a.frag_lengths,
             frags_per_bin=a.frags_per_bin, frag_budget=a.frag_budget, tau=a.tau, temperature=a.temperature,
             contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, min_containment=a.min_containment,
             variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
