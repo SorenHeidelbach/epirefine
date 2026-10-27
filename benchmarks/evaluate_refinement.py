@@ -36,14 +36,14 @@ def bin_quality(assign: pl.DataFrame, truth: pl.DataFrame) -> tuple[float, float
 
 def evaluate(truth_path, contamination_path, new_bins_path, name="", decisions_path=None) -> dict:
     """decisions_path: pbinner's contig_decisions.tsv. Contigs it made no decision about because their
-    coverage is too low (status low_coverage) are left out of the contamination and inclusion counts:
+    coverage is too low or they are too short (status low_coverage, too_short) are left out of the contamination and inclusion counts:
     they were not evaluated. Bin quality uses all contigs (unevaluated ones stay where they were)."""
     t = pl.read_csv(truth_path, separator="\t").with_columns(pl.col("true_bin", "given_bin").fill_null(""))
     t_all = t
     excluded = 0
     if decisions_path and Path(decisions_path).exists():
         dec = pl.read_csv(decisions_path, separator="\t", infer_schema_length=0)
-        low = set(dec.filter(pl.col("status") == "low_coverage")["contig"].to_list())
+        low = set(dec.filter(pl.col("status").is_in(["low_coverage", "too_short"]))["contig"].to_list())
         excluded = int(t["contig"].is_in(list(low)).sum())
         t = t.filter(~pl.col("contig").is_in(list(low)))
     flagged = set()

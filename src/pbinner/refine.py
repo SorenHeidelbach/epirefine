@@ -65,9 +65,9 @@ class Refinement:
 
 
 def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarray, temperature: float,
-           contamination_threshold: float = 0.5, include_threshold: float = 0.95,
+           contamination_threshold: float = 0.5, include_threshold: float = 0.9,
            eps_prior=(1.0, 19.0), p_unknown_prior=(1.0, 1.0), p_unknown: float | None = None,
-           methylome_difference: np.ndarray | None = None, min_difference: float = 0.3,
+           methylome_difference: np.ndarray | None = None, min_difference: float = 0.4,
            decidable: np.ndarray | None = None) -> Refinement:
     """given[i] = bin index of contig i, -1 if unbinned; testable[i] = binned and scored leave-one-out.
     decidable[i] = False: no decision about contig i at all (e.g. coverage too low): it is neither
@@ -152,7 +152,8 @@ def bin_evidence_table(bins: list[str], summary, n_sites_group: np.ndarray, give
 def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bins: list[str], ref: Refinement,
                   n_sites: np.ndarray, sole: set, P: np.ndarray, methylome_difference: np.ndarray | None = None,
                   redundancy: np.ndarray | None = None, evidence: np.ndarray | None = None, min_evidence: float = 3.0,
-                  coverage: np.ndarray | None = None, low_coverage: np.ndarray | None = None):
+                  coverage: np.ndarray | None = None, low_coverage: np.ndarray | None = None,
+                  too_short: np.ndarray | None = None):
     """Nanomotif-compatible files + pbinner's per-contig decision table."""
     H = len(bins)
     labels = bins + ["unknown"]
@@ -210,6 +211,9 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
     if low_coverage is not None:
         # coverage too low: no decision was made about these contigs (binned or not)
         status[low_coverage] = "low_coverage"
+    if too_short is not None:
+        # shorter than min_contig_length: no decision either
+        status[too_short] = "too_short"
     new_bin = np.array([bins[ref.include_bin[i]] if ref.include_bin[i] >= 0
                         else (given_lbl[i] if given[i] >= 0 and not ref.contaminant[i] else "")
                         for i in range(len(contigs))], dtype=object)

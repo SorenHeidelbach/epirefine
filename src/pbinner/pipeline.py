@@ -77,8 +77,8 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 
 
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
-        p_unknown=None, contamination_threshold=0.5, include_threshold=0.95, min_methylome_difference=0.3,
-        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
+        p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
+        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
     out = Path(out)
@@ -275,6 +275,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # 1-2 reads); inclusions were right at every coverage, so they are not restricted
     coverage = np.array([cov_of.get(cid[c], 0.0) for c in targets])
     low_cov = coverage < min_contig_coverage
+    # contigs shorter than min_contig_length get no decision either (status too_short): a 1 kb contig
+    # holds a handful of motif sites, too few to tell genomes apart
+    short = np.array([lengths[c] < min_contig_length for c in targets])
+    _log(f"length: {int(short.sum())} of {len(targets)} contigs shorter than {min_contig_length} bp: no decision (too_short)")
     testable = np.array([c in host_set and c not in sole_contig and n_sites[i] > 0 for i, c in enumerate(targets)])
     _log(f"coverage: {int((low_cov & (given >= 0)).sum())} of {int((given >= 0).sum())} binned and "
          f"{int((low_cov & (given < 0)).sum())} of {int((given < 0).sum())} unbinned contigs below "
@@ -292,7 +296,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     diff[has] = np.where(n_sites_group[has] > 0, gap, 0.0).max(1)
     ref = refine(sc.S, sc.Su, given, testable, temperature, contamination_threshold, include_threshold,
                  methylome_difference=diff, min_difference=min_methylome_difference,
-                 p_unknown=p_unknown, decidable=~low_cov)
+                 p_unknown=p_unknown, decidable=~low_cov & ~short)
     # don't include contigs whose sequence the target bin already holds (strain variants, haplotigs):
     # methylation can't see redundancy (D21)
     redundancy = np.full(len(targets), np.nan)
@@ -310,7 +314,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     params.update(p_unknown=p_unknown, contamination_rate=ref.eps)
     P = posterior(sc.S, sc.Su, p_unknown, temperature)
     write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff, redundancy,
-                  evidence=evidence, min_evidence=min_evidence, coverage=coverage, low_coverage=low_cov)
+                  evidence=evidence, min_evidence=min_evidence, coverage=coverage, low_coverage=low_cov, too_short=short)
     _write(bin_evidence_table(bins, grid.summarize(model.log_prof), n_sites_group, given), out / "bin_evidence.tsv")
     _log(f"refinement: p_unknown={p_unknown:.3f}, contamination rate={ref.eps:.3f}; "
          f"{int(ref.contaminant.sum())} of {int(testable.sum())} testable binned contigs flagged, "

@@ -248,3 +248,16 @@ def test_no_decision_below_coverage_cutoff():
     r = refine(S, np.array([-40., -40, -40, -40]), given, given >= 0, temperature=1.0, decidable=dec)
     assert r.contaminant.tolist() == [False, False, False, False]  # contig 1 fits bin 1 but isn't judged
     assert r.include_bin.tolist() == [-1, -1, 2, -1]              # contig 3 fits bin 2 but isn't included
+
+
+def test_short_contigs_get_status_too_short(tmp_path):
+    from pbinner.refine import refine, write_outputs
+    S = np.array([[0., -50, -50], [-50, -50, 0.], [-50, -50, 0.]])
+    given = np.array([0, -1, -1])
+    short = np.array([False, False, True])  # contig c fits bin z but is shorter than the cutoff
+    r = refine(S, np.array([-40., -40, -40]), given, given >= 0, temperature=1.0, decidable=~short)
+    write_outputs(tmp_path, ["a", "b", "c"], {"a": 5000, "b": 5000, "c": 800}, given, ["x", "y", "z"], r,
+                  np.array([100, 100, 100]), set(), np.full((3, 4), 0.25), evidence=np.array([20.0, 20.0, 20.0]),
+                  coverage=np.array([12.0, 12.0, 12.0]), low_coverage=np.zeros(3, bool), too_short=short)
+    d = pl.read_csv(tmp_path / "contig_decisions.tsv", separator="\t")
+    assert dict(d.select("contig", "status").iter_rows()) == {"a": "kept", "b": "included", "c": "too_short"}
