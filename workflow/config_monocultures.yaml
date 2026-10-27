@@ -1,0 +1,5 @@
+# Monoculture isolates -> modkit pileups / Nanomotif motifs where missing -> benchmark sets
+root: /home/ubuntu/data/monocultures/monocultures
+out: /home/ubuntu/data/mono_bench
+# suite: benchmarks/suite_monocultures.json   # default
+# build_args: "--communities 6 3 3 --isolates-per-community 8 --cov-min 3 --cov-max 60"
