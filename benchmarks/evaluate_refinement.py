@@ -35,17 +35,21 @@ def bin_quality(assign: pl.DataFrame, truth: pl.DataFrame) -> tuple[float, float
 
 
 def evaluate(truth_path, contamination_path, new_bins_path, name="", decisions_path=None) -> dict:
-    """decisions_path: pbinner's contig_decisions.tsv. Contigs it made no decision about because their
-    coverage is too low or they are too short (status low_coverage, too_short) are left out of the contamination and inclusion counts:
-    they were not evaluated. Bin quality uses all contigs (unevaluated ones stay where they were)."""
+    """decisions_path: pbinner's contig_decisions.tsv. Contigs it did not judge are left out of the
+    contamination and inclusion counts and counted separately: coverage too low or contig too short
+    (status low_coverage, too_short), or enough coverage and length but no usable methylation (status
+    no_methylation_evidence: kept or left unbinned because nothing could be seen). Bin quality uses all
+    contigs (unevaluated ones stay where they were)."""
     t = pl.read_csv(truth_path, separator="\t").with_columns(pl.col("true_bin", "given_bin").fill_null(""))
     t_all = t
-    excluded = 0
+    excluded = excluded_ne = 0
     if decisions_path and Path(decisions_path).exists():
         dec = pl.read_csv(decisions_path, separator="\t", infer_schema_length=0)
         low = set(dec.filter(pl.col("status").is_in(["low_coverage", "too_short"]))["contig"].to_list())
+        ne = set(dec.filter(pl.col("status") == "no_methylation_evidence")["contig"].to_list())
         excluded = int(t["contig"].is_in(list(low)).sum())
-        t = t.filter(~pl.col("contig").is_in(list(low)))
+        excluded_ne = int(t["contig"].is_in(list(ne)).sum())
+        t = t.filter(~pl.col("contig").is_in(list(low | ne)))
     flagged = set()
     if contamination_path and Path(contamination_path).exists():
         cdf = pl.read_csv(contamination_path, separator="\t", infer_schema_length=0)
@@ -74,7 +78,7 @@ def evaluate(truth_path, contamination_path, new_bins_path, name="", decisions_p
     c0, k0 = bin_quality(given, t_all)
     c1, k1 = bin_quality(after, t_all)
     return {
-        "tool": name, "excluded_low_coverage": excluded, "contaminants": tp + fn, "flagged": tp + fp,
+        "tool": name, "excluded_low_coverage": excluded, "excluded_no_methylation_evidence": excluded_ne, "contaminants": tp + fn, "flagged": tp + fp,
         "contam_precision": tp / (tp + fp) if tp + fp else float("nan"),
         "contam_recall": tp / (tp + fn) if tp + fn else float("nan"),
         "to_include": want.height, "included_correct": included_ok,
