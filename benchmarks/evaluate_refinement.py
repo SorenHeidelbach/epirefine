@@ -34,8 +34,22 @@ def bin_quality(assign: pl.DataFrame, truth: pl.DataFrame) -> tuple[float, float
     return float(comp), float(cont)
 
 
-def evaluate(truth_path, contamination_path, new_bins_path, name="") -> dict:
+def evaluate(truth_path, contamination_path, new_bins_path, name="", decisions_path=None) -> dict:
+    """decisions_path: pbinner's contig_decisions.tsv. Contigs it did not judge are left out of the
+    contamination and inclusion counts and counted separately: coverage too low or contig too short
+    (status low_coverage, too_short), or enough coverage and length but no usable methylation (status
+    no_methylation_evidence: kept or left unbinned because nothing could be seen). Bin quality uses all
+    contigs (unevaluated ones stay where they were)."""
     t = pl.read_csv(truth_path, separator="\t").with_columns(pl.col("true_bin", "given_bin").fill_null(""))
+    t_all = t
+    excluded = excluded_ne = 0
+    if decisions_path and Path(decisions_path).exists():
+        dec = pl.read_csv(decisions_path, separator="\t", infer_schema_length=0)
+        low = set(dec.filter(pl.col("status").is_in(["low_coverage", "too_short"]))["contig"].to_list())
+        ne = set(dec.filter(pl.col("status") == "no_methylation_evidence")["contig"].to_list())
+        excluded = int(t["contig"].is_in(list(low)).sum())
+        excluded_ne = int(t["contig"].is_in(list(ne)).sum())
+        t = t.filter(~pl.col("contig").is_in(list(low | ne)))
     flagged = set()
     if contamination_path and Path(contamination_path).exists():
         cdf = pl.read_csv(contamination_path, separator="\t", infer_schema_length=0)
@@ -58,12 +72,13 @@ def evaluate(truth_path, contamination_path, new_bins_path, name="") -> dict:
     stay = t.filter(pl.col("category").is_in(["orphan", "unknown", "orphan_contaminant"]))
     stay_wrong = int((stay["final_bin"] != "").sum())
 
-    given = t.filter(pl.col("given_bin") != "").select("contig", pl.col("given_bin").alias("bin"))
-    after = t.filter(pl.col("final_bin") != "").select("contig", pl.col("final_bin").alias("bin"))
-    c0, k0 = bin_quality(given, t)
-    c1, k1 = bin_quality(after, t)
+    t_all = t_all.with_columns(pl.col("contig").replace_strict(final, default="").alias("final_bin"))
+    given = t_all.filter(pl.col("given_bin") != "").select("contig", pl.col("given_bin").alias("bin"))
+    after = t_all.filter(pl.col("final_bin") != "").select("contig", pl.col("final_bin").alias("bin"))
+    c0, k0 = bin_quality(given, t_all)
+    c1, k1 = bin_quality(after, t_all)
     return {
-        "tool": name, "contaminants": tp + fn, "flagged": tp + fp,
+        "tool": name, "excluded_low_coverage": excluded, "excluded_no_methylation_evidence": excluded_ne, "contaminants": tp + fn, "flagged": tp + fp,
         "contam_precision": tp / (tp + fp) if tp + fp else float("nan"),
         "contam_recall": tp / (tp + fn) if tp + fn else float("nan"),
         "to_include": want.height, "included_correct": included_ok,
@@ -81,9 +96,10 @@ def main():
     ap.add_argument("--contamination")
     ap.add_argument("--new-bins", required=True)
     ap.add_argument("--name", default="")
+    ap.add_argument("--decisions", help="pbinner contig_decisions.tsv: leave low_coverage contigs out")
     ap.add_argument("--table", help="append the row to this TSV")
     a = ap.parse_args()
-    row = evaluate(a.truth, a.contamination, a.new_bins, a.name)
+    row = evaluate(a.truth, a.contamination, a.new_bins, a.name, a.decisions)
     df = pl.DataFrame([row])
     if a.table:
         p = Path(a.table)

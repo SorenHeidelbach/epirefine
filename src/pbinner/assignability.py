@@ -24,13 +24,19 @@ from .model import FittedModel, score_units
 
 
 def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int, DetectionParams],
-                    grid: Grid, n_cap: int = 500, dtype=np.float64):
-    """sites: integer columns unit, group, n (optional count w). Returns H1, H0 with shape [U, M, G]."""
+                    grid: Grid, n_cap: int = 500, dtype=np.float64, table: dict | None = None):
+    """sites: integer columns unit, group, n (optional count w). Returns H1, H0 with shape [U, M, G].
+
+    table: a dict reused across calls (the per-(group, n) expectations depend only on the caller
+    model and the grid), so streaming many batches doesn't recompute them in Python each time.
+    """
     w = pl.col("w").sum() if "w" in sites.columns else pl.len()
     s = (sites.with_columns(pl.col("n").clip(upper_bound=n_cap))
          .group_by("unit", "group", "n").agg(w.alias("w")))
-    table = {}
+    table = {} if table is None else table
     for g, n in s.select("group", "n").unique().iter_rows():
+        if (g, n) in table:
+            continue
         p = det[g]
         k = np.arange(n + 1, dtype=float)
         logc = gammaln(n + 1) - gammaln(k + 1) - gammaln(n - k + 1)
@@ -42,8 +48,9 @@ def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[
     H0 = np.zeros_like(H1)
     if s.height == 0:
         return H1, H0
-    kid = {k: i for i, k in enumerate(table)}
-    T1 = np.stack([v[0] for v in table.values()]); T0 = np.stack([v[1] for v in table.values()])
+    keys = sorted(set(zip(s["group"].to_list(), s["n"].to_list())))
+    kid = {k: i for i, k in enumerate(keys)}
+    T1 = np.stack([table[k][0] for k in keys]); T0 = np.stack([table[k][1] for k in keys])
     s = s.with_columns((pl.col("unit").cast(pl.Int64) * n_groups + pl.col("group")).alias("flat")).sort("flat")
     flat, w = s["flat"].to_numpy(), s["w"].to_numpy().astype(float)
     r = np.array([kid[k] for k in zip(s["group"].to_list(), s["n"].to_list())])
@@ -83,3 +90,77 @@ def margin_vs_competitors(model: FittedModel, H1, H0, truth: np.ndarray, tempera
             nearest[sl] = S.argmax(1)
             vs_bin[sl] = (own - S[idx, nearest[sl]]) / temperature
     return vs_bin, nearest, vs_unk
+
+
+def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray, model: FittedModel,
+                    det: dict[int, DetectionParams], grid: Grid, temperature: float, min_cov: int = 1,
+                    workers: int = 1, group_weights: np.ndarray | None = None, drop_groups=()):
+    """Expected methylation evidence and coverage per target contig.
+
+    Evidence: the expected log BF (tempered) that the contig's sites would give for bin truth[u] over a
+    random genome of the community, had the contig come from that bin (assignability, D12). Low
+    values mean its sites can't show where it belongs, whatever their reads say: too few sites, too
+    few reads, or a bin without a distinctive methylome. Coverage: median reads per motif site (all
+    sites, before min_cov).
+
+    parts: site-cache parquet files (contig, group, pos, n, k); unit_of: cache contig id -> target
+    index. Parts are processed one after another (BLAS uses the cores inside each): running parts
+    on threads put 12 x 16 BLAS threads over OpenBLAS's limit and corrupted the heap (ZymoFecal,
+    2026-10-27). Contigs split across parts are evaluated together at the end. Returns (vs_unknown [U], vs_nearest_bin [U], coverage [U]); NaN where truth < 0 or no sites.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    U = len(truth)
+    vs_unk, vs_bin, cov = np.full(U, np.nan), np.full(U, np.nan), np.full(U, np.nan)
+    want = pl.Series(list(unit_of), dtype=pl.Int32)
+    seen: dict[int, int] = {}
+    for f in parts:
+        for c in pl.read_parquet(f, columns=["contig"])["contig"].unique().to_list():
+            seen[c] = seen.get(c, 0) + 1
+    split = pl.Series(sorted(c for c, k in seen.items() if k > 1), dtype=pl.Int32)
+    # the (group, n) expectation table, filled once for every combination present (Python loop),
+    # then shared read-only by the threads
+    shared: dict = {}
+    keep = ~pl.col("group").is_in(list(drop_groups))
+    combos = (pl.scan_parquet(parts).filter((pl.col("n") >= min_cov) & keep).select("group", pl.col("n").clip(upper_bound=500))
+              .unique().collect())
+    expected_tables(combos.with_columns(pl.lit(0).alias("unit")), 1, model.log_prof.shape[1], det, grid,
+                    dtype=np.float32, table=shared)
+
+    def evaluate(sites: pl.DataFrame):
+        sites = sites.filter(pl.col("contig").is_in(want))
+        if not sites.height:
+            return
+        med = sites.group_by("contig").agg(pl.col("n").median())
+        for c, m in med.iter_rows():
+            cov[unit_of[c]] = m
+        sites = sites.filter((pl.col("n") >= min_cov) & keep)
+        contigs = [c for c in sites["contig"].unique().sort().to_list() if truth[unit_of[c]] >= 0]
+        if not contigs:
+            return
+        units = np.array([unit_of[c] for c in contigs])
+        inv = {c: i for i, c in enumerate(contigs)}
+        s = (sites.filter(pl.col("contig").is_in(contigs))
+             .select(pl.col("contig").replace_strict(inv, return_dtype=pl.Int64).alias("unit"), "group", "n"))
+        H1, H0 = expected_tables(s, len(units), model.log_prof.shape[1], det, grid, dtype=np.float32, table=shared)
+        if group_weights is not None:
+            gw = np.asarray(group_weights, np.float32)[None, :, None]
+            H1, H0 = H1 * gw, H0 * gw
+        b, _, u = margin_vs_competitors(model, H1, H0, truth[units], temperature)
+        vs_bin[units], vs_unk[units] = b, u   # each contig is evaluated in exactly one call
+
+    def one(f):
+        d = pl.read_parquet(f, columns=["contig", "group", "n"])
+        if split.len():
+            held = d.filter(pl.col("contig").is_in(split))
+            d = d.filter(~pl.col("contig").is_in(split))
+        else:
+            held = None
+        evaluate(d)
+        return held
+
+    with ThreadPoolExecutor(max(1, workers)) as ex:
+        held = [h for h in ex.map(one, parts) if h is not None and h.height]
+    if held:
+        evaluate(pl.concat(held))
+    return vs_unk, vs_bin, cov

@@ -1,6 +1,6 @@
 [project]
 name = "pbinner"
-version = "0.6.1"
+version = "0.7.0"
 description = "Probabilistic plasmid-host assignment from nanopore methylation (builds on Nanomotif output)"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.26", "scipy>=1.11", "polars>=1.0"]
