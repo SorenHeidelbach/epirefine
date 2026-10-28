@@ -3,6 +3,49 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.7.0 (2026-10-28): coverage cutoff, motif groups, regional model, and new statuses and columns
+
+**Breaking for downstream parsers:** `contig_decisions.tsv` gains statuses `low_coverage`, `too_short`,
+`no_methylation_evidence` and `mixed`, and columns `expected_evidence`, `coverage`,
+`p_regional_foreign`, `p_regional_mixed`, `foreign_segments` and `segment_bins`. A new file,
+`bin_evidence.tsv`, is written. The Nanomotif-compatible files keep their columns.
+
+Model and decisions:
+- **No decision below 5x** median coverage at motif sites, counted per strand (status `low_coverage`,
+  `--min-contig-coverage`), or below 1 kb (status `too_short`, `--min-contig-length`).
+- **Status `no_methylation_evidence`** for contigs whose sites cannot show where they belong
+  (expected log Bayes factor below 3 against a random community genome).
+- **Motif groups:** motifs are merged only when their sites are near-identical (Jaccard >= 0.9), and
+  shared positions go to the most specific group. ZymoFecal: 952 motifs, 713 groups.
+- **Noise filter:** groups whose sites show intermediate calls in >= 20% of bins are dropped
+  (ZymoFecal: 8 4mC groups on CCNGG-type contexts). `--no-motif-noise-filter` turns it off.
+- **Group weights:** variants of one methyltransferase share one group's weight (ZymoFecal: 81
+  groups in 16 clusters). `--no-group-weights` turns them off.
+- **Unknown-genome model:** community-only unless relatives fit significantly better (paired
+  bootstrap); the per-group swap probability is capped at 0.05.
+- **Thresholds:** flags need a methylome difference >= 0.4, and inclusion needs P >= 0.9, or >= 0.95
+  for bins with no detected methylation (`--include-threshold-unmethylated`).
+- **Regional model:** long binned contigs are judged along their length (member / foreign / mixed,
+  a two-state chain over 50 kb chunks). Flags better explained as mixed are withdrawn, and the
+  contig is reported with its foreign segments and a segment map. Long unbinned contigs are scored
+  in windows, with inclusion tied to the model's share of genomes without a bin.
+  `--no-regional-model` turns it off.
+- Evidence pass: cache parts run serially, and the expectation table is shared (fixes a heap
+  corruption from oversubscribed OpenBLAS threads on ZymoFecal).
+- Benchmarks leave undecided contigs out of the metrics and count them separately. New chimera
+  benchmark: `benchmarks/chimera_sets.py`, `benchmarks/evaluate_regional.py`.
+
+**Benchmark effect** (39ab5ae, decided contigs; flag precision 1.00 on every benchmark):
+- Monocultures: contaminants found 0.948, put back 0.893, 2.0 wrong placements per scenario.
+- ZymoOral 5-150 kb: 1.000 / 0.927. ZymoOral 2-30 kb: 0.996 / 0.876.
+- Simulated look-alikes: 0.967 found; nothing included.
+- Chimeras: 33 of 40 reported as mixed instead of flagged; 20 of 20 long contaminants flagged.
+
+**ZymoFecal against the strict full-library Hi-C (contigs >= 10x):**
+- Flag precision 0.40 → 0.86 and recall 0.75 → 0.75 (TP/FP/FN 6/9/2 → 6/1/2) against the 0.6.1 candidate settings.
+- Inclusions in the Hi-C bin: 24 of 26.
+- Run: 86 min, 44 GB, 4 workers.
+
 ## 0.6.1 (2026-10-26): Hi-C validation of refinement (workflow and hic/ only)
 
 No change to the pbinner package. Workflow and `hic/`:
