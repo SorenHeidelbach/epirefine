@@ -36,6 +36,44 @@ DEFAULT_LAMS = (1.0,)  # community-only unknown: with finite tau the relatives m
 DEFAULT_TEMPS = tuple(np.round(np.exp(np.linspace(np.log(0.2), np.log(20), 31)), 3))
 
 
+EPS_LEVELS = (0.002, 0.005, 0.01, 0.02, 0.05)
+
+
+def outlier_rates(stats: pl.DataFrame, n_groups: int, min_sites: int = 100, min_gap: float = 0.05,
+                  max_gap: float = 0.3, z: float = 3.0) -> tuple[np.ndarray, float, pl.DataFrame]:
+    """Per motif group, how often a contig departs from its bin's level (the outlier part of the kernel).
+
+    ZymoFecal, binned contigs >= 10x: contigs match their bin's level within sampling noise in 99.5% of
+    (contig, group) pairs; the other 0.5% deviate by 0.08-0.49 (median 0.13). The departures are rare
+    and large, not a small spread on every contig: a single Beta(tau) can't describe both (trimming the
+    top 5% of contigs per group removed nearly all the spread). Long contigs, measured in many groups,
+    collect them: 33% of Hi-C member contigs > 500 kb have at least one.
+
+    stats: one row per (bin, contig, group) with N sites and K called methylated (read fraction > 0.5).
+    Within a bin with >= 2 contigs of >= min_sites sites, the bin level p is the median contig share; a
+    contig is an outlier for the group when |f - p| > max(min_gap, z * sqrt(p(1 - p) / N)) and <= max_gap
+    (further away is a different set of MTases, i.e. a contaminant). Per group, the rate is shrunk to the
+    overall rate (one pseudo-observation at it) and snapped to EPS_LEVELS; unmeasured groups get the
+    overall rate. Returns (eps per group, overall rate, table).
+    """
+    x = stats.filter(pl.col("N") >= min_sites).with_columns((pl.col("K") / pl.col("N")).alias("f"))
+    bl = x.group_by("bin", "group").agg(pl.col("f").median().alias("p"), pl.len().alias("nc")).filter(pl.col("nc") >= 2)
+    x = x.join(bl, on=["bin", "group"]).with_columns((pl.col("f") - pl.col("p")).abs().alias("dev"))
+    x = x.filter(pl.col("dev") <= max_gap).with_columns(
+        ((pl.col("dev") > min_gap) & (pl.col("dev") > z * (pl.col("p") * (1 - pl.col("p")) / pl.col("N")).sqrt())).alias("outlier"))
+    levels = np.array(EPS_LEVELS)
+    eps0 = float(np.clip(x["outlier"].mean() if x.height else levels[1], levels[0], levels[-1]))
+    g = (x.group_by("group").agg(pl.len().alias("contigs"), pl.col("outlier").sum().alias("outliers"))
+         .with_columns(((pl.col("outliers") + 1.0) / (pl.col("contigs") + 1.0 / eps0)).alias("rate")).sort("group"))
+    eps = np.full(n_groups, levels[np.argmin(np.abs(np.log(levels) - np.log(eps0)))])
+    snapped = []
+    for grp, r in g.select("group", "rate").iter_rows():
+        e = float(levels[np.argmin(np.abs(np.log(levels) - np.log(r)))])
+        eps[grp] = e
+        snapped.append(e)
+    return eps, eps0, g.with_columns(pl.Series("eps", snapped))
+
+
 def fragments_per_bin(budget: int, n_lengths: int, n_bins: int, cap: int) -> int:
     """Fragments per (bin, length) for a total budget: calibration error depends on the number of
     fragments, not on the number of bins, so the total stays fixed as bins grow."""

@@ -44,7 +44,7 @@ def main(argv=None):
                         "they are dropped as caller noise; see motif_noise.tsv)")
     r.add_argument("--tau-mode", choices=["outlier", "select"], default="outlier",
                    help="between-contig variation per motif group: contigs match their bin except for rare, large "
-                        "departures whose rate and width each group learns by EM (outlier, default; see departures.tsv), or a "
+                        "departures whose rate is estimated per group (outlier, default; see outlier_rates.tsv), or a "
                         "Beta(tau) spread selected by calibration likelihood (select, the earlier method)")
     r.add_argument("--max-redundancy", type=float, default=0.3,
                    help="don't include a contig when at least this share of its k-mers is already in the bin "

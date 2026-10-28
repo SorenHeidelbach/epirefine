@@ -101,11 +101,11 @@ def transition_spec(grid: Grid, tau, delta: float = 1.0, outlier=None, n_groups:
     eps, tau_wide = outlier
     eps = np.asarray(eps, float)
     tau = np.broadcast_to(np.asarray(tau, float), eps.shape)
-    tw = np.broadcast_to(np.asarray(tau_wide, float), eps.shape)
+    wide = grid.transition(float(tau_wide), delta)
     out = []
-    for t, e, w in sorted(set(zip(tau.tolist(), eps.tolist(), tw.tolist()))):
-        idx = np.flatnonzero((tau == t) & (eps == e) & (tw == w))
-        out.append((idx, (1 - e) * grid.transition(float(t), delta) + e * grid.transition(float(w), delta)))
+    for t, e in sorted(set(zip(tau.tolist(), eps.tolist()))):
+        idx = np.flatnonzero((tau == t) & (eps == e))
+        out.append((idx, (1 - e) * grid.transition(float(t), delta) + e * wide))
     return out
 
 
@@ -374,72 +374,3 @@ class FittedModel:
         sc.R[i, bin_idx] = np.logaddexp(np.log1p(-eta) + A, np.log(eta) + sc.Au[i]).sum()
         sc.Su[i] = unknown_score(sc.R[i:i + 1], sc.Su_comm[i:i + 1], self.eta, self.lam)[0]
         return A
-
-
-EPS_GRID = (0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2)
-WIDE_TAUS = (3.0, 10.0, 30.0, 100.0)
-
-
-def learn_departures(L_chunks, chunk_bin, n_bins, group_modtype, grid: Grid, rounds: int = 2, eps_init: float = 0.005,
-                     prior_n: float = 2.0, batch: int = 200, log=print, **model_kw):
-    """Per motif group, how often a host chunk departs from its bin's level, and how far: learned by EM.
-
-    Kernel: a chunk's level equals its bin's with probability 1 - eps_m, else it is drawn from
-    Beta(tau_m) centred on the bin's level (so a fully on or off group can barely move, an intermediate
-    one can move widely). For each chunk and group, with the bin profile computed without that chunk:
-        A_point = log sum_i p_bin(i) L(i)      A_wide(t) = log sum_i p_bin(i) sum_j T_t[i, j] L(j)
-    and per group, eps_m maximises sum_k w_k log[(1 - eps) e^A_point + eps e^A_wide(t)] (EM, with
-    prior_n pseudo-observations at the pooled rate), t chosen among WIDE_TAUS by that likelihood. w_k
-    are the robust chunk weights, so chunks of foreign genomes don't count as departures. Phase-variable
-    or composition-dependent groups learn frequent, wide departures; clean groups learn almost none, so
-    a sibling strain that differs in a clean group stays distinguishable. Two rounds (the profiles are
-    refitted under the learned kernel). eps is snapped to EPS_GRID to keep few distinct transitions.
-    Returns (eps [M], tau_wide [M], table).
-    """
-    import polars as pl
-    M = L_chunks.shape[1]
-    eps = np.full(M, eps_init)
-    tw = np.full(M, 10.0)
-    K = L_chunks.shape[0]
-    has = np.ptp(L_chunks, axis=-1) > 0  # chunk has sites in the group
-    for rnd in range(rounds):
-        model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, float("inf"), outlier=(eps, tw), **model_kw)
-        Ap = np.zeros((K, M), np.float32)
-        Aw = np.zeros((len(WIDE_TAUS), K, M), np.float32)
-        Tw = [grid.transition(t) for t in WIDE_TAUS]
-
-        def work(sl):
-            Lb = L_chunks[sl].astype(np.float64)
-            ell_loo = model.ell[chunk_bin[sl]] - model.w[sl, None, None] * model.Lp_chunks[sl].astype(np.float64)
-            prof = host_profiles(ell_loo, model.log_pi)
-            Ap[sl] = logsumexp(Lb + prof, -1)
-            for t, T in enumerate(Tw):
-                Aw[t, sl] = logsumexp(marginalize_unit(Lb, T) + prof, -1)
-        model._batched(work, batch)
-        wk = (model.w[:, None] * has).astype(np.float64)          # [K, M]
-        d = (Aw - Ap[None]).astype(np.float64)                     # [T, K, M]
-        # pooled rate first (all groups, t = 10), then per group with shrinkage to it
-        t10 = WIDE_TAUS.index(10.0)
-        e0 = eps_init
-        for _ in range(50):
-            r = expit(np.log(e0) - np.log1p(-e0) + d[t10])
-            e0 = float(np.clip((wk * r).sum() / max(wk.sum(), 1e-9), 1e-4, 0.5))
-        best_ll = np.full(M, -np.inf); new_eps = np.full(M, e0); new_tw = np.full(M, 10.0)
-        for t in range(len(WIDE_TAUS)):
-            e = np.full(M, e0)
-            for _ in range(50):
-                r = expit(np.log(e) - np.log1p(-e) + d[t])
-                e = np.clip(((wk * r).sum(0) + prior_n * e0) / (wk.sum(0) + prior_n), 1e-4, 0.5)
-            ll = (wk * np.logaddexp(np.log1p(-e), np.log(e) + d[t])).sum(0)
-            better = ll > best_ll
-            best_ll[better], new_eps[better], new_tw[better] = ll[better], e[better], WIDE_TAUS[t]
-        grid_e = np.array(EPS_GRID)
-        eps = grid_e[np.argmin(np.abs(np.log(grid_e)[None, :] - np.log(new_eps)[:, None]), 1)]
-        tw = new_tw
-        log(f"  departures round {rnd + 1}: pooled rate {e0:.4f}; eps per group "
-            f"{', '.join(f'{int((eps == e).sum())} at {e:g}' for e in np.unique(eps))}; width tau "
-            f"{', '.join(f'{int((tw == t).sum())} at {t:g}' for t in np.unique(tw))}")
-        del model, Ap, Aw, d
-    table = pl.DataFrame({"group": np.arange(M, dtype=np.int32), "chunks": has.sum(0).astype(np.int64),
-                          "eps": eps, "tau_wide": tw, "eps_raw": new_eps})
-    return eps, tw, table
