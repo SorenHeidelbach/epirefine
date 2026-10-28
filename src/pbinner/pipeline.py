@@ -23,7 +23,7 @@ from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
 from .model import FittedModel, posterior
-from .motifs import build_records, describe_groups, group_motifs
+from .motifs import build_records, describe_groups, group_motifs, redundancy_weights
 from .redundancy import inclusion_redundancy
 from .refine import bin_evidence_table, refine, write_outputs
 from .sites import EncodedAssembly, extract_sites, unit_tables
@@ -78,7 +78,7 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
-        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
+        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, group_weights=True, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
     out = Path(out)
@@ -150,6 +150,14 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                             schema={"contig": pl.Int32, "bin": pl.Int32})
     counts_bin = (pl.scan_parquet(parts).filter(pl.col("n") >= min_cov).join(host_bin.lazy(), on="contig")
                   .group_by("group", "bin", "n", "k").agg(pl.len().alias("w")).collect())
+    # one methyltransferase seen through several motif variants is one piece of evidence (weights 1 / cluster size)
+    group_w = np.ones(n_groups)
+    if group_weights:
+        group_w, wtab = redundancy_weights(counts_bin, motifs, group_of, n_groups)
+        wtab = wtab.join(describe_groups(motifs, group_of).select(pl.col("group").cast(pl.Int32), "motifs"), on="group", how="left")
+        _write(wtab, out / "group_weights.tsv")
+        _log(f"redundant motif groups: {int((group_w < 1).sum())} groups in {wtab.filter(pl.col('cluster_size') > 1)['cluster'].n_unique()} "
+             f"clusters down-weighted (effective groups {group_w.sum():.0f} of {n_groups})")
     det = fit_detection_by_bin(counts_bin, dict(enumerate(group_modtype)),
                                workers=workers or min(16, os.cpu_count() or 1))
     _write(detection_table(det), out / "detection_model.tsv")
@@ -184,6 +192,11 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     tabs = unit_tables(parts, n_groups=n_groups, det=det, grid_size=grid_size, min_cov=min_cov,
                        chunk_offset=chunk_offset, chunk_size=chunk_size, n_chunks=n_chunks_all, target_of=target_of,
                        n_targets=len(targets), frags=frags, workers=workers, log=_log)
+    if group_weights and (group_w < 1).any():
+        wf = group_w.astype(np.float32)[None, :, None]
+        for key in ("L_chunks", "L_t", "L_frag"):
+            tabs[key] *= wf
+        tabs["H_frag"] = (tabs["H_frag"][0] * wf, tabs["H_frag"][1] * wf)
     keep = np.flatnonzero(tabs["chunk_sites"] > 0)  # chunks without sites carry no information
     remap = np.full(n_chunks_all, -1, np.int64); remap[keep] = np.arange(len(keep))
     L_chunks = tabs.pop("L_chunks")[keep]
@@ -267,7 +280,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # bin (unbinned), and its coverage (median reads per motif site)
     best_bin = np.where(given >= 0, given, sc.S.argmax(1))
     evidence, _, coverage = contig_evidence(parts, {cid[c]: i for i, c in enumerate(targets)}, best_bin, model, det,
-                                            grid, float(np.median(np.atleast_1d(temperature))), min_cov)
+                                            grid, float(np.median(np.atleast_1d(temperature))), min_cov,
+                                            group_weights=group_w if group_weights else None)
     _log(f"methylation evidence: {int((np.nan_to_num(evidence, nan=0.0) < min_evidence).sum())} of {len(targets)} "
          f"contigs below {min_evidence:g} (expected log BF vs a community genome)")
     # contamination calls only on contigs with enough coverage: against Hi-C on ZymoFecal, flags were

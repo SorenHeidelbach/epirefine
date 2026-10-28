@@ -94,7 +94,7 @@ def margin_vs_competitors(model: FittedModel, H1, H0, truth: np.ndarray, tempera
 
 def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray, model: FittedModel,
                     det: dict[int, DetectionParams], grid: Grid, temperature: float, min_cov: int = 1,
-                    workers: int = 1):
+                    workers: int = 1, group_weights: np.ndarray | None = None):
     """Expected methylation evidence and coverage per target contig.
 
     Evidence: the expected log BF (tempered) that the contig's sites would give for bin truth[u] over a
@@ -142,6 +142,9 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
         s = (sites.filter(pl.col("contig").is_in(contigs))
              .select(pl.col("contig").replace_strict(inv, return_dtype=pl.Int64).alias("unit"), "group", "n"))
         H1, H0 = expected_tables(s, len(units), model.log_prof.shape[1], det, grid, dtype=np.float32, table=shared)
+        if group_weights is not None:
+            gw = np.asarray(group_weights, np.float32)[None, :, None]
+            H1, H0 = H1 * gw, H0 * gw
         b, _, u = margin_vs_competitors(model, H1, H0, truth[units], temperature)
         vs_bin[units], vs_unk[units] = b, u   # each contig is evaluated in exactly one call
 

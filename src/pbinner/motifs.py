@@ -324,3 +324,80 @@ def describe_groups(motifs: list[Motif], group_of: list[int], sites: pl.DataFram
         counts = sites.group_by("group").agg(w.sum().alias("n_sites"), (pl.col("n") * w).sum().alias("n_reads"))
         df = df.join(counts, on="group", how="left")
     return df
+
+
+def _bases(c: str) -> set:
+    return set(IUPAC[c].strip("[]"))
+
+
+def can_share_site(a: Motif, b: Motif) -> bool:
+    """True when a and b (same modification type) can both match one modified base: aligned on their
+    modified positions, every overlapping position has a base both allow (b on either strand). Such
+    motifs can be one methyltransferase's sites (GCWGC, CGCWGCR, YGGCAGCA); unrelated motifs of one
+    genome (GATC, CCWGG) cannot."""
+    if a.mod_type != b.mod_type:
+        return False
+    for sb, pb in ((b.seq, b.mod_pos), (revcomp(b.seq), len(b.seq) - 1 - b.mod_pos)):
+        if sb[pb] != a.seq[a.mod_pos] and not (_bases(sb[pb]) & _bases(a.seq[a.mod_pos])):
+            continue
+        off = a.mod_pos - pb
+        if all(not (0 <= i + off < len(a.seq)) or (_bases(a.seq[i + off]) & _bases(c)) for i, c in enumerate(sb)):
+            return True
+    return False
+
+
+def redundancy_weights(counts_bin: "pl.DataFrame", motifs: list[Motif], group_of: list[int], n_groups: int, *,
+                       min_reads: int = 5, min_sites: int = 50, min_common_bins: int = 5,
+                       min_jaccard: float = 0.9) -> tuple[np.ndarray, "pl.DataFrame"]:
+    """Weights that stop one methyltransferase from being counted once per motif variant.
+
+    Groups are linked when (1) some motif of one can share a site with some motif of the other
+    (can_share_site) and (2) they are methylated in the same bins: over the bins where both are
+    measured (>= min_sites sites with >= min_reads reads; at least min_common_bins of them), the bins
+    with a majority of methylated sites agree with Jaccard >= min_jaccard, and at least 2 bins methylate
+    them. Linked groups form clusters (single linkage); each group gets weight 1 / cluster size, so a
+    cluster contributes the evidence of one group. On ZymoFecal, 19 GC[AT]GC-type 5mC groups behaved as
+    one MTase and dominated contig-bin mismatches. Unlinked groups keep weight 1.
+
+    counts_bin: columns group, bin, n, k, w (sites per pattern, as for the caller fit).
+    Returns (weights [n_groups], cluster table).
+    """
+    import polars as pl
+    st = (counts_bin.filter(pl.col("n") >= min_reads)
+          .group_by("group", "bin").agg(pl.col("w").sum().alias("sites"),
+                                        pl.col("w").filter(pl.col("k") / pl.col("n") > 0.5).sum().alias("meth"))
+          .filter(pl.col("sites") >= min_sites)
+          .with_columns((pl.col("meth") / pl.col("sites") > 0.5).alias("on")))
+    meas = {g: dict(zip(d["bin"].to_list(), d["on"].to_list())) for (g,), d in st.group_by("group")}
+    cand = [g for g, m in meas.items() if sum(m.values()) >= 2]
+    members = {g: [motifs[i] for i in range(len(motifs)) if group_of[i] == g] for g in cand}
+    parent = {g: g for g in cand}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    cand.sort()
+    for i, a in enumerate(cand):
+        for b in cand[i + 1:]:
+            ma, mb = meas[a], meas[b]
+            common = ma.keys() & mb.keys()
+            if len(common) < min_common_bins:
+                continue
+            on_a = {x for x in common if ma[x]}; on_b = {x for x in common if mb[x]}
+            u = on_a | on_b
+            if len(u) < 2 or len(on_a & on_b) / len(u) < min_jaccard:
+                continue
+            if any(can_share_site(x, y) for x in members[a] for y in members[b]):
+                parent[find(a)] = find(b)
+    clusters: dict = {}
+    for g in cand:
+        clusters.setdefault(find(g), []).append(g)
+    w = np.ones(n_groups)
+    rows = []
+    for root, gs in clusters.items():
+        for g in gs:
+            w[g] = 1.0 / len(gs)
+            rows.append({"group": g, "cluster": min(gs), "cluster_size": len(gs), "weight": 1.0 / len(gs)})
+    tab = pl.DataFrame(rows, schema={"group": pl.Int32, "cluster": pl.Int32, "cluster_size": pl.Int64, "weight": pl.Float64}).sort("cluster", "group")
+    return w, tab
