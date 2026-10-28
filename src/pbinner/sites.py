@@ -303,7 +303,7 @@ def _unit_part(part: str, cfg: dict) -> dict:
     grid = Grid(cfg["grid_size"])
     det = {g: DetectionParams(*p) for g, p in cfg["det"].items()}
     M = cfg["n_groups"]
-    df = pl.read_parquet(part).filter(pl.col("n") >= cfg["min_cov"])
+    df = pl.read_parquet(part).filter((pl.col("n") >= cfg["min_cov"]) & ~pl.col("group").is_in(cfg.get("drop_groups", [])))
     cid, pos = df["contig"].to_numpy(), df["pos"].to_numpy()
     grp, n, k = df["group"].to_numpy(), df["n"].to_numpy(), df["k"].to_numpy()
 
@@ -338,7 +338,7 @@ def _unit_part(part: str, cfg: dict) -> dict:
     return out
 
 
-def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, min_cov: int,
+def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, min_cov: int, drop_groups=(),
                 chunk_offset: np.ndarray, chunk_size: int, n_chunks: int, target_of: np.ndarray, n_targets: int,
                 frags: pl.DataFrame | None, workers: int | None = None, log=print) -> dict:
     """Likelihood tables for host chunks, targets and calibration fragments, in parallel over parts.
@@ -347,7 +347,7 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
     counts per chunk, per target, per (target, group) and per fragment.
     """
     G = grid_size
-    cfg = {"grid_size": G, "n_groups": n_groups, "min_cov": min_cov, "chunk_size": chunk_size,
+    cfg = {"grid_size": G, "n_groups": n_groups, "min_cov": min_cov, "chunk_size": chunk_size, "drop_groups": list(drop_groups),
            "det": {g: (p.mu0, p.kappa0, p.mu1, p.kappa1, p.pi1, p.n_sites) for g, p in det.items()},
            "chunk_offset": chunk_offset, "target_of": target_of,
            "frags": frags.select("unit", "contig", "start", "end") if frags is not None else None}

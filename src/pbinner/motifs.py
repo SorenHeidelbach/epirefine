@@ -401,3 +401,40 @@ def redundancy_weights(counts_bin: "pl.DataFrame", motifs: list[Motif], group_of
             rows.append({"group": g, "cluster": min(gs), "cluster_size": len(gs), "weight": 1.0 / len(gs)})
     tab = pl.DataFrame(rows, schema={"group": pl.Int32, "cluster": pl.Int32, "cluster_size": pl.Int64, "weight": pl.Float64}).sort("cluster", "group")
     return w, tab
+def noisy_groups(parts: list[str], contig_bin: "pl.DataFrame", contigs: list[int], *, min_reads: int = 5,
+                 min_sites: int = 20, partial=(0.15, 0.6), min_mid_sites: float = 0.2, min_bin_share: float = 0.2,
+                 min_noise_bins: int = 3) -> "pl.DataFrame":
+    """Motif groups that look like caller noise: intermediate read-level calls at the sites themselves,
+    in a large share of genomes.
+
+    A real motif is methylated at (nearly) all of a genome's sites or at none. A group can still show a
+    partial contig mean for real reasons, and those must be kept: a genome that methylates RGATCY but not
+    every GATC has its GATC sites at either ~1 or ~0, with a mix set by sequence composition; a bipartite
+    motif can follow a genome's Dam status. What marks noise is that the *sites* are intermediate (each
+    site has some reads called methylated), on most genomes. On ZymoFecal, 4mC calls on CCNGG-type
+    contexts did this in 20-81% of bins (mean fraction 0.15-0.3, a third of sites intermediate): most
+    likely 5mC at those sites leaking into the 4mC call.
+
+    Per (contig, group), over the given binned contigs (cache ids, typically those >= 10x): sites with
+    >= min_reads reads; the contig is noise-like for the group when it has >= min_sites such sites, their
+    mean read fraction lies in `partial` and >= min_mid_sites of them have a read fraction in (0.2, 0.8).
+    A bin is noise-like when at least half its measured contigs are. A group is noisy when noise-like
+    bins are >= min_bin_share of the bins that measure it and at least min_noise_bins. Unbinned contigs
+    are not used (a genome must be identifiable to count). Returns one row per measured group.
+    """
+    import polars as pl
+    lo, hi = partial
+    r = pl.col("k") / pl.col("n")
+    cg = (pl.scan_parquet(parts).filter(pl.col("contig").is_in(contigs) & (pl.col("n") >= min_reads))
+          .group_by("contig", "group").agg(pl.len().alias("sites"), r.mean().alias("mean_fraction"),
+                                           ((r > 0.2) & (r < 0.8)).mean().alias("mid_sites"))
+          .filter(pl.col("sites") >= min_sites).collect())
+    cg = cg.join(contig_bin, on="contig", how="inner").with_columns(
+        (pl.col("mean_fraction").is_between(lo, hi) & (pl.col("mid_sites") >= min_mid_sites)).alias("noise_like"))
+    b = cg.group_by("group", "bin").agg(pl.col("noise_like").mean().alias("share"), pl.col("mean_fraction").median().alias("level"))
+    g = (b.group_by("group").agg(pl.len().alias("bins"), (pl.col("share") >= 0.5).sum().alias("noise_bins"),
+                                 pl.col("level").median().alias("median_level"))
+         .with_columns((pl.col("noise_bins") / pl.col("bins")).alias("noise_bin_share"))
+         .with_columns(((pl.col("noise_bin_share") >= min_bin_share) & (pl.col("noise_bins") >= min_noise_bins)).alias("noisy"))
+         .sort("group"))
+    return g

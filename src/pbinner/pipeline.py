@@ -23,7 +23,7 @@ from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
 from .model import FittedModel, posterior
-from .motifs import build_records, describe_groups, group_motifs, redundancy_weights
+from .motifs import build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights
 from .redundancy import inclusion_redundancy
 from .refine import bin_evidence_table, refine, write_outputs
 from .sites import EncodedAssembly, extract_sites, unit_tables
@@ -78,7 +78,7 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
-        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, group_weights=True, include_threshold_unmethylated=0.95, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
+        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
     out = Path(out)
@@ -140,7 +140,21 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # no decision at all (status low_coverage) and don't feed the calibration fragments. Against Hi-C
     # on ZymoFecal, flags on contigs below 5x were confirmed for 12.5% (81% at >= 10x).
     cov_of = dict(pl.scan_parquet(parts).group_by("contig").agg(pl.col("n").median()).collect().iter_rows())
-    counts = (pl.scan_parquet(parts).filter(pl.col("n") >= min_cov)
+    # motif groups whose methylation is partial on many contigs of many genomes are caller noise:
+    # they are dropped from every pass below (caller fit, likelihood tables, evidence)
+    drop = []
+    if motif_noise_filter:
+        rich = [cid[c] for c in host_contigs if cov_of.get(cid[c], 0.0) >= 10]
+        cb_id = pl.DataFrame({"contig": [cid[c] for c in host_contigs], "bin": [bin_idx[cb[c]] for c in host_contigs]},
+                             schema={"contig": pl.Int32, "bin": pl.Int32})
+        noise = noisy_groups(parts, cb_id, rich)
+        drop = noise.filter("noisy")["group"].to_list()
+        _write(noise.join(describe_groups(motifs, group_of).select(pl.col("group").cast(pl.Int32), "mod_type", "motifs"), on="group", how="left"),
+               out / "motif_noise.tsv")
+        _log(f"motif noise filter: {len(drop)} of {noise.height} measured groups dropped (intermediate calls at their sites in "
+             f">= 20% of bins): {', '.join(str(g) for g in drop)}")
+    keep_groups = ~pl.col("group").is_in(drop)
+    counts = (pl.scan_parquet(parts).filter((pl.col("n") >= min_cov) & keep_groups)
               .group_by("group", "n", "k").agg(pl.len().alias("w")).collect())
     _log(f"{int(counts['w'].sum())} sites with coverage >= {min_cov}")
     _write(describe_groups(motifs, group_of, counts), out / "motif_groups.tsv")
@@ -148,7 +162,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # others); the pooled fit collapses when few of many bins methylate a motif (dev log D19)
     host_bin = pl.DataFrame({"contig": [cid[c] for c in host_contigs], "bin": [bin_idx[cb[c]] for c in host_contigs]},
                             schema={"contig": pl.Int32, "bin": pl.Int32})
-    counts_bin = (pl.scan_parquet(parts).filter(pl.col("n") >= min_cov).join(host_bin.lazy(), on="contig")
+    counts_bin = (pl.scan_parquet(parts).filter((pl.col("n") >= min_cov) & keep_groups).join(host_bin.lazy(), on="contig")
                   .group_by("group", "bin", "n", "k").agg(pl.len().alias("w")).collect())
     # one methyltransferase seen through several motif variants is one piece of evidence (weights 1 / cluster size)
     group_w = np.ones(n_groups)
@@ -189,7 +203,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         _log(f"{frags.height} calibration fragments ({per_bin} per bin and length)")
 
     # pass 2: site cache -> likelihood tables
-    tabs = unit_tables(parts, n_groups=n_groups, det=det, grid_size=grid_size, min_cov=min_cov,
+    tabs = unit_tables(parts, n_groups=n_groups, det=det, grid_size=grid_size, min_cov=min_cov, drop_groups=drop,
                        chunk_offset=chunk_offset, chunk_size=chunk_size, n_chunks=n_chunks_all, target_of=target_of,
                        n_targets=len(targets), frags=frags, workers=workers, log=_log)
     if group_weights and (group_w < 1).any():
@@ -281,7 +295,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     best_bin = np.where(given >= 0, given, sc.S.argmax(1))
     evidence, _, coverage = contig_evidence(parts, {cid[c]: i for i, c in enumerate(targets)}, best_bin, model, det,
                                             grid, float(np.median(np.atleast_1d(temperature))), min_cov,
-                                            group_weights=group_w if group_weights else None)
+                                            group_weights=group_w if group_weights else None, drop_groups=drop)
     _log(f"methylation evidence: {int((np.nan_to_num(evidence, nan=0.0) < min_evidence).sum())} of {len(targets)} "
          f"contigs below {min_evidence:g} (expected log BF vs a community genome)")
     # contamination calls only on contigs with enough coverage: against Hi-C on ZymoFecal, flags were

@@ -94,7 +94,7 @@ def margin_vs_competitors(model: FittedModel, H1, H0, truth: np.ndarray, tempera
 
 def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray, model: FittedModel,
                     det: dict[int, DetectionParams], grid: Grid, temperature: float, min_cov: int = 1,
-                    workers: int = 1, group_weights: np.ndarray | None = None):
+                    workers: int = 1, group_weights: np.ndarray | None = None, drop_groups=()):
     """Expected methylation evidence and coverage per target contig.
 
     Evidence: the expected log BF (tempered) that the contig's sites would give for bin truth[u] over a
@@ -121,7 +121,8 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
     # the (group, n) expectation table, filled once for every combination present (Python loop),
     # then shared read-only by the threads
     shared: dict = {}
-    combos = (pl.scan_parquet(parts).filter(pl.col("n") >= min_cov).select("group", pl.col("n").clip(upper_bound=500))
+    keep = ~pl.col("group").is_in(list(drop_groups))
+    combos = (pl.scan_parquet(parts).filter((pl.col("n") >= min_cov) & keep).select("group", pl.col("n").clip(upper_bound=500))
               .unique().collect())
     expected_tables(combos.with_columns(pl.lit(0).alias("unit")), 1, model.log_prof.shape[1], det, grid,
                     dtype=np.float32, table=shared)
@@ -133,7 +134,7 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
         med = sites.group_by("contig").agg(pl.col("n").median())
         for c, m in med.iter_rows():
             cov[unit_of[c]] = m
-        sites = sites.filter(pl.col("n") >= min_cov)
+        sites = sites.filter((pl.col("n") >= min_cov) & keep)
         contigs = [c for c in sites["contig"].unique().sort().to_list() if truth[unit_of[c]] >= 0]
         if not contigs:
             return
