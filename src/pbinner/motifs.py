@@ -225,8 +225,15 @@ def build_records(contigs: dict[str, str], motifs: list[Motif], matcher: MotifMa
     return pl.concat(frames)
 
 
-def group_motifs(records: pl.DataFrame, motifs: list[Motif], min_containment: float = 0.5) -> list[int]:
-    """Union-find over motifs: same mod type and (reverse-complement pair or site containment >= x)."""
+def group_motifs(records: pl.DataFrame, motifs: list[Motif], min_jaccard: float = 0.9) -> list[int]:
+    """Union-find over motifs: same mod type and (reverse-complement pair or near-identical site sets).
+
+    Motifs are merged only when they describe the same sites (Jaccard >= min_jaccard), not when one
+    contains the other: merging by containment chained short degenerate motifs (CCNGG, CCAG, ...) with
+    everything they contain into groups of up to 53-70 motifs, of which a bin methylates one, so the
+    group's methylated fraction measured which member a genome carries rather than whether an MTase
+    is active. Positions matched by several groups go to the most specific one (assign_sites).
+    """
     n = len(motifs)
     parent = list(range(n))
 
@@ -243,8 +250,8 @@ def group_motifs(records: pl.DataFrame, motifs: list[Motif], min_containment: fl
     for i, c in enumerate(canon):
         union(i, c)
 
-    # containment from shared records: count, per motif pair, the records both match (one pass
-    # over records matched by >= 2 motifs) instead of intersecting every pair of record sets
+    # overlap from shared records: count, per motif pair, the records both match (one pass over
+    # records matched by >= 2 motifs) instead of intersecting every pair of record sets
     contig_ids = {c: i for i, c in enumerate(records["contig"].unique().to_list())}
     keyed = records.select(
         (pl.col("contig").replace_strict(contig_ids, return_dtype=pl.Int64) * (1 << 34)
@@ -254,7 +261,7 @@ def group_motifs(records: pl.DataFrame, motifs: list[Motif], min_containment: fl
     pairs = (multi.join(multi, on="rkey", suffix="_b").filter(pl.col("motif") < pl.col("motif_b"))
              .group_by("motif", "motif_b").len())
     for i, j, inter in pairs.iter_rows():
-        if motifs[i].mod_type == motifs[j].mod_type and inter / min(sizes[i], sizes[j]) >= min_containment:
+        if motifs[i].mod_type == motifs[j].mod_type and inter / (sizes[i] + sizes[j] - inter) >= min_jaccard:
             union(i, j)
     # number groups by their first member, so the numbering does not depend on union order
     first: dict[int, int] = {}
@@ -264,14 +271,25 @@ def group_motifs(records: pl.DataFrame, motifs: list[Motif], min_containment: fl
     return [rid[find(i)] for i in range(n)]
 
 
+def group_sizes(group_of: list[int], motif_rank) -> list[int]:
+    """Records per group (sum over its motifs): the 'specificity' order of assign_sites."""
+    out = [0] * (max(group_of) + 1)
+    for g, r in zip(group_of, motif_rank):
+        out[g] += int(r)
+    return out
+
+
 def assign_sites(records: pl.DataFrame, group_of: list[int], motif_rank: dict[int, int] | None = None) -> pl.DataFrame:
     """Deduplicate records across motifs and give each a (group, site) id.
 
-    Records matching motifs of *different* groups (e.g. the A in TCGANTC, shared by TCGA and
-    GANTC) are dropped: their methylation can come from either MTase, which would leak one
-    group's signal into the other. Within a group, a record shared by several motifs is claimed
-    by the motif with the most records (most general). `motif_rank` (motif -> record count in the
-    whole assembly or a sample of it) keeps that choice consistent when records come in batches.
+    A record matching motifs of *different* groups (e.g. the A in TCGANTC, shared by TCGA and GANTC;
+    or a CCWGG site, which CCNGG also matches) goes to the most specific of them, the group with the
+    fewest records. Its methylation can come from either MTase, but the specific group's sites then
+    measure "either", and the general group's remaining sites measure the general MTase alone, so
+    both stay informative; dropping such records lost half of all positions on ZymoFecal. Within a
+    group, a record shared by several motifs is claimed by the motif with the most records (most
+    general). `motif_rank` (motif -> record count in the whole assembly or a sample of it) keeps both
+    choices consistent when records come in batches.
     """
     keys = ["contig", "pos", "strand", "mod_type"]
     if motif_rank is None:
@@ -279,11 +297,13 @@ def assign_sites(records: pl.DataFrame, group_of: list[int], motif_rank: dict[in
     else:
         sizes = pl.DataFrame({"motif": list(motif_rank), "motif_n": list(motif_rank.values())},
                              schema={"motif": pl.Int32, "motif_n": pl.Int64})
+    rank = dict(sizes.iter_rows())
+    gsize = group_sizes(group_of, [rank.get(i, 0) for i in range(len(group_of))])
     rec = (
         records.join(sizes, on="motif", how="left").with_columns(pl.col("motif_n").fill_null(0))
         .with_columns(pl.col("motif").replace_strict(dict(enumerate(group_of)), return_dtype=pl.Int32).alias("group"))
-        .filter(pl.col("group").n_unique().over(keys) == 1)
-        .sort(["motif_n", "motif"], descending=[True, False])
+        .with_columns(pl.col("group").replace_strict(dict(enumerate(gsize)), return_dtype=pl.Int64).alias("group_n"))
+        .sort(["group_n", "group", "motif_n", "motif"], descending=[False, False, True, False])
         .unique(subset=["contig", "pos", "strand", "mod_type"], keep="first", maintain_order=True)
         .with_columns((pl.col("occ_motif").cast(pl.Int64) * (1 << 40) + pl.col("occ")).alias("site"))
         .with_columns(pl.when(pl.col("strand") == 0).then(pl.lit("+")).otherwise(pl.lit("-")).alias("strand"))
@@ -304,3 +324,117 @@ def describe_groups(motifs: list[Motif], group_of: list[int], sites: pl.DataFram
         counts = sites.group_by("group").agg(w.sum().alias("n_sites"), (pl.col("n") * w).sum().alias("n_reads"))
         df = df.join(counts, on="group", how="left")
     return df
+
+
+def _bases(c: str) -> set:
+    return set(IUPAC[c].strip("[]"))
+
+
+def can_share_site(a: Motif, b: Motif) -> bool:
+    """True when a and b (same modification type) can both match one modified base: aligned on their
+    modified positions, every overlapping position has a base both allow (b on either strand). Such
+    motifs can be one methyltransferase's sites (GCWGC, CGCWGCR, YGGCAGCA); unrelated motifs of one
+    genome (GATC, CCWGG) cannot."""
+    if a.mod_type != b.mod_type:
+        return False
+    for sb, pb in ((b.seq, b.mod_pos), (revcomp(b.seq), len(b.seq) - 1 - b.mod_pos)):
+        if sb[pb] != a.seq[a.mod_pos] and not (_bases(sb[pb]) & _bases(a.seq[a.mod_pos])):
+            continue
+        off = a.mod_pos - pb
+        if all(not (0 <= i + off < len(a.seq)) or (_bases(a.seq[i + off]) & _bases(c)) for i, c in enumerate(sb)):
+            return True
+    return False
+
+
+def redundancy_weights(counts_bin: "pl.DataFrame", motifs: list[Motif], group_of: list[int], n_groups: int, *,
+                       min_reads: int = 5, min_sites: int = 50, min_common_bins: int = 5,
+                       min_jaccard: float = 0.9) -> tuple[np.ndarray, "pl.DataFrame"]:
+    """Weights that stop one methyltransferase from being counted once per motif variant.
+
+    Groups are linked when (1) some motif of one can share a site with some motif of the other
+    (can_share_site) and (2) they are methylated in the same bins: over the bins where both are
+    measured (>= min_sites sites with >= min_reads reads; at least min_common_bins of them), the bins
+    with a majority of methylated sites agree with Jaccard >= min_jaccard, and at least 2 bins methylate
+    them. Linked groups form clusters (single linkage); each group gets weight 1 / cluster size, so a
+    cluster contributes the evidence of one group. On ZymoFecal, 19 GC[AT]GC-type 5mC groups behaved as
+    one MTase and dominated contig-bin mismatches. Unlinked groups keep weight 1.
+
+    counts_bin: columns group, bin, n, k, w (sites per pattern, as for the caller fit).
+    Returns (weights [n_groups], cluster table).
+    """
+    import polars as pl
+    st = (counts_bin.filter(pl.col("n") >= min_reads)
+          .group_by("group", "bin").agg(pl.col("w").sum().alias("sites"),
+                                        pl.col("w").filter(pl.col("k") / pl.col("n") > 0.5).sum().alias("meth"))
+          .filter(pl.col("sites") >= min_sites)
+          .with_columns((pl.col("meth") / pl.col("sites") > 0.5).alias("on")))
+    meas = {g: dict(zip(d["bin"].to_list(), d["on"].to_list())) for (g,), d in st.group_by("group")}
+    cand = [g for g, m in meas.items() if sum(m.values()) >= 2]
+    members = {g: [motifs[i] for i in range(len(motifs)) if group_of[i] == g] for g in cand}
+    parent = {g: g for g in cand}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    cand.sort()
+    for i, a in enumerate(cand):
+        for b in cand[i + 1:]:
+            ma, mb = meas[a], meas[b]
+            common = ma.keys() & mb.keys()
+            if len(common) < min_common_bins:
+                continue
+            on_a = {x for x in common if ma[x]}; on_b = {x for x in common if mb[x]}
+            u = on_a | on_b
+            if len(u) < 2 or len(on_a & on_b) / len(u) < min_jaccard:
+                continue
+            if any(can_share_site(x, y) for x in members[a] for y in members[b]):
+                parent[find(a)] = find(b)
+    clusters: dict = {}
+    for g in cand:
+        clusters.setdefault(find(g), []).append(g)
+    w = np.ones(n_groups)
+    rows = []
+    for root, gs in clusters.items():
+        for g in gs:
+            w[g] = 1.0 / len(gs)
+            rows.append({"group": g, "cluster": min(gs), "cluster_size": len(gs), "weight": 1.0 / len(gs)})
+    tab = pl.DataFrame(rows, schema={"group": pl.Int32, "cluster": pl.Int32, "cluster_size": pl.Int64, "weight": pl.Float64}).sort("cluster", "group")
+    return w, tab
+def noisy_groups(parts: list[str], contig_bin: "pl.DataFrame", contigs: list[int], *, min_reads: int = 5,
+                 min_sites: int = 20, partial=(0.15, 0.6), min_mid_sites: float = 0.2, min_bin_share: float = 0.2,
+                 min_noise_bins: int = 3) -> "pl.DataFrame":
+    """Motif groups that look like caller noise: intermediate read-level calls at the sites themselves,
+    in a large share of genomes.
+
+    A real motif is methylated at (nearly) all of a genome's sites or at none. A group can still show a
+    partial contig mean for real reasons, and those must be kept: a genome that methylates RGATCY but not
+    every GATC has its GATC sites at either ~1 or ~0, with a mix set by sequence composition; a bipartite
+    motif can follow a genome's Dam status. What marks noise is that the *sites* are intermediate (each
+    site has some reads called methylated), on most genomes. On ZymoFecal, 4mC calls on CCNGG-type
+    contexts did this in 20-81% of bins (mean fraction 0.15-0.3, a third of sites intermediate): most
+    likely 5mC at those sites leaking into the 4mC call.
+
+    Per (contig, group), over the given binned contigs (cache ids, typically those >= 10x): sites with
+    >= min_reads reads; the contig is noise-like for the group when it has >= min_sites such sites, their
+    mean read fraction lies in `partial` and >= min_mid_sites of them have a read fraction in (0.2, 0.8).
+    A bin is noise-like when at least half its measured contigs are. A group is noisy when noise-like
+    bins are >= min_bin_share of the bins that measure it and at least min_noise_bins. Unbinned contigs
+    are not used (a genome must be identifiable to count). Returns one row per measured group.
+    """
+    import polars as pl
+    lo, hi = partial
+    r = pl.col("k") / pl.col("n")
+    cg = (pl.scan_parquet(parts).filter(pl.col("contig").is_in(contigs) & (pl.col("n") >= min_reads))
+          .group_by("contig", "group").agg(pl.len().alias("sites"), r.mean().alias("mean_fraction"),
+                                           ((r > 0.2) & (r < 0.8)).mean().alias("mid_sites"))
+          .filter(pl.col("sites") >= min_sites).collect())
+    cg = cg.join(contig_bin, on="contig", how="inner").with_columns(
+        (pl.col("mean_fraction").is_between(lo, hi) & (pl.col("mid_sites") >= min_mid_sites)).alias("noise_like"))
+    b = cg.group_by("group", "bin").agg(pl.col("noise_like").mean().alias("share"), pl.col("mean_fraction").median().alias("level"))
+    g = (b.group_by("group").agg(pl.len().alias("bins"), (pl.col("share") >= 0.5).sum().alias("noise_bins"),
+                                 pl.col("level").median().alias("median_level"))
+         .with_columns((pl.col("noise_bins") / pl.col("bins")).alias("noise_bin_share"))
+         .with_columns(((pl.col("noise_bin_share") >= min_bin_share) & (pl.col("noise_bins") >= min_noise_bins)).alias("noisy"))
+         .sort("group"))
+    return g

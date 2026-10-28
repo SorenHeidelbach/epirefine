@@ -46,9 +46,14 @@ def test_nested_motifs_grouped_and_deduplicated():
     motifs = [Motif("GATC", 1, "a"), Motif("RGATCY", 2, "a"), Motif("CCWGG", 1, "m")]
     recs = build_records({"c": seq}, motifs)
     groups = group_motifs(recs, motifs)
-    assert groups[0] == groups[1] != groups[2]
+    # RGATCY is a quarter of GATC's sites: nested, not the same motif, so not merged
+    assert len({groups[0], groups[1], groups[2]}) == 3
     sites = assign_sites(recs, groups)
     assert sites.unique(["contig", "pos", "strand", "mod_type"]).height == sites.height
+    # every RGATCY position goes to the more specific RGATCY group, none is dropped
+    n_rgatcy = recs.filter(pl.col("motif") == 1).height
+    assert sites.filter(pl.col("group") == groups[1]).height == n_rgatcy
+    assert sites.height == recs.unique(["contig", "pos", "strand", "mod_type"]).height
 
 
 @pytest.mark.parametrize("sep", [" ", "\t"])

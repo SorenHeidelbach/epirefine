@@ -65,10 +65,20 @@ class Refinement:
 
 
 def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarray, temperature: float,
-           contamination_threshold: float = 0.5, include_threshold: float = 0.95,
+           contamination_threshold: float = 0.5, include_threshold: float = 0.9,
            eps_prior=(1.0, 19.0), p_unknown_prior=(1.0, 1.0), p_unknown: float | None = None,
-           methylome_difference: np.ndarray | None = None, min_difference: float = 0.3) -> Refinement:
+           methylome_difference: np.ndarray | None = None, min_difference: float = 0.4,
+           decidable: np.ndarray | None = None, unmethylated_bins: np.ndarray | None = None,
+           include_threshold_unmethylated: float = 0.95) -> Refinement:
     """given[i] = bin index of contig i, -1 if unbinned; testable[i] = binned and scored leave-one-out.
+    decidable[i] = False: no decision about contig i at all (e.g. coverage too low): it is neither
+    flagged nor included and doesn't enter the estimates of p_unknown and the contamination rate.
+
+    unmethylated_bins[h] = True for bins with no detected methylation: inclusion into them needs
+    include_threshold_unmethylated. Such a bin is matched by any contig that shows no methylation at
+    the listed motifs, including contigs of genomes without a bin whose own motifs are not in the list
+    (Nanomotif sees only bins): all 4 wrong placements on the monoculture set were orphan genomes put
+    into methylation-poor bins at P 0.905-0.918.
 
     methylome_difference[i]: over motif groups, the largest distance between the bin's methylated
     fraction and contig i's 95% credible interval for its own. A contaminant must clear its bin by at
@@ -77,8 +87,11 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     within-genome variation that the likelihood alone reads as overwhelming evidence (dev log D20).
     """
     N, H = S.shape
-    Z, Zu = S / temperature, Su / temperature
-    unb = given < 0
+    T = np.asarray(temperature, float)  # scalar or one per contig
+    Z, Zu = S / (T[:, None] if T.ndim == 1 else T), Su / T
+    dec = np.ones(N, bool) if decidable is None else np.asarray(decidable, bool)
+    testable = testable & dec
+    unb = (given < 0) & dec
     # p_u from the unbinned contigs: "some bin, uniformly" vs "an unbinned genome"
     l_bins = logsumexp(Z, axis=1) - np.log(H)
     if p_unknown is None:
@@ -105,19 +118,102 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     if methylome_difference is not None:
         contaminant &= methylome_difference >= min_difference
 
-    candidate = unb | contaminant
-    include_bin = np.where(candidate & (best_alt < H) & (p_best_alt >= include_threshold), best_alt, -1)
+    candidate = unb | contaminant  # unb already excludes contigs without a decision
+    thr = np.full(N, include_threshold)
+    if unmethylated_bins is not None:
+        to_bin = best_alt < H
+        thr[to_bin] = np.where(np.asarray(unmethylated_bins)[best_alt[to_bin]], include_threshold_unmethylated, include_threshold)
+    include_bin = np.where(candidate & (best_alt < H) & (p_best_alt >= thr), best_alt, -1)
     return Refinement(float(p_unknown), float(eps), p_foreign, best_alt, p_best_alt, contaminant, candidate,
                       include_bin)
+
+
+def regional_pattern(llrs: list[np.ndarray], switch: float = 0.05, iters: int = 100, weights=None):
+    """Is a long contig its bin's, foreign, or a mixture of the two along its length?
+
+    llrs[u]: per 50 kb chunk of contig u, in order, log p(chunk | foreign) - log p(chunk | its bin) (from
+    the robust host-profile fit, bin profile without the chunk). Three explanations:
+        member   every chunk belongs to the bin            log L = 0
+        foreign  every chunk is foreign                     log L = sum llr
+        mixed    a two-state chain along the contig (switch probability `switch` per chunk), excluding
+                 the two pure paths
+    with mixture weights estimated by EM over all contigs. On ZymoFecal every flag that Hi-C contradicts
+    on a contig >= 150 kb had foreign and bin-like chunks (17-83% foreign: islands, chimeric joins), while
+    the Hi-C-confirmed contaminants were foreign in every chunk; whole-contig scores mixed the two.
+    weights: fixed prior weights of the three explanations (no EM), e.g. tied to the model's p_unknown.
+    Returns (posterior [U, 3] for member/foreign/mixed, per contig the chunk posterior of 'foreign' under
+    the mixed explanation, the weights).
+    """
+    from scipy.special import logsumexp as lse
+    ls, l1s = np.log(switch), np.log1p(-switch)
+    T = np.array([[l1s, ls], [ls, l1s]])
+    L = np.zeros((len(llrs), 3))
+    chunk_post = []
+    for u, x in enumerate(llrs):
+        x = np.asarray(x, float)
+        n = len(x)
+        em = np.stack([np.zeros(n), x], 1)  # emissions: bin, foreign
+        a = np.zeros((n, 2)); b = np.zeros((n, 2))
+        a[0] = np.log(0.5) + em[0]
+        for k in range(1, n):
+            a[k] = lse(a[k - 1][:, None] + T, axis=0) + em[k]
+        for k in range(n - 2, -1, -1):
+            b[k] = lse(T + (em[k + 1] + b[k + 1])[None, :], axis=1)
+        total = lse(a[-1])
+        pure = np.logaddexp(np.log(0.5) + (n - 1) * l1s, np.log(0.5) + (n - 1) * l1s + x.sum())
+        mixed = total + np.log(max(-np.expm1(min(pure - total, 0.0)), 1e-300))
+        L[u] = (0.0, x.sum(), mixed)
+        g = a + b
+        chunk_post.append(np.exp(g[:, 1] - lse(g, axis=1)))
+    if weights is None:
+        w = np.full(3, 1 / 3)
+        for _ in range(iters):
+            z = L + np.log(w)[None]
+            r = np.exp(z - lse(z, axis=1, keepdims=True))
+            w = np.clip(r.mean(0), 1e-4, None); w /= w.sum()
+    else:
+        w = np.clip(np.asarray(weights, float), 1e-6, None); w /= w.sum()
+    z = L + np.log(w)[None]
+    return np.exp(z - lse(z, axis=1, keepdims=True)), chunk_post, w
 
 
 def confidence(p: float) -> str:
     return next((name for lo, name in CONFIDENCE if p >= lo), "")
 
 
+def bin_evidence_table(bins: list[str], summary, n_sites_group: np.ndarray, given: np.ndarray,
+                       lo_methylated: float = 0.5, hi_unmethylated: float = 0.5) -> pl.DataFrame:
+    """Per bin: is there methylation evidence for its methylome?
+
+    methylated               some motif group's 95% interval lies above lo_methylated
+    no_methylation_detected  every group with sites is confidently below hi_unmethylated (an
+                             unmethylated genome: still a profile other bins can be told from)
+    no_methylation_evidence  neither: the intervals are too wide to say (too few sites or reads)
+    """
+    mean, lo, hi, _ = summary
+    sites = np.zeros((len(bins), n_sites_group.shape[1]), np.int64)
+    for b in range(len(bins)):
+        sel = given == b
+        if sel.any():
+            sites[b] = n_sites_group[sel].sum(0)
+    rows = []
+    for b, name in enumerate(bins):
+        has = sites[b] > 0
+        meth = has & (lo[b] >= lo_methylated)
+        unmeth = has & (hi[b] < hi_unmethylated)
+        status = ("methylated" if meth.any() else
+                  "no_methylation_detected" if has.any() and unmeth[has].all() else "no_methylation_evidence")
+        rows.append({"bin": name, "status": status, "groups_with_sites": int(has.sum()),
+                     "groups_methylated": int(meth.sum()), "groups_confidently_unmethylated": int(unmeth.sum()),
+                     "groups_undetermined": int((has & ~meth & ~unmeth).sum()), "sites": int(sites[b].sum())})
+    return pl.DataFrame(rows)
+
+
 def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bins: list[str], ref: Refinement,
                   n_sites: np.ndarray, sole: set, P: np.ndarray, methylome_difference: np.ndarray | None = None,
-                  redundancy: np.ndarray | None = None):
+                  redundancy: np.ndarray | None = None, evidence: np.ndarray | None = None, min_evidence: float = 3.0,
+                  coverage: np.ndarray | None = None, low_coverage: np.ndarray | None = None,
+                  too_short: np.ndarray | None = None, regional: dict | None = None):
     """Nanomotif-compatible files + pbinner's per-contig decision table."""
     H = len(bins)
     labels = bins + ["unknown"]
@@ -167,6 +263,21 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
         status[~np.isnan(redundancy) & (ref.include_bin < 0)] = "redundant"
     status[(ref.include_bin >= 0) & (given < 0)] = "included"
     status[(ref.include_bin >= 0) & (given >= 0)] = "moved"
+    if evidence is not None:
+        # kept / unbinned only because nothing could be seen: say so (expected log BF vs a random
+        # community genome below min_evidence, or no sites at all)
+        weak = np.isin(status, ["kept", "unbinned"]) & ~(np.nan_to_num(evidence, nan=0.0) >= min_evidence)
+        status[weak] = "no_methylation_evidence"
+    if low_coverage is not None:
+        # coverage too low: no decision was made about these contigs (binned or not)
+        status[low_coverage] = "low_coverage"
+    if too_short is not None:
+        # shorter than min_contig_length: no decision either
+        status[too_short] = "too_short"
+    if regional is not None:
+        # flagged by the whole-contig score, but along its length partly the bin's and partly foreign:
+        # kept in its bin, foreign segments reported
+        status[regional["mixed"]] = "mixed"
     new_bin = np.array([bins[ref.include_bin[i]] if ref.include_bin[i] >= 0
                         else (given_lbl[i] if given[i] >= 0 and not ref.contaminant[i] else "")
                         for i in range(len(contigs))], dtype=object)
@@ -178,4 +289,10 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
         "best_alternative": [labels[k] for k in ref.best_alt], "p_best_alternative": ref.p_best_alt,
         "map": [labels[k] for k in P.argmax(1)], "p_map": P.max(1), "p_unknown": P[:, -1],
         "credible_set_95": [",".join(credible_set(row, labels)) for row in P],
+        "expected_evidence": evidence if evidence is not None else np.full(len(contigs), np.nan),
+        "coverage": coverage if coverage is not None else np.full(len(contigs), np.nan),
+        "p_regional_foreign": regional["p"][:, 1] if regional is not None else np.full(len(contigs), np.nan),
+        "p_regional_mixed": regional["p"][:, 2] if regional is not None else np.full(len(contigs), np.nan),
+        "foreign_segments": regional["segments"] if regional is not None else [""] * len(contigs),
+        "segment_bins": regional["segment_bins"] if regional is not None else [""] * len(contigs),
     }).write_csv(out / "contig_decisions.tsv", separator="\t", float_precision=4)

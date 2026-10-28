@@ -59,7 +59,8 @@ def run_scenario(sc: dict, out_root: Path, workers: int = 16) -> dict:
     if m:
         row.update(p_unknown=float(m.group(1)), contamination_rate=float(m.group(2)))
     if p.returncode == 0 and sc.get("truth"):
-        r = evaluate(sc["truth"], out / "bin_contamination.tsv", out / "new_contig_bin.tsv", "pbinner")
+        r = evaluate(sc["truth"], out / "bin_contamination.tsv", out / "new_contig_bin.tsv", "pbinner",
+                     out / "contig_decisions.tsv")
         row.update({k: r[k] for k in r if k != "tool"})
     return row
 
