@@ -1,0 +1,3 @@
+channels: [conda-forge, bioconda]
+dependencies:
+  - ont-modkit=0.6.4

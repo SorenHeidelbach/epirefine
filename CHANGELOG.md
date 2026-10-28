@@ -3,6 +3,22 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.7.2 (2026-10-28): monoculture benchmark sets (benchmarks/ and workflow/ only)
+
+No change to the pbinner package.
+- `benchmarks/monoculture_sets.py` builds synthetic communities from 40 isolates sequenced one at a
+  time (so every read's origin is known):
+  - genus-level split into training (6 communities), test (3) and validation (3);
+  - 8 isolates per community;
+  - pileups thinned to 3-60x;
+  - assemblies cut into 2-100 kb pieces;
+  - errors planted with the standard generator.
+- `workflow/monocultures.smk` makes the missing modkit pileups and Nanomotif motifs.
+- `benchmarks/suite_monocultures.json` lists the scenarios. Test and validation communities are held
+  out for the final estimate.
+
+**Benchmark effect:** none (no package change).
+
 ## 0.7.1 (2026-10-28): Hi-C membership by contact density (hic/ only)
 
 No change to the pbinner package. `hic/density.py` calls contig membership from Hi-C contact density
