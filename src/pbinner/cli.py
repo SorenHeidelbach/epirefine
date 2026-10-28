@@ -42,6 +42,9 @@ def main(argv=None):
     r.add_argument("--no-motif-noise-filter", action="store_true",
                    help="keep motif groups whose methylation is partial on many contigs of many bins (by default "
                         "they are dropped as caller noise; see motif_noise.tsv)")
+    r.add_argument("--no-regional-model", action="store_true",
+                   help="judge long binned contigs only as a whole (default: a contig that is partly its bin's and partly "
+                        "foreign along its length is reported as mixed, with its foreign segments, instead of flagged)")
     r.add_argument("--max-redundancy", type=float, default=0.3,
                    help="don't include a contig when at least this share of its k-mers is already in the bin "
                         "(1 = no redundancy check)")
@@ -80,7 +83,7 @@ def main(argv=None):
         run(a.assembly, a.pileup, a.contig_bin, a.motifs, a.out, min_cov=a.min_cov, chunk_size=a.chunk_size,
             grid_size=a.grid_size, p_unknown=a.p_unknown, contamination_threshold=a.contamination_threshold,
             include_threshold=a.include_threshold, min_methylome_difference=a.min_methylome_difference,
-            max_redundancy=a.max_redundancy, min_evidence=a.min_evidence, min_contig_coverage=a.min_contig_coverage, min_contig_length=a.min_contig_length, motif_noise_filter=not a.no_motif_noise_filter, group_weights=not a.no_group_weights, include_threshold_unmethylated=a.include_threshold_unmethylated, do_calibrate=not a.no_calibrate, frag_lengths=a.frag_lengths,
+            max_redundancy=a.max_redundancy, min_evidence=a.min_evidence, min_contig_coverage=a.min_contig_coverage, min_contig_length=a.min_contig_length, motif_noise_filter=not a.no_motif_noise_filter, group_weights=not a.no_group_weights, regional_model=not a.no_regional_model, include_threshold_unmethylated=a.include_threshold_unmethylated, do_calibrate=not a.no_calibrate, frag_lengths=a.frag_lengths,
             frags_per_bin=a.frags_per_bin, frag_budget=a.frag_budget, tau=a.tau, temperature=a.temperature,
             contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, min_jaccard=a.min_jaccard,
             variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,

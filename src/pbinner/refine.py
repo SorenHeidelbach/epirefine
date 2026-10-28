@@ -128,6 +128,51 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
                       include_bin)
 
 
+def regional_pattern(llrs: list[np.ndarray], switch: float = 0.05, iters: int = 100):
+    """Is a long contig its bin's, foreign, or a mixture of the two along its length?
+
+    llrs[u]: per 50 kb chunk of contig u, in order, log p(chunk | foreign) - log p(chunk | its bin) (from
+    the robust host-profile fit, bin profile without the chunk). Three explanations:
+        member   every chunk belongs to the bin            log L = 0
+        foreign  every chunk is foreign                     log L = sum llr
+        mixed    a two-state chain along the contig (switch probability `switch` per chunk), excluding
+                 the two pure paths
+    with mixture weights estimated by EM over all contigs. On ZymoFecal every flag that Hi-C contradicts
+    on a contig >= 150 kb had foreign and bin-like chunks (17-83% foreign: islands, chimeric joins), while
+    the Hi-C-confirmed contaminants were foreign in every chunk; whole-contig scores mixed the two.
+    Returns (posterior [U, 3] for member/foreign/mixed, per contig the chunk posterior of 'foreign' under
+    the mixed explanation).
+    """
+    from scipy.special import logsumexp as lse
+    ls, l1s = np.log(switch), np.log1p(-switch)
+    T = np.array([[l1s, ls], [ls, l1s]])
+    L = np.zeros((len(llrs), 3))
+    chunk_post = []
+    for u, x in enumerate(llrs):
+        x = np.asarray(x, float)
+        n = len(x)
+        em = np.stack([np.zeros(n), x], 1)  # emissions: bin, foreign
+        a = np.zeros((n, 2)); b = np.zeros((n, 2))
+        a[0] = np.log(0.5) + em[0]
+        for k in range(1, n):
+            a[k] = lse(a[k - 1][:, None] + T, axis=0) + em[k]
+        for k in range(n - 2, -1, -1):
+            b[k] = lse(T + (em[k + 1] + b[k + 1])[None, :], axis=1)
+        total = lse(a[-1])
+        pure = np.logaddexp(np.log(0.5) + (n - 1) * l1s, np.log(0.5) + (n - 1) * l1s + x.sum())
+        mixed = total + np.log(max(-np.expm1(min(pure - total, 0.0)), 1e-300))
+        L[u] = (0.0, x.sum(), mixed)
+        g = a + b
+        chunk_post.append(np.exp(g[:, 1] - lse(g, axis=1)))
+    w = np.full(3, 1 / 3)
+    for _ in range(iters):
+        z = L + np.log(w)[None]
+        r = np.exp(z - lse(z, axis=1, keepdims=True))
+        w = np.clip(r.mean(0), 1e-4, None); w /= w.sum()
+    z = L + np.log(w)[None]
+    return np.exp(z - lse(z, axis=1, keepdims=True)), chunk_post
+
+
 def confidence(p: float) -> str:
     return next((name for lo, name in CONFIDENCE if p >= lo), "")
 
@@ -164,7 +209,7 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
                   n_sites: np.ndarray, sole: set, P: np.ndarray, methylome_difference: np.ndarray | None = None,
                   redundancy: np.ndarray | None = None, evidence: np.ndarray | None = None, min_evidence: float = 3.0,
                   coverage: np.ndarray | None = None, low_coverage: np.ndarray | None = None,
-                  too_short: np.ndarray | None = None):
+                  too_short: np.ndarray | None = None, regional: dict | None = None):
     """Nanomotif-compatible files + pbinner's per-contig decision table."""
     H = len(bins)
     labels = bins + ["unknown"]
@@ -225,6 +270,10 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
     if too_short is not None:
         # shorter than min_contig_length: no decision either
         status[too_short] = "too_short"
+    if regional is not None:
+        # flagged by the whole-contig score, but along its length partly the bin's and partly foreign:
+        # kept in its bin, foreign segments reported
+        status[regional["mixed"]] = "mixed"
     new_bin = np.array([bins[ref.include_bin[i]] if ref.include_bin[i] >= 0
                         else (given_lbl[i] if given[i] >= 0 and not ref.contaminant[i] else "")
                         for i in range(len(contigs))], dtype=object)
@@ -238,4 +287,7 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
         "credible_set_95": [",".join(credible_set(row, labels)) for row in P],
         "expected_evidence": evidence if evidence is not None else np.full(len(contigs), np.nan),
         "coverage": coverage if coverage is not None else np.full(len(contigs), np.nan),
+        "p_regional_foreign": regional["p"][:, 1] if regional is not None else np.full(len(contigs), np.nan),
+        "p_regional_mixed": regional["p"][:, 2] if regional is not None else np.full(len(contigs), np.nan),
+        "foreign_segments": regional["segments"] if regional is not None else [""] * len(contigs),
     }).write_csv(out / "contig_decisions.tsv", separator="\t", float_precision=4)

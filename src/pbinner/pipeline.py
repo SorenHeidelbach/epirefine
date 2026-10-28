@@ -25,7 +25,7 @@ from .assignability import contig_evidence
 from .model import FittedModel, posterior
 from .motifs import build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights
 from .redundancy import inclusion_redundancy
-from .refine import bin_evidence_table, refine, write_outputs
+from .refine import bin_evidence_table, refine, regional_pattern, write_outputs
 from .sites import EncodedAssembly, extract_sites, unit_tables
 
 
@@ -78,7 +78,7 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
-        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
+        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
     out = Path(out)
@@ -327,6 +327,37 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     ref = refine(sc.S, sc.Su, given, testable, temperature, contamination_threshold, include_threshold,
                  methylome_difference=diff, min_difference=min_methylome_difference,
                  p_unknown=p_unknown, decidable=~low_cov & ~short, unmethylated_bins=unmeth_bins, include_threshold_unmethylated=include_threshold_unmethylated)
+    # long binned contigs: whole contig foreign, or partly the bin's and partly foreign along its length?
+    # (chunk-level evidence from the robust host-profile fit; flags on mixed contigs are withdrawn and
+    # their foreign segments reported)
+    regional = None
+    if regional_model:
+        llr_chunk = (np.log(np.clip(p_foreign, 1e-12, 1 - 1e-12)) - np.log(np.clip(1 - p_foreign, 1e-12, None))
+                     - np.log(contam_eps / (1 - contam_eps)))
+        order = np.lexsort((chunk_no, chunk_contig))
+        by_contig: dict[int, list[int]] = {}
+        for k in order:
+            by_contig.setdefault(int(chunk_contig[k]), []).append(int(k))
+        tidx = {cid[c]: i for i, c in enumerate(targets)}
+        long_u = [u for u in by_contig if len(by_contig[u]) >= 2 and u in tidx and given[tidx[u]] >= 0 and not low_cov[tidx[u]]]
+        post, chunk_post = regional_pattern([llr_chunk[by_contig[u]] for u in long_u]) if long_u else (np.zeros((0, 3)), [])
+        reg_p = np.full((len(targets), 3), np.nan)
+        segments = [""] * len(targets)
+        mixed = np.zeros(len(targets), bool)
+        for j, u in enumerate(long_u):
+            i = tidx[u]
+            reg_p[i] = post[j]
+            ks = by_contig[u]
+            fk = [chunk_no[k] for k, pf in zip(ks, chunk_post[j]) if pf >= 0.5]
+            segments[i] = ";".join(f"{c * chunk_size}-{min((c + 1) * chunk_size, lengths[targets[i]])}" for c in fk)
+            if ref.contaminant[i] and post[j, 2] > post[j, 1]:
+                mixed[i] = True
+        ref.contaminant[mixed] = False
+        ref.include_bin[mixed & (given >= 0)] = -1
+        ref.candidate[mixed] = False
+        regional = {"p": reg_p, "segments": segments, "mixed": mixed}
+        _log(f"regional: {len(long_u)} binned contigs with >= 2 chunks; {int(mixed.sum())} flags withdrawn as mixed "
+             f"(partly the bin's, partly foreign along the contig)")
     # don't include contigs whose sequence the target bin already holds (strain variants, haplotigs):
     # methylation can't see redundancy (D21)
     redundancy = np.full(len(targets), np.nan)
@@ -344,7 +375,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     params.update(p_unknown=p_unknown, contamination_rate=ref.eps)
     P = posterior(sc.S, sc.Su, p_unknown, temperature)
     write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff, redundancy,
-                  evidence=evidence, min_evidence=min_evidence, coverage=coverage, low_coverage=low_cov, too_short=short)
+                  evidence=evidence, min_evidence=min_evidence, coverage=coverage, low_coverage=low_cov, too_short=short,
+                  regional=regional)
     _write(bin_ev, out / "bin_evidence.tsv")
     _log(f"refinement: p_unknown={p_unknown:.3f}, contamination rate={ref.eps:.3f}; "
          f"{int(ref.contaminant.sum())} of {int(testable.sum())} testable binned contigs flagged, "
