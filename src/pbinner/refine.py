@@ -128,7 +128,7 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
                       include_bin)
 
 
-def regional_pattern(llrs: list[np.ndarray], switch: float = 0.05, iters: int = 100):
+def regional_pattern(llrs: list[np.ndarray], switch: float = 0.05, iters: int = 100, weights=None):
     """Is a long contig its bin's, foreign, or a mixture of the two along its length?
 
     llrs[u]: per 50 kb chunk of contig u, in order, log p(chunk | foreign) - log p(chunk | its bin) (from
@@ -140,8 +140,9 @@ def regional_pattern(llrs: list[np.ndarray], switch: float = 0.05, iters: int = 
     with mixture weights estimated by EM over all contigs. On ZymoFecal every flag that Hi-C contradicts
     on a contig >= 150 kb had foreign and bin-like chunks (17-83% foreign: islands, chimeric joins), while
     the Hi-C-confirmed contaminants were foreign in every chunk; whole-contig scores mixed the two.
+    weights: fixed prior weights of the three explanations (no EM), e.g. tied to the model's p_unknown.
     Returns (posterior [U, 3] for member/foreign/mixed, per contig the chunk posterior of 'foreign' under
-    the mixed explanation).
+    the mixed explanation, the weights).
     """
     from scipy.special import logsumexp as lse
     ls, l1s = np.log(switch), np.log1p(-switch)
@@ -164,13 +165,16 @@ def regional_pattern(llrs: list[np.ndarray], switch: float = 0.05, iters: int = 
         L[u] = (0.0, x.sum(), mixed)
         g = a + b
         chunk_post.append(np.exp(g[:, 1] - lse(g, axis=1)))
-    w = np.full(3, 1 / 3)
-    for _ in range(iters):
-        z = L + np.log(w)[None]
-        r = np.exp(z - lse(z, axis=1, keepdims=True))
-        w = np.clip(r.mean(0), 1e-4, None); w /= w.sum()
+    if weights is None:
+        w = np.full(3, 1 / 3)
+        for _ in range(iters):
+            z = L + np.log(w)[None]
+            r = np.exp(z - lse(z, axis=1, keepdims=True))
+            w = np.clip(r.mean(0), 1e-4, None); w /= w.sum()
+    else:
+        w = np.clip(np.asarray(weights, float), 1e-6, None); w /= w.sum()
     z = L + np.log(w)[None]
-    return np.exp(z - lse(z, axis=1, keepdims=True)), chunk_post
+    return np.exp(z - lse(z, axis=1, keepdims=True)), chunk_post, w
 
 
 def confidence(p: float) -> str:
@@ -290,4 +294,5 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
         "p_regional_foreign": regional["p"][:, 1] if regional is not None else np.full(len(contigs), np.nan),
         "p_regional_mixed": regional["p"][:, 2] if regional is not None else np.full(len(contigs), np.nan),
         "foreign_segments": regional["segments"] if regional is not None else [""] * len(contigs),
+        "segment_bins": regional["segment_bins"] if regional is not None else [""] * len(contigs),
     }).write_csv(out / "contig_decisions.tsv", separator="\t", float_precision=4)

@@ -356,7 +356,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
             by_contig.setdefault(int(chunk_contig[k]), []).append(int(k))
         tidx = {cid[c]: i for i, c in enumerate(targets)}
         long_u = [u for u in by_contig if len(by_contig[u]) >= 2 and u in tidx and given[tidx[u]] >= 0 and not low_cov[tidx[u]]]
-        post, chunk_post = regional_pattern([llr_chunk[by_contig[u]] for u in long_u]) if long_u else (np.zeros((0, 3)), [])
+        post, chunk_post, w_flag = (regional_pattern([llr_chunk[by_contig[u]] for u in long_u]) if long_u
+                                    else (np.zeros((0, 3)), [], np.array([1.0, 0.0, 0.0])))
         reg_p = np.full((len(targets), 3), np.nan)
         segments = [""] * len(targets)
         mixed = np.zeros(len(targets), bool)
@@ -400,10 +401,24 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                 pb = np.exp(robust - robust.max()); pb /= pb.sum()
                 cand_u.append(i); h_star.append(h); p_bin.append(pb[h])
                 llrs.append(Suw[ks] - Sw[ks, h])
+            if cand_u and ref.p_unknown >= 1 - 1e-6:
+                # the model's own estimate says unbinned contigs have no bin here (simulated look-alikes):
+                # windows that each lean slightly toward a bin must not reopen that
+                _log("regional inclusion: p_unknown = 1, no unbinned contig has a bin; none included")
+                cand_u = []
             if cand_u:
-                post_u, cpost = regional_pattern(llrs)
+                # prior weights tied to the model: p_unknown from the contig-level fit, the share of mixed
+                # contigs from the binned ones. Windows that can't tell the bin from an unknown genome
+                # (look-alike strains) then leave the decision to p_unknown, as at contig level; weights
+                # estimated from the long unbinned contigs alone let 'mixed' absorb them (simulated
+                # look-alikes: ~40 inclusions per scenario, 9 wrong).
+                pu = min(max(ref.p_unknown, 1e-6), 1 - 1e-6)
+                m = float(w_flag[2])
+                post_u, cpost, _ = regional_pattern(llrs, weights=((1 - pu) * (1 - m), pu * (1 - m), m))
                 for j, i in enumerate(cand_u):
-                    p_in = (post_u[j, 0] + post_u[j, 2]) * p_bin[j]
+                    # a mixed contig counts toward the bin for the share of its windows the bin explains
+                    share_bin = float(np.mean(1 - cpost[j]))
+                    p_in = (post_u[j, 0] + post_u[j, 2] * share_bin) * p_bin[j]
                     thr = include_threshold_unmethylated if unmeth_bins[h_star[j]] else include_threshold
                     reg_p[i] = post_u[j]
                     if p_in >= thr:
@@ -412,7 +427,37 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                         fk = [win_no[k] for k, pf in zip(by_win[u], cpost[j]) if pf >= 0.5 and post_u[j, 2] > post_u[j, 0]]
                         segments[i] = ";".join(f"{c * chunk_size}-{min((c + 1) * chunk_size, lengths[targets[i]])}" for c in fk)
             _log(f"regional inclusion: {len(cand_u)} long unbinned contigs scored in windows; {reg_inc} included")
-        regional = {"p": reg_p, "segments": segments, "mixed": mixed}
+        # segment map: for contigs called mixed or included regionally, which bin (or an unknown genome)
+        # best explains each run of chunks along the contig, with its posterior. Reported only: nothing is
+        # split, so a user can see whether a mixed contig joins two bins' sequences.
+        seg_bins = [""] * len(targets)
+        T0 = float(np.median(np.atleast_1d(temperature)))
+        pu0 = min(max(ref.p_unknown, 1e-3), 1 - 1e-3)
+        lbl = bins + ["unknown"]
+
+        def segment_map(L_rows, nos, i):
+            sc_ = model.score(L_rows)
+            lg = np.concatenate([sc_.S / T0 + np.log((1 - pu0) / H), (sc_.Su / T0 + np.log(pu0))[:, None]], 1)
+            pr = np.exp(lg - lg.max(1, keepdims=True)); pr /= pr.sum(1, keepdims=True)
+            best, pbest = pr.argmax(1), pr.max(1)
+            runs, start = [], 0
+            for k in range(1, len(best) + 1):
+                if k == len(best) or best[k] != best[start]:
+                    lo, hi = int(nos[start]) * chunk_size, min((int(nos[k - 1]) + 1) * chunk_size, lengths[targets[i]])
+                    runs.append(f"{lo}-{hi}:{lbl[best[start]]}({pbest[start:k].mean():.2f})")
+                    start = k
+            return ";".join(runs)
+        for j, u in enumerate(long_u):
+            i = tidx[u]
+            if mixed[i]:
+                ks = by_contig[u]
+                seg_bins[i] = segment_map(L_chunks[ks], chunk_no[ks], i)
+        if len(win):
+            for u, ks in by_win.items():
+                i = tidx.get(u)
+                if i is not None and given[i] < 0 and ref.include_bin[i] >= 0 and segments[i]:
+                    seg_bins[i] = segment_map(L_win[ks], win_no[ks], i)
+        regional = {"p": reg_p, "segments": segments, "mixed": mixed, "segment_bins": seg_bins}
         _log(f"regional: {len(long_u)} binned contigs with >= 2 chunks; {int(mixed.sum())} flags withdrawn as mixed "
              f"(partly the bin's, partly foreign along the contig)")
     # don't include contigs whose sequence the target bin already holds (strain variants, haplotigs):
