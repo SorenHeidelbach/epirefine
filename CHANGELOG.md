@@ -3,6 +3,21 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.7.1 (2026-10-28): Hi-C membership by contact density (hic/ only)
+
+No change to the pbinner package. `hic/density.py` calls contig membership from Hi-C contact density
+relative to the bin's own internal density (ProxiMeta-style ratio):
+- **member:** ratio >= 0.1, >= 5 links, to >= 2 of the bin's other contigs.
+- **foreign:** another eligible bin is clearly preferred.
+- **not linked:** own-bin contacts improbably few for a member: below the 1% quantile of a
+  beta-binomial with the bin's pooled own-contact share and an over-dispersion fitted in-sample
+  (ZymoFecal rho 0.28).
+- Placed / not placed for unbinned contigs.
+
+ZymoFecal, full library (416 M read pairs), binned contigs: 4,062 members, 10 foreign, 178 not
+linked, 2,121 undetermined. The earlier calls had 5,047 members and 230 not linked.
+**Benchmark effect:** none (no package change).
+
 ## 0.7.0 (2026-10-28): coverage cutoff, motif groups, regional model, and new statuses and columns
 
 **Breaking for downstream parsers:** `contig_decisions.tsv` gains statuses `low_coverage`, `too_short`,
