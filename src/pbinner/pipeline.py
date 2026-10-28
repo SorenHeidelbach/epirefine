@@ -372,7 +372,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         ref.include_bin[mixed & (given >= 0)] = -1
         ref.candidate[mixed] = False
         # long unbinned contigs: windows scored against every bin and the unknown genome; the candidate bin
-        # is the one that best explains the windows when single windows may be anomalous, and the three
+        # is the one expected to explain the most sequence (sum over windows of its posterior among bins and
+        # the unknown genome: a strongly methylated genome covering 40% of a chimera must not outvote a
+        # weakly methylated one covering 60%, which a summed score did on the chimera benchmark), and the three
         # explanations (all windows the bin's / all unknown / a mixture along the contig) are weighed as
         # for flags. Included when P(the bin explains the contig) x P(that bin among bins) reaches the
         # inclusion threshold.
@@ -389,8 +391,12 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                 i = tidx.get(u)
                 if i is None or given[i] >= 0 or len(ks) < 2 or ref.include_bin[i] >= 0 or low_cov[i] or short[i]:
                     continue
-                robust = np.maximum(Sw[ks], Suw[ks][:, None]).sum(0)          # [H]
-                h = int(robust.argmax())
+                pu = min(max(ref.p_unknown, 1e-3), 1 - 1e-3)
+                logits = np.concatenate([Sw[ks] + np.log((1 - pu) / H), (Suw[ks] + np.log(pu))[:, None]], 1)
+                pw = np.exp(logits - logits.max(1, keepdims=True)); pw /= pw.sum(1, keepdims=True)
+                share = pw[:, :H].sum(0)                                        # expected windows per bin
+                h = int(share.argmax())
+                robust = np.maximum(Sw[ks], Suw[ks][:, None]).sum(0)
                 pb = np.exp(robust - robust.max()); pb /= pb.sum()
                 cand_u.append(i); h_star.append(h); p_bin.append(pb[h])
                 llrs.append(Suw[ks] - Sw[ks, h])
