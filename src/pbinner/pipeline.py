@@ -185,10 +185,20 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     off = 0
     for c in host_contigs:
         chunk_offset[cid[c]] = off; off += n_chunks_of[c]
+    n_host_chunks = off
+    # windows of long unbinned contigs (regional model for inclusion), scored like host chunks but kept
+    # out of the bin profiles
+    win_contigs = ([c for c in targets if c not in cb and lengths[c] >= 2 * chunk_size and lengths[c] >= min_contig_length
+                    and cov_of.get(cid[c], 0.0) >= min_contig_coverage] if regional_model else [])
+    for c in win_contigs:
+        n_chunks_of[c] = -(-lengths[c] // chunk_size)
+        chunk_offset[cid[c]] = off; off += n_chunks_of[c]
     n_chunks_all = off
-    chunk_contig = np.repeat([cid[c] for c in host_contigs], [n_chunks_of[c] for c in host_contigs])
-    chunk_no = np.concatenate([np.arange(n_chunks_of[c]) for c in host_contigs]) if host_contigs else np.zeros(0, int)
-    chunk_bin_all = np.repeat([bin_idx[cb[c]] for c in host_contigs], [n_chunks_of[c] for c in host_contigs])
+    unit_contigs = list(host_contigs) + win_contigs
+    chunk_contig = np.repeat([cid[c] for c in unit_contigs], [n_chunks_of[c] for c in unit_contigs]).astype(np.int64)
+    chunk_no = np.concatenate([np.arange(n_chunks_of[c]) for c in unit_contigs]) if unit_contigs else np.zeros(0, int)
+    chunk_bin_all = np.concatenate([np.repeat([bin_idx[cb[c]] for c in host_contigs], [n_chunks_of[c] for c in host_contigs]),
+                                    np.full(off - n_host_chunks, -1)]).astype(np.int64)
     target_of = np.full(n_ids, -1, np.int64)
     for i, c in enumerate(targets):
         target_of[cid[c]] = i
@@ -211,16 +221,22 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         for key in ("L_chunks", "L_t", "L_frag"):
             tabs[key] *= wf
         tabs["H_frag"] = (tabs["H_frag"][0] * wf, tabs["H_frag"][1] * wf)
-    keep = np.flatnonzero(tabs["chunk_sites"] > 0)  # chunks without sites carry no information
+    L_all = tabs.pop("L_chunks")
+    win = np.arange(n_host_chunks, n_chunks_all)[tabs["chunk_sites"][n_host_chunks:] > 0]
+    L_win, win_contig, win_no = L_all[win], chunk_contig[win], chunk_no[win]
+    keep = np.flatnonzero(tabs["chunk_sites"][:n_host_chunks] > 0)  # chunks without sites carry no information
     remap = np.full(n_chunks_all, -1, np.int64); remap[keep] = np.arange(len(keep))
-    L_chunks = tabs.pop("L_chunks")[keep]
+    L_chunks = L_all[keep]
+    del L_all
     chunk_bin, chunk_contig, chunk_no = chunk_bin_all[keep], chunk_contig[keep], chunk_no[keep]
     L_t, n_sites, n_sites_group = tabs["L_t"], tabs["n_sites_t"], tabs["n_sites_group_t"]
     _log(f"{len(keep)} host chunks of {chunk_size} bp; tables {L_chunks.nbytes / 1e9:.1f} GB (chunks), "
          f"{L_t.nbytes / 1e9:.1f} GB (contigs)")
 
     def chunk_index(contig_id, c):
-        return int(remap[chunk_offset[contig_id] + c]) if chunk_offset[contig_id] >= 0 and c < n_chunks_of[asm.names[contig_id]] else -1
+        if chunk_offset[contig_id] < 0 or chunk_offset[contig_id] >= n_host_chunks or c >= n_chunks_of[asm.names[contig_id]]:
+            return -1
+        return int(remap[chunk_offset[contig_id] + c])
 
     p_cal = 0.1 if p_unknown is None else p_unknown  # prior used before p_unknown is estimated (refinement)
     params = {"chunk_size": chunk_size, "grid_size": grid_size, "p_unknown": p_unknown, "min_cov": min_cov,
@@ -355,6 +371,41 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         ref.contaminant[mixed] = False
         ref.include_bin[mixed & (given >= 0)] = -1
         ref.candidate[mixed] = False
+        # long unbinned contigs: windows scored against every bin and the unknown genome; the candidate bin
+        # is the one that best explains the windows when single windows may be anomalous, and the three
+        # explanations (all windows the bin's / all unknown / a mixture along the contig) are weighed as
+        # for flags. Included when P(the bin explains the contig) x P(that bin among bins) reaches the
+        # inclusion threshold.
+        reg_inc = 0
+        if len(win):
+            ws = model.score(L_win)
+            T = float(np.median(np.atleast_1d(temperature)))
+            Sw, Suw = ws.S / T, ws.Su / T
+            by_win: dict[int, list[int]] = {}
+            for k in np.lexsort((win_no, win_contig)):
+                by_win.setdefault(int(win_contig[k]), []).append(int(k))
+            cand_u, llrs, h_star, p_bin = [], [], [], []
+            for u, ks in by_win.items():
+                i = tidx.get(u)
+                if i is None or given[i] >= 0 or len(ks) < 2 or ref.include_bin[i] >= 0 or low_cov[i] or short[i]:
+                    continue
+                robust = np.maximum(Sw[ks], Suw[ks][:, None]).sum(0)          # [H]
+                h = int(robust.argmax())
+                pb = np.exp(robust - robust.max()); pb /= pb.sum()
+                cand_u.append(i); h_star.append(h); p_bin.append(pb[h])
+                llrs.append(Suw[ks] - Sw[ks, h])
+            if cand_u:
+                post_u, cpost = regional_pattern(llrs)
+                for j, i in enumerate(cand_u):
+                    p_in = (post_u[j, 0] + post_u[j, 2]) * p_bin[j]
+                    thr = include_threshold_unmethylated if unmeth_bins[h_star[j]] else include_threshold
+                    reg_p[i] = post_u[j]
+                    if p_in >= thr:
+                        ref.include_bin[i] = h_star[j]; ref.candidate[i] = True; reg_inc += 1
+                        u = cid[targets[i]]
+                        fk = [win_no[k] for k, pf in zip(by_win[u], cpost[j]) if pf >= 0.5 and post_u[j, 2] > post_u[j, 0]]
+                        segments[i] = ";".join(f"{c * chunk_size}-{min((c + 1) * chunk_size, lengths[targets[i]])}" for c in fk)
+            _log(f"regional inclusion: {len(cand_u)} long unbinned contigs scored in windows; {reg_inc} included")
         regional = {"p": reg_p, "segments": segments, "mixed": mixed}
         _log(f"regional: {len(long_u)} binned contigs with >= 2 chunks; {int(mixed.sum())} flags withdrawn as mixed "
              f"(partly the bin's, partly foreign along the contig)")
