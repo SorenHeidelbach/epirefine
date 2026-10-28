@@ -261,3 +261,13 @@ def test_short_contigs_get_status_too_short(tmp_path):
                   coverage=np.array([12.0, 12.0, 12.0]), low_coverage=np.zeros(3, bool), too_short=short)
     d = pl.read_csv(tmp_path / "contig_decisions.tsv", separator="\t")
     assert dict(d.select("contig", "status").iter_rows()) == {"a": "kept", "b": "included", "c": "too_short"}
+
+
+def test_inclusion_into_unmethylated_bin_needs_higher_posterior():
+    from pbinner.refine import refine
+    # contig 0 fits bin 1 (unmethylated) with ~0.93 posterior, contig 1 fits bin 0 (methylated) alike
+    S = np.array([[-2.6, 0.0, -50.0], [0.0, -2.6, -50.0]])
+    given = np.array([-1, -1])
+    r = refine(S, np.array([-40., -40.]), given, given >= 0, temperature=1.0, p_unknown=0.01,
+               unmethylated_bins=np.array([False, True, False]), include_threshold_unmethylated=0.95)
+    assert r.include_bin.tolist() == [-1, 0]

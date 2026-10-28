@@ -78,7 +78,7 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
-        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, group_weights=True, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
+        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, group_weights=True, include_threshold_unmethylated=0.95, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
     out = Path(out)
@@ -308,9 +308,11 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     pb = phi_bin[given[has]]
     gap = np.maximum(np.maximum(phi_obs[1][has] - pb, pb - phi_obs[2][has]), 0.0)
     diff[has] = np.where(n_sites_group[has] > 0, gap, 0.0).max(1)
+    bin_ev = bin_evidence_table(bins, grid.summarize(model.log_prof), n_sites_group, given)
+    unmeth_bins = (bin_ev["status"] == "no_methylation_detected").to_numpy()
     ref = refine(sc.S, sc.Su, given, testable, temperature, contamination_threshold, include_threshold,
                  methylome_difference=diff, min_difference=min_methylome_difference,
-                 p_unknown=p_unknown, decidable=~low_cov & ~short)
+                 p_unknown=p_unknown, decidable=~low_cov & ~short, unmethylated_bins=unmeth_bins, include_threshold_unmethylated=include_threshold_unmethylated)
     # don't include contigs whose sequence the target bin already holds (strain variants, haplotigs):
     # methylation can't see redundancy (D21)
     redundancy = np.full(len(targets), np.nan)
@@ -329,7 +331,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     P = posterior(sc.S, sc.Su, p_unknown, temperature)
     write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff, redundancy,
                   evidence=evidence, min_evidence=min_evidence, coverage=coverage, low_coverage=low_cov, too_short=short)
-    _write(bin_evidence_table(bins, grid.summarize(model.log_prof), n_sites_group, given), out / "bin_evidence.tsv")
+    _write(bin_ev, out / "bin_evidence.tsv")
     _log(f"refinement: p_unknown={p_unknown:.3f}, contamination rate={ref.eps:.3f}; "
          f"{int(ref.contaminant.sum())} of {int(testable.sum())} testable binned contigs flagged, "
          f"{int(((ref.include_bin >= 0) & (given < 0)).sum())} of {int((given < 0).sum())} unbinned included, "

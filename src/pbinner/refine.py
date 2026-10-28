@@ -68,10 +68,17 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
            contamination_threshold: float = 0.5, include_threshold: float = 0.9,
            eps_prior=(1.0, 19.0), p_unknown_prior=(1.0, 1.0), p_unknown: float | None = None,
            methylome_difference: np.ndarray | None = None, min_difference: float = 0.4,
-           decidable: np.ndarray | None = None) -> Refinement:
+           decidable: np.ndarray | None = None, unmethylated_bins: np.ndarray | None = None,
+           include_threshold_unmethylated: float = 0.95) -> Refinement:
     """given[i] = bin index of contig i, -1 if unbinned; testable[i] = binned and scored leave-one-out.
     decidable[i] = False: no decision about contig i at all (e.g. coverage too low): it is neither
     flagged nor included and doesn't enter the estimates of p_unknown and the contamination rate.
+
+    unmethylated_bins[h] = True for bins with no detected methylation: inclusion into them needs
+    include_threshold_unmethylated. Such a bin is matched by any contig that shows no methylation at
+    the listed motifs, including contigs of genomes without a bin whose own motifs are not in the list
+    (Nanomotif sees only bins): all 4 wrong placements on the monoculture set were orphan genomes put
+    into methylation-poor bins at P 0.905-0.918.
 
     methylome_difference[i]: over motif groups, the largest distance between the bin's methylated
     fraction and contig i's 95% credible interval for its own. A contaminant must clear its bin by at
@@ -112,7 +119,11 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
         contaminant &= methylome_difference >= min_difference
 
     candidate = unb | contaminant  # unb already excludes contigs without a decision
-    include_bin = np.where(candidate & (best_alt < H) & (p_best_alt >= include_threshold), best_alt, -1)
+    thr = np.full(N, include_threshold)
+    if unmethylated_bins is not None:
+        to_bin = best_alt < H
+        thr[to_bin] = np.where(np.asarray(unmethylated_bins)[best_alt[to_bin]], include_threshold_unmethylated, include_threshold)
+    include_bin = np.where(candidate & (best_alt < H) & (p_best_alt >= thr), best_alt, -1)
     return Refinement(float(p_unknown), float(eps), p_foreign, best_alt, p_best_alt, contaminant, candidate,
                       include_bin)
 
