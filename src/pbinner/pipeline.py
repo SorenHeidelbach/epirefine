@@ -17,7 +17,7 @@ import numpy as np
 import polars as pl
 
 from . import io as pio
-from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate, contig_chunks, fragment_chunks,
+from .calibrate import (outlier_rates, DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate, contig_chunks, fragment_chunks,
                         fragments_per_bin, select_fragments)
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
@@ -78,7 +78,7 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
-        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
+        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, tau_mode="outlier", outlier_tau=10.0, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
     out = Path(out)
@@ -177,6 +177,23 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     _write(detection_table(det), out / "detection_model.tsv")
     _log("detection model fitted")
 
+    # between-contig variation per motif group: contigs match their bin's level, except for rare, large
+    # departures (outlier kernel; rates from binned contigs >= 10x)
+    tau_spread, outlier = None, None
+    if tau_mode == "outlier" and tau is None and variation == "beta":
+        rich_host = pl.DataFrame({"contig": [cid[c] for c in host_contigs if cov_of.get(cid[c], 0.0) >= 10],
+                                  "bin": [bin_idx[cb[c]] for c in host_contigs if cov_of.get(cid[c], 0.0) >= 10]},
+                                 schema={"contig": pl.Int32, "bin": pl.Int32})
+        st = (pl.scan_parquet(parts).filter((pl.col("n") >= 5) & keep_groups).join(rich_host.lazy(), on="contig")
+              .group_by("bin", "contig", "group").agg(pl.len().alias("N"), (pl.col("k") / pl.col("n") > 0.5).sum().alias("K"))
+              .collect())
+        eps, eps0, etab = outlier_rates(st, n_groups)
+        _write(etab.join(describe_groups(motifs, group_of).select(pl.col("group").cast(pl.Int32), "motifs"), on="group", how="left"),
+               out / "outlier_rates.tsv")
+        outlier = (eps, outlier_tau)
+        tau_spread = float("inf")
+        _log(f"outlier kernel: overall departure rate {eps0:.4f}; per group "
+             f"{', '.join(f'{int((eps == e).sum())} at {e:g}' for e in np.unique(eps))}; departures ~ Beta(tau={outlier_tau:g})")
     # units: host chunks (from contig lengths), targets, calibration fragments
     grid = Grid(grid_size, kernel=variation)
     n_ids = len(asm.names)
@@ -225,7 +242,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     p_cal = 0.1 if p_unknown is None else p_unknown  # prior used before p_unknown is estimated (refinement)
     params = {"chunk_size": chunk_size, "grid_size": grid_size, "p_unknown": p_unknown, "min_cov": min_cov,
               "contam_eps": contam_eps}
-    model_kw = {"contam_eps": contam_eps}
+    model_kw = {"contam_eps": contam_eps, "outlier": outlier}
     if do_calibrate:
         _log("calibration with pseudo-contigs")
         chunks_of = fragment_chunks(frags, chunk_size, chunk_index)
@@ -233,6 +250,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                         p_cal, H_frag=tabs["H_frag"], allow_sharpening=allow_sharpening,
                         leave_out=contig_chunks(frags["contig"].to_numpy(), chunk_contig),
                         taus=DEFAULT_TAUS if variation == "beta" else DEFAULT_SIGMAS, n_sites_frag=tabs["frag_sites"],
+                        fixed_tau=tau_spread,
                         log=_log, **model_kw)
         names = dict(enumerate(bins))
         cal["lookalikes"] = cal["lookalikes"].select(
@@ -257,6 +275,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     else:
         warm, unknown_params = {}, (None, 1.0)
     tabs = None
+    if tau is None and tau_spread is not None:
+        tau = tau_spread
     tau = (100.0 if variation == "beta" else 0.3) if tau is None else tau
     temperature = 1.0 if temperature is None else temperature
 
