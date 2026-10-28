@@ -45,12 +45,13 @@ def test_transition_delta_shifts_mean():
     assert Ti.sum(1).max() == 1 and abs(G.x[Ti[i].argmax()] - 0.72) < 0.05
 
 
-def test_cross_group_records_dropped():
+def test_cross_group_record_goes_to_most_specific_group():
     m = [Motif("TCGA", 3, "a"), Motif("GANTC", 1, "a")]
-    seq = "TTTCGACTCTT"  # TCGA at 2 (A at 5) and GACTC at 4 (A at 5): shared record
+    seq = "TTTCGACTCTT" + "GAATC" * 3  # TCGA at 2 (A at 5) and GACTC at 4 (A at 5): shared record
     recs = build_records({"c": seq}, m)
     sites = assign_sites(recs, [0, 1])  # separate groups (in a real genome overlap is ~1/16)
-    assert not ((sites["pos"] == 5) & (sites["strand"] == "+")).any()
+    shared = sites.filter((pl.col("pos") == 5) & (pl.col("strand") == "+"))
+    assert shared.height == 1 and shared["group"][0] == 0  # TCGA has fewer records: more specific
 
 
 def test_robust_profiles_flag_contaminant():
@@ -200,3 +201,73 @@ def test_calibration_leaves_the_whole_source_contig_out():
     chunk_contig = np.array([7, 7, 3, 7, 3, 9])
     got = contig_chunks(np.array([7, 3, 5]), chunk_contig)
     assert got[0].tolist() == [0, 1, 3] and got[1].tolist() == [2, 4] and got[2].tolist() == []
+
+
+def test_bin_evidence_status():
+    from pbinner.refine import bin_evidence_table
+    mean = np.array([[0.95, 0.02], [0.02, 0.01], [0.4, 0.3]])
+    lo = np.array([[0.9, 0.0], [0.0, 0.0], [0.05, 0.02]])
+    hi = np.array([[0.99, 0.05], [0.05, 0.03], [0.9, 0.8]])
+    nsg = np.array([[10, 10], [10, 10], [2, 2]])
+    t = bin_evidence_table(["a", "b", "c"], (mean, lo, hi, None), nsg, np.array([0, 1, 2]))
+    assert t["status"].to_list() == ["methylated", "no_methylation_detected", "no_methylation_evidence"]
+
+
+def test_low_evidence_contigs_get_their_own_status(tmp_path):
+    from pbinner.refine import refine, write_outputs
+    S = np.array([[0., -50, -50], [0., -50, -50], [-50, -50, 0.], [-1., -1, -1]])
+    Su = np.array([-40., -40, -40, -1])
+    given = np.array([0, 0, -1, -1])
+    r = refine(S, Su, given, given >= 0, temperature=1.0)
+    P = np.full((4, 4), 0.25)
+    write_outputs(tmp_path, ["a", "b", "c", "d"], {"a": 10, "b": 10, "c": 10, "d": 10}, given, ["x", "y", "z"], r,
+                  np.array([100, 2, 100, 1]), set(), P, evidence=np.array([20.0, 0.5, 20.0, np.nan]))
+    st = dict(pl.read_csv(tmp_path / "contig_decisions.tsv", separator="\t").select("contig", "status").iter_rows())
+    assert st == {"a": "kept", "b": "no_methylation_evidence", "c": "included", "d": "no_methylation_evidence"}
+
+
+def test_low_coverage_binned_contigs_are_not_judged(tmp_path):
+    from pbinner.refine import refine, write_outputs
+    S = np.array([[0., -50, -50], [0., -50, -50], [-50, -50, 0.]])
+    given = np.array([0, 0, -1])
+    low = np.array([False, True, False])
+    r = refine(S, np.array([-40., -40, -40]), given, (given >= 0) & ~low, temperature=1.0)
+    write_outputs(tmp_path, ["a", "b", "c"], {"a": 10, "b": 10, "c": 10}, given, ["x", "y", "z"], r,
+                  np.array([100, 100, 100]), set(), np.full((3, 4), 0.25), evidence=np.array([20.0, 20.0, 20.0]),
+                  coverage=np.array([12.0, 2.0, 3.0]), low_coverage=low)
+    d = pl.read_csv(tmp_path / "contig_decisions.tsv", separator="\t")
+    assert dict(d.select("contig", "status").iter_rows()) == {"a": "kept", "b": "low_coverage", "c": "included"}
+    assert d["coverage"].to_list() == [12.0, 2.0, 3.0]
+
+
+def test_no_decision_below_coverage_cutoff():
+    from pbinner.refine import refine
+    S = np.array([[0., -50, -50], [-50, 0., -50], [-50, -50, 0.], [-50, -50, 0.]])
+    given = np.array([0, 0, -1, -1])
+    dec = np.array([True, False, True, False])  # contigs 1 and 3: coverage too low
+    r = refine(S, np.array([-40., -40, -40, -40]), given, given >= 0, temperature=1.0, decidable=dec)
+    assert r.contaminant.tolist() == [False, False, False, False]  # contig 1 fits bin 1 but isn't judged
+    assert r.include_bin.tolist() == [-1, -1, 2, -1]              # contig 3 fits bin 2 but isn't included
+
+
+def test_short_contigs_get_status_too_short(tmp_path):
+    from pbinner.refine import refine, write_outputs
+    S = np.array([[0., -50, -50], [-50, -50, 0.], [-50, -50, 0.]])
+    given = np.array([0, -1, -1])
+    short = np.array([False, False, True])  # contig c fits bin z but is shorter than the cutoff
+    r = refine(S, np.array([-40., -40, -40]), given, given >= 0, temperature=1.0, decidable=~short)
+    write_outputs(tmp_path, ["a", "b", "c"], {"a": 5000, "b": 5000, "c": 800}, given, ["x", "y", "z"], r,
+                  np.array([100, 100, 100]), set(), np.full((3, 4), 0.25), evidence=np.array([20.0, 20.0, 20.0]),
+                  coverage=np.array([12.0, 12.0, 12.0]), low_coverage=np.zeros(3, bool), too_short=short)
+    d = pl.read_csv(tmp_path / "contig_decisions.tsv", separator="\t")
+    assert dict(d.select("contig", "status").iter_rows()) == {"a": "kept", "b": "included", "c": "too_short"}
+
+
+def test_inclusion_into_unmethylated_bin_needs_higher_posterior():
+    from pbinner.refine import refine
+    # contig 0 fits bin 1 (unmethylated) with ~0.93 posterior, contig 1 fits bin 0 (methylated) alike
+    S = np.array([[-2.6, 0.0, -50.0], [0.0, -2.6, -50.0]])
+    given = np.array([-1, -1])
+    r = refine(S, np.array([-40., -40.]), given, given >= 0, temperature=1.0, p_unknown=0.01,
+               unmethylated_bins=np.array([False, True, False]), include_threshold_unmethylated=0.95)
+    assert r.include_bin.tolist() == [-1, 0]
