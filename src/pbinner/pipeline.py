@@ -17,12 +17,12 @@ import numpy as np
 import polars as pl
 
 from . import io as pio
-from .calibrate import (outlier_rates, DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate, contig_chunks, fragment_chunks,
+from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate, contig_chunks, fragment_chunks,
                         fragments_per_bin, select_fragments)
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
-from .model import FittedModel, posterior
+from .model import FittedModel, learn_departures, posterior
 from .motifs import build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights
 from .redundancy import inclusion_redundancy
 from .refine import bin_evidence_table, refine, write_outputs
@@ -78,7 +78,7 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
-        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, tau_mode="outlier", outlier_tau=10.0, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
+        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, tau_mode="outlier", do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
     out = Path(out)
@@ -177,23 +177,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     _write(detection_table(det), out / "detection_model.tsv")
     _log("detection model fitted")
 
-    # between-contig variation per motif group: contigs match their bin's level, except for rare, large
-    # departures (outlier kernel; rates from binned contigs >= 10x)
     tau_spread, outlier = None, None
-    if tau_mode == "outlier" and tau is None and variation == "beta":
-        rich_host = pl.DataFrame({"contig": [cid[c] for c in host_contigs if cov_of.get(cid[c], 0.0) >= 10],
-                                  "bin": [bin_idx[cb[c]] for c in host_contigs if cov_of.get(cid[c], 0.0) >= 10]},
-                                 schema={"contig": pl.Int32, "bin": pl.Int32})
-        st = (pl.scan_parquet(parts).filter((pl.col("n") >= 5) & keep_groups).join(rich_host.lazy(), on="contig")
-              .group_by("bin", "contig", "group").agg(pl.len().alias("N"), (pl.col("k") / pl.col("n") > 0.5).sum().alias("K"))
-              .collect())
-        eps, eps0, etab = outlier_rates(st, n_groups)
-        _write(etab.join(describe_groups(motifs, group_of).select(pl.col("group").cast(pl.Int32), "motifs"), on="group", how="left"),
-               out / "outlier_rates.tsv")
-        outlier = (eps, outlier_tau)
-        tau_spread = float("inf")
-        _log(f"outlier kernel: overall departure rate {eps0:.4f}; per group "
-             f"{', '.join(f'{int((eps == e).sum())} at {e:g}' for e in np.unique(eps))}; departures ~ Beta(tau={outlier_tau:g})")
     # units: host chunks (from contig lengths), targets, calibration fragments
     grid = Grid(grid_size, kernel=variation)
     n_ids = len(asm.names)
@@ -239,6 +223,14 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     def chunk_index(contig_id, c):
         return int(remap[chunk_offset[contig_id] + c]) if chunk_offset[contig_id] >= 0 and c < n_chunks_of[asm.names[contig_id]] else -1
 
+    # between-contig variation per motif group, learned from the host chunks: a chunk equals its bin's
+    # level except for departures, whose rate and width each group learns by EM (outlier kernel)
+    if tau_mode == "outlier" and tau is None and variation == "beta":
+        _log("learning departures from bin levels (outlier kernel)")
+        eps, tw, dtab = learn_departures(L_chunks, chunk_bin, H, group_modtype, grid, log=_log, contam_eps=contam_eps)
+        _write(dtab.join(describe_groups(motifs, group_of).select(pl.col("group").cast(pl.Int32), "motifs"), on="group", how="left"),
+               out / "departures.tsv")
+        outlier, tau_spread = (eps, tw), float("inf")
     p_cal = 0.1 if p_unknown is None else p_unknown  # prior used before p_unknown is estimated (refinement)
     params = {"chunk_size": chunk_size, "grid_size": grid_size, "p_unknown": p_unknown, "min_cov": min_cov,
               "contam_eps": contam_eps}
