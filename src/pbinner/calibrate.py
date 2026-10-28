@@ -32,46 +32,8 @@ DEFAULT_LENGTHS = (2_000, 5_000, 10_000, 20_000, 50_000, 100_000)
 DEFAULT_TAUS = (3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 1e4, float("inf"))
 DEFAULT_SIGMAS = (0.0, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5)  # logit-normal kernel
 DEFAULT_ETAS = (0.02, 0.05)  # test: cap the per-group swap of a relative (eta 0.35 collapsed inclusion)
-DEFAULT_LAMS = (1.0,)  # community-only unknown: with finite tau the relatives model absorbed every unbinned ZymoFecal contig (p_unknown 1.0)  # 1.0 = community-only unknown (the earlier model)
+DEFAULT_LAMS = (0.1, 0.5, 0.9, 1.0)  # 1.0 = community-only unknown (the earlier model)
 DEFAULT_TEMPS = tuple(np.round(np.exp(np.linspace(np.log(0.2), np.log(20), 31)), 3))
-
-
-EPS_LEVELS = (0.002, 0.005, 0.01, 0.02, 0.05)
-
-
-def outlier_rates(stats: pl.DataFrame, n_groups: int, min_sites: int = 100, min_gap: float = 0.05,
-                  max_gap: float = 0.3, z: float = 3.0) -> tuple[np.ndarray, float, pl.DataFrame]:
-    """Per motif group, how often a contig departs from its bin's level (the outlier part of the kernel).
-
-    ZymoFecal, binned contigs >= 10x: contigs match their bin's level within sampling noise in 99.5% of
-    (contig, group) pairs; the other 0.5% deviate by 0.08-0.49 (median 0.13). The departures are rare
-    and large, not a small spread on every contig: a single Beta(tau) can't describe both (trimming the
-    top 5% of contigs per group removed nearly all the spread). Long contigs, measured in many groups,
-    collect them: 33% of Hi-C member contigs > 500 kb have at least one.
-
-    stats: one row per (bin, contig, group) with N sites and K called methylated (read fraction > 0.5).
-    Within a bin with >= 2 contigs of >= min_sites sites, the bin level p is the median contig share; a
-    contig is an outlier for the group when |f - p| > max(min_gap, z * sqrt(p(1 - p) / N)) and <= max_gap
-    (further away is a different set of MTases, i.e. a contaminant). Per group, the rate is shrunk to the
-    overall rate (one pseudo-observation at it) and snapped to EPS_LEVELS; unmeasured groups get the
-    overall rate. Returns (eps per group, overall rate, table).
-    """
-    x = stats.filter(pl.col("N") >= min_sites).with_columns((pl.col("K") / pl.col("N")).alias("f"))
-    bl = x.group_by("bin", "group").agg(pl.col("f").median().alias("p"), pl.len().alias("nc")).filter(pl.col("nc") >= 2)
-    x = x.join(bl, on=["bin", "group"]).with_columns((pl.col("f") - pl.col("p")).abs().alias("dev"))
-    x = x.filter(pl.col("dev") <= max_gap).with_columns(
-        ((pl.col("dev") > min_gap) & (pl.col("dev") > z * (pl.col("p") * (1 - pl.col("p")) / pl.col("N")).sqrt())).alias("outlier"))
-    levels = np.array(EPS_LEVELS)
-    eps0 = float(np.clip(x["outlier"].mean() if x.height else levels[1], levels[0], levels[-1]))
-    g = (x.group_by("group").agg(pl.len().alias("contigs"), pl.col("outlier").sum().alias("outliers"))
-         .with_columns(((pl.col("outliers") + 1.0) / (pl.col("contigs") + 1.0 / eps0)).alias("rate")).sort("group"))
-    eps = np.full(n_groups, levels[np.argmin(np.abs(np.log(levels) - np.log(eps0)))])
-    snapped = []
-    for grp, r in g.select("group", "rate").iter_rows():
-        e = float(levels[np.argmin(np.abs(np.log(levels) - np.log(r)))])
-        eps[grp] = e
-        snapped.append(e)
-    return eps, eps0, g.with_columns(pl.Series("eps", snapped))
 
 
 def fragments_per_bin(budget: int, n_lengths: int, n_bins: int, cap: int) -> int:
@@ -163,7 +125,7 @@ def _reliability(P: np.ndarray, truth: np.ndarray, test: str) -> list[dict]:
 def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFrame, L_frag,
               chunks_of, p_unknown, H_frag=None, taus=DEFAULT_TAUS, temps=DEFAULT_TEMPS,
               lookalike_dist=0.15, decidable_bf=3.0, etas=DEFAULT_ETAS, lams=DEFAULT_LAMS,
-              allow_sharpening=False, n_sites_frag=None, leave_out=None, fixed_tau=None, log=print, **model_kw):
+              allow_sharpening=False, n_sites_frag=None, leave_out=None, log=print, **model_kw):
     """chunks_of[i]: host chunks fragment i overlaps (to check its label); leave_out[i]: chunks removed
     from its bin's profile when scoring it (default chunks_of; the pipeline passes the whole source
     contig)."""
@@ -184,16 +146,6 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         return sc, A_own, keep
 
     tau_rows, best, warm, group_ll = [], None, {}, []
-    if fixed_tau is not None:  # variation set from the data (outlier kernel): no selection
-        taus = ()
-        model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, fixed_tau, **model_kw)
-        warm = {"init_w": model.w, "init_pi": model.raw_pi}
-        sc, A_own, keep = own_and_scores(model)
-        ll = float(sc.S[keep, fbin[keep]].sum())
-        tau_rows.append({"tau": float("nan"), "label": "outlier kernel", "loo_loglik": ll, "n_fragments": int(keep.sum())})
-        log(f"  variation: outlier kernel (no tau selection)  LOO log-lik={ll:.1f}")
-        best = (ll, fixed_tau, sc, A_own, model, keep)
-        del model
     for tau in taus:
         model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau, **warm, **model_kw)
         warm = {"init_w": model.w, "init_pi": model.raw_pi}  # not the model: at most two are held at once
@@ -207,14 +159,10 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         del model
     # per-group tau: each group's own leave-one-out term is maximised separately (groups with
     # intermediate, variable methylation need a finite tau; groups at 0 or 1 an infinite one)
-    if fixed_tau is not None:
-        tau_g = np.broadcast_to(np.asarray(fixed_tau, float), (L_chunks.shape[1],)).copy()
-        group_ll = np.zeros((1, len(tau_g))); base = 0
-    else:
-        group_ll = np.array(group_ll)  # [n_taus, M]
-        base = next((k for k, t in enumerate(taus) if grid.is_point(t)), len(taus) - 1)
-        tau_g = np.array([taus[k] for k in group_ll.argmax(0)], dtype=float)
-    if fixed_tau is None and len(np.unique(tau_g)) > 1:
+    group_ll = np.array(group_ll)  # [n_taus, M]
+    base = next((k for k, t in enumerate(taus) if grid.is_point(t)), len(taus) - 1)
+    tau_g = np.array([taus[k] for k in group_ll.argmax(0)], dtype=float)
+    if len(np.unique(tau_g)) > 1:
         model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau_g, **warm, **model_kw)
         sc, A_own, keep_g = own_and_scores(model)
         ll = float(sc.S[keep_g, fbin[keep_g]].sum())

@@ -86,27 +86,12 @@ def marginalize_unit(L: np.ndarray, T, batch: int = 2048) -> np.ndarray:
     return out
 
 
-def transition_spec(grid: Grid, tau, delta: float = 1.0, outlier=None, n_groups: int | None = None):
-    """One transition matrix for a scalar tau, or (groups, matrix) pairs for a per-group tau array.
-
-    outlier = (eps per group, tau_wide): with probability eps a unit departs from its host's level and
-    is drawn from Beta(tau_wide) around it instead (T = (1 - eps) T_tau + eps T_wide). A departure in one
-    group then costs about log(1 / eps) instead of growing with the unit's number of sites.
-    """
-    if outlier is None:
-        if np.ndim(tau) == 0:
-            return grid.transition(tau, delta)
-        tau = np.asarray(tau, dtype=float)
-        return [(np.flatnonzero(tau == t), grid.transition(float(t), delta)) for t in np.unique(tau)]
-    eps, tau_wide = outlier
-    eps = np.asarray(eps, float)
-    tau = np.broadcast_to(np.asarray(tau, float), eps.shape)
-    wide = grid.transition(float(tau_wide), delta)
-    out = []
-    for t, e in sorted(set(zip(tau.tolist(), eps.tolist()))):
-        idx = np.flatnonzero((tau == t) & (eps == e))
-        out.append((idx, (1 - e) * grid.transition(float(t), delta) + e * wide))
-    return out
+def transition_spec(grid: Grid, tau, delta: float = 1.0):
+    """One transition matrix for a scalar tau, or (groups, matrix) pairs for a per-group tau array."""
+    if np.ndim(tau) == 0:
+        return grid.transition(tau, delta)
+    tau = np.asarray(tau, dtype=float)
+    return [(np.flatnonzero(tau == t), grid.transition(float(t), delta)) for t in np.unique(tau)]
 
 
 def bin_loglik(Lp_chunks: np.ndarray, chunk_bin: np.ndarray, n_bins: int, w: np.ndarray | None = None) -> np.ndarray:
@@ -278,9 +263,9 @@ class FittedModel:
     """Host profiles and population prior for a given tau; scores arbitrary units."""
 
     def __init__(self, L_chunks, chunk_bin, n_bins, group_modtype, grid: Grid, tau, prior_lam=5.0,
-                 prior_floor=0.02, contam_eps=0.05, robust_iters=4, init_w=None, init_pi=None, outlier=None):
+                 prior_floor=0.02, contam_eps=0.05, robust_iters=4, init_w=None, init_pi=None):
         self.grid, self.tau, self.n_bins = grid, tau, n_bins
-        self.T = transition_spec(grid, tau, outlier=outlier)
+        self.T = transition_spec(grid, tau)
         self.Lp_chunks = marginalize_unit(L_chunks, self.T)
         self.chunk_bin = chunk_bin
         self._s_out = None
