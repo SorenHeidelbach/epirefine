@@ -189,7 +189,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # windows of long unbinned contigs (regional model for inclusion), scored like host chunks but kept
     # out of the bin profiles. Off by default: no benchmark gains an inclusion from it, and on ZymoFecal
     # (0.7.0) it included 58 long contigs the contig-level model gives P(unknown) 0.54-1 (42 above
-    # 0.99), 26 of them into single-contig circular bins, with Hi-C's best bin agreeing for 7 of 43 (dev log D40)
+    # 0.99), with Hi-C's best bin agreeing for 7 of 43 (contig-level inclusions: 135 of 267; dev log D40)
     win_contigs = ([c for c in targets if c not in cb and lengths[c] >= 2 * chunk_size and lengths[c] >= min_contig_length
                     and cov_of.get(cid[c], 0.0) >= min_contig_coverage] if regional_model and regional_inclusion else [])
     for c in win_contigs:
