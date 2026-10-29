@@ -3,6 +3,22 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.8.0 (2026-10-29): regional inclusion off by default
+
+Changes default results and adds a CLI flag.
+- Long unbinned contigs are no longer included from their 50 kb windows (the regional model) when
+  the whole contig doesn't support the bin. `--regional-inclusion` turns it back on (experimental).
+  Regional flagging of long binned contigs ("mixed") is unchanged.
+- Why (dev log D40): no benchmark gains an inclusion from it. On ZymoFecal it added 69 inclusions
+  (24.5 Mb); for 58 the whole-contig model's best explanation is "unknown" (P 0.54-1, 42 above 0.99).
+
+**Benchmark effect:** none; every scenario is identical to 0.7.2 (mono-train, ZymoOral 5-150 kb and
+2-30 kb, simulated look-alikes, chimeras).
+**ZymoFecal:**
+- inclusions 554 -> 485;
+- strict Hi-C (>= 10x): flags 6/1/2 (TP/FP/FN) unchanged; inclusions 24 right / 2 wrong -> 23 / 1;
+- peak memory 44.1 -> 40.9 GB.
+
 ## 0.7.2 (2026-10-28): monoculture benchmark sets (benchmarks/ and workflow/ only)
 
 No change to the pbinner package.

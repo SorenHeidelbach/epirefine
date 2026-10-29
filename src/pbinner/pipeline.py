@@ -78,7 +78,7 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
-        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
+        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
     out = Path(out)
@@ -187,9 +187,11 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         chunk_offset[cid[c]] = off; off += n_chunks_of[c]
     n_host_chunks = off
     # windows of long unbinned contigs (regional model for inclusion), scored like host chunks but kept
-    # out of the bin profiles
+    # out of the bin profiles. Off by default: no benchmark gains an inclusion from it, and on ZymoFecal
+    # (0.7.0) it included 58 long contigs the contig-level model gives P(unknown) 0.54-1 (42 above
+    # 0.99), with Hi-C's best bin agreeing for 7 of 43 (contig-level inclusions: 135 of 267; dev log D40)
     win_contigs = ([c for c in targets if c not in cb and lengths[c] >= 2 * chunk_size and lengths[c] >= min_contig_length
-                    and cov_of.get(cid[c], 0.0) >= min_contig_coverage] if regional_model else [])
+                    and cov_of.get(cid[c], 0.0) >= min_contig_coverage] if regional_model and regional_inclusion else [])
     for c in win_contigs:
         n_chunks_of[c] = -(-lengths[c] // chunk_size)
         chunk_offset[cid[c]] = off; off += n_chunks_of[c]
