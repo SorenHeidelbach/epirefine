@@ -62,6 +62,8 @@ pbinner run --assembly asm.fasta --pileup pileup.bed --contig-bin contig_bin.tsv
 **Model options:** `--variation beta|logit` (how a contig's methylation varies around its bin's;
 `--tau` overrides the calibrated value), `--temperature`, `--allow-sharpening` (default: the
 temperature is clipped at ≥ 1), `--p-unknown`, `--contam-eps`, `--chunk-size`.
+`--regional-inclusion` (experimental, off by default) also includes long unbinned contigs whose
+50 kb windows match a bin when the whole contig doesn't.
 
 **Running:**
 - `--workers N` sets the processes for the pileup and table passes (default: CPUs, at most 16).
