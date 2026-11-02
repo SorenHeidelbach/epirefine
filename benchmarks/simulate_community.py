@@ -22,8 +22,8 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from pbinner import io as pio
-from pbinner.motifs import MotifMatcher
+from epirefine import io as pio
+from epirefine.motifs import MotifMatcher
 
 CALLER = {"a": (0.03, 0.85, 12.0), "m": (0.03, 0.80, 12.0), "21839": (0.06, 0.70, 10.0)}
 LETTERS = np.frombuffer(b"ACGT", np.uint8)

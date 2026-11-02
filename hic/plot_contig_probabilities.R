@@ -1,12 +1,12 @@
 #!/usr/bin/env Rscript
-# One point per contig: the probability methylation (pbinner) and Hi-C each give the same statement.
+# One point per contig: the probability methylation (epirefine) and Hi-C each give the same statement.
 #
 # Rscript plot_contig_probabilities.R --dir hic_probability/ [--sample ZymoFecal]
 #
 # Reads per_contig.tsv (hic/probability_vs_hic.py) and writes contig_probabilities.pdf / .png:
-#   binned contigs (kept / flagged):  "belongs to its bin"   pbinner 1 - P(contaminant)  vs  Hi-C P(own bin)
-#   included contigs:                 "belongs to bin X"     pbinner P(X)                vs  Hi-C P(X)
-#   unbinned contigs:                 "belongs to some bin"  pbinner 1 - P(unknown)      vs  Hi-C 1 - P(no bin)
+#   binned contigs (kept / flagged):  "belongs to its bin"   epirefine 1 - P(contaminant)  vs  Hi-C P(own bin)
+#   included contigs:                 "belongs to bin X"     epirefine P(X)                vs  Hi-C P(X)
+#   unbinned contigs:                 "belongs to some bin"  epirefine 1 - P(unknown)      vs  Hi-C 1 - P(no bin)
 # Points are coloured by the contig's Hi-C contacts (more contacts = firmer Hi-C probability); the
 # counts in each corner use 0.5 as the line between "yes" and "no".
 
@@ -57,7 +57,7 @@ p <- ggplot(d, aes(p_meth, p_hic)) +
   scale_y_continuous(labels = percent, breaks = c(0, 0.25, 0.5, 0.75, 1)) +
   coord_cartesian(xlim = c(-0.02, 1.02), ylim = c(-0.12, 1.2), clip = "off") +
   facet_wrap(~panel, nrow = 1) +
-  labs(x = "Methylation (pbinner) probability", y = "Hi-C contact-map probability",
+  labs(x = "Methylation (epirefine) probability", y = "Hi-C contact-map probability",
        title = paste0(if (nzchar(opt$sample)) paste0(opt$sample, ": ") else "",
                       "methylation vs Hi-C probability, one point per contig"),
        subtitle = paste("Each panel compares the probability both methods give the same statement about the contig.",

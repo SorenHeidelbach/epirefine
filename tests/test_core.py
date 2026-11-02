@@ -2,11 +2,11 @@ import numpy as np
 import polars as pl
 import pytest
 
-from pbinner.detection import DetectionParams, fit_mixture
-from pbinner.grid import Grid
-from pbinner.io import _parse_pileup_block, read_pileup_at_sites
-from pbinner.model import marginalize_unit, posterior, score_units
-from pbinner.motifs import Motif, assign_sites, build_records, find_records, group_motifs, revcomp
+from epirefine.detection import DetectionParams, fit_mixture
+from epirefine.grid import Grid
+from epirefine.io import _parse_pileup_block, read_pileup_at_sites
+from epirefine.model import marginalize_unit, posterior, score_units
+from epirefine.motifs import Motif, assign_sites, build_records, find_records, group_motifs, revcomp
 
 
 def test_revcomp_iupac():

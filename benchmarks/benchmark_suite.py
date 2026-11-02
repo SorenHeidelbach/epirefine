@@ -1,4 +1,4 @@
-"""Run pbinner on the benchmark suite and record accuracy, speed and memory per version.
+"""Run epirefine on the benchmark suite and record accuracy, speed and memory per version.
 
     python benchmarks/benchmark_suite.py                   # default scenarios (~15 min)
     python benchmarks/benchmark_suite.py --all             # also optional ones (human_gut, ~1 h)
@@ -43,7 +43,7 @@ def version() -> str:
 def run_scenario(sc: dict, out_root: Path, workers: int = 16) -> dict:
     out = out_root / sc["name"]
     out.mkdir(parents=True, exist_ok=True)
-    cmd = ["/usr/bin/time", "-v", str(REPO / ".venv/bin/pbinner"), "run", "--assembly", sc["assembly"], "--pileup", sc["pileup"],
+    cmd = ["/usr/bin/time", "-v", str(REPO / ".venv/bin/epirefine"), "run", "--assembly", sc["assembly"], "--pileup", sc["pileup"],
            "--contig-bin", sc["contig_bin"], "--motifs", sc["motifs"], "--out", str(out), "--workers", str(workers)]
     if sc.get("cache"):
         cmd += ["--cache-dir", sc["cache"]]
@@ -59,7 +59,7 @@ def run_scenario(sc: dict, out_root: Path, workers: int = 16) -> dict:
     if m:
         row.update(p_unknown=float(m.group(1)), contamination_rate=float(m.group(2)))
     if p.returncode == 0 and sc.get("truth"):
-        r = evaluate(sc["truth"], out / "bin_contamination.tsv", out / "new_contig_bin.tsv", "pbinner",
+        r = evaluate(sc["truth"], out / "bin_contamination.tsv", out / "new_contig_bin.tsv", "epirefine",
                      out / "contig_decisions.tsv")
         row.update({k: r[k] for k in r if k != "tool"})
     return row

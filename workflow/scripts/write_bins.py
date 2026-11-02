@@ -1,6 +1,6 @@
 """Write one FASTA per bin from an assembly and a contig -> bin table.
 
-The table may have a header (contig, bin: Nanomotif / pbinner new_contig_bin.tsv) or not (binner
+The table may have a header (contig, bin: Nanomotif / epirefine new_contig_bin.tsv) or not (binner
 output). With --lengths-only, write a table of contig lengths instead.
 """
 import argparse

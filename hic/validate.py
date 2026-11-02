@@ -10,7 +10,7 @@ Only contigs with a confident Hi-C call are scored:
                    not placed = missed inclusion
 
     python hic/validate.py --hic-calls hic/hic_calls.tsv --contig-bin contig_bin.tsv \
-        --method pbinner pbinner/new_contig_bin.tsv pbinner/bin_contamination.tsv \
+        --method epirefine epirefine/new_contig_bin.tsv epirefine/bin_contamination.tsv \
         --method nanomotif nanomotif/new_contig_bin.tsv nanomotif/bin_contamination.tsv --out hic_validation/
 Writes summary.tsv (one row per method) and contigs.tsv (one row per scored contig and method).
 """

@@ -4,7 +4,7 @@ Works on any tool that writes Nanomotif-style outputs: a contamination table (co
 a refined contig -> bin table (`new_contig_bin.tsv`, header contig, bin).
 
     python benchmarks/evaluate_refinement.py --truth scen1/truth_actions.tsv \
-        --contamination out/bin_contamination.tsv --new-bins out/new_contig_bin.tsv --name pbinner
+        --contamination out/bin_contamination.tsv --new-bins out/new_contig_bin.tsv --name epirefine
 
 Prints one row of metrics and appends it to --table if given.
 Contamination: precision / recall of flagged contigs (contaminant or orphan_contaminant = positive).
@@ -35,7 +35,7 @@ def bin_quality(assign: pl.DataFrame, truth: pl.DataFrame) -> tuple[float, float
 
 
 def evaluate(truth_path, contamination_path, new_bins_path, name="", decisions_path=None) -> dict:
-    """decisions_path: pbinner's contig_decisions.tsv. Contigs it did not judge are left out of the
+    """decisions_path: epirefine's contig_decisions.tsv. Contigs it did not judge are left out of the
     contamination and inclusion counts and counted separately: coverage too low or contig too short
     (status low_coverage, too_short), or enough coverage and length but no usable methylation (status
     no_methylation_evidence: kept or left unbinned because nothing could be seen). Bin quality uses all
@@ -96,7 +96,7 @@ def main():
     ap.add_argument("--contamination")
     ap.add_argument("--new-bins", required=True)
     ap.add_argument("--name", default="")
-    ap.add_argument("--decisions", help="pbinner contig_decisions.tsv: leave low_coverage contigs out")
+    ap.add_argument("--decisions", help="epirefine contig_decisions.tsv: leave low_coverage contigs out")
     ap.add_argument("--table", help="append the row to this TSV")
     a = ap.parse_args()
     row = evaluate(a.truth, a.contamination, a.new_bins, a.name, a.decisions)

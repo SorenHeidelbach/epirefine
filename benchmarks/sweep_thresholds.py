@@ -1,9 +1,9 @@
-"""Re-derive pbinner's refinement at other decision thresholds and score each against the truth.
+"""Re-derive epirefine's refinement at other decision thresholds and score each against the truth.
 
 The thresholds only turn posteriors into decisions, so no rerun is needed: contig_decisions.tsv holds
 P(contaminant) and the best alternative bin with its probability for every contig.
 
-    python benchmarks/sweep_thresholds.py --run scen1/pbinner --truth scen1/truth_actions.tsv \
+    python benchmarks/sweep_thresholds.py --run scen1/epirefine --truth scen1/truth_actions.tsv \
         --include 0.5 0.8 0.9 0.95 --contamination 0.5 --out sweep.tsv
 """
 from __future__ import annotations
@@ -47,7 +47,7 @@ def main():
                     c, nb = decisions(dec, tc, ti)
                     cp, np_ = Path(tmp) / "c.tsv", Path(tmp) / "n.tsv"
                     c.write_csv(cp, separator="\t"); nb.write_csv(np_, separator="\t")
-                    r = evaluate(truth, cp, np_, "pbinner")
+                    r = evaluate(truth, cp, np_, "epirefine")
                     rows.append({"run": a.label[k] if a.label else run, "contamination_threshold": tc,
                                  "include_threshold": ti, **r})
     df = pl.DataFrame(rows)

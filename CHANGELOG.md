@@ -3,6 +3,17 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.9.0 (2026-11-02): renamed to EpiRefine
+
+Breaking (name only; no model or result change).
+- The tool is now **EpiRefine** (*epi*genetics + *refine*; formerly pbinner): package `epirefine`
+  (`src/epirefine/`), command `epirefine` (`epirefine run`, `epirefine --version`). The `pbinner` command is gone.
+- Output: the `method` column of the Nanomotif-compatible `bin_contamination.tsv` and
+  `include_contigs.tsv` now says `epirefine`. Columns and every other value are unchanged.
+- Workflow: the method is called `epirefine` (output folder `<sample>/epirefine/`, config keys `epirefine`,
+  `epirefine_extra`); `benchmarks/compare_nanomotif.py --epirefine`. Data and cache folders on disk keep
+  their old names.
+
 ## 0.8.0 (2026-10-29): regional inclusion off by default
 
 Changes default results and adds a CLI flag.

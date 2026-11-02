@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from pbinner import io as pio
+from epirefine import io as pio
 
 
 def cut_points(length: int, lo: int, hi: int, rng) -> list[int]:

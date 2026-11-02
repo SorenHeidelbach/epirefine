@@ -1,12 +1,12 @@
 # Samples: assembly, modkit pileup, the binner's contig -> bin table (no header), Nanomotif
-# bin-motifs.tsv. Optional: cache_dir (pbinner's site cache, reused across runs), methods (bin sets
-# to compare; default original, nanomotif, pbinner), hic_r1/hic_r2 (Hi-C FASTQs: adds Hi-C
+# bin-motifs.tsv. Optional: cache_dir (epirefine's site cache, reused across runs), methods (bin sets
+# to compare; default original, nanomotif, epirefine), hic_r1/hic_r2 (Hi-C FASTQs: adds Hi-C
 # validation), hic_index (prebuilt chromap index), hic_max_pairs (read pairs mapped; default 100M),
 # hic_mapq (minimum MAPQ of both reads of a Hi-C pair; default 20).
 outdir: /home/ubuntu/data/workflow_results
 threads: 16
 checkm2_db_dir: /home/ubuntu/tools/databases/checkm2
-# pbinner: /home/ubuntu/plasmid_binner/.venv/bin/pbinner   # default: the repository's .venv
+# epirefine: /home/ubuntu/plasmid_binner/.venv/bin/epirefine   # default: the repository's .venv
 min_bin_length: 0
 
 samples:
@@ -31,7 +31,7 @@ samples:
     motifs: /home/ubuntu/data/human_gut/nanomotif_1.1.3/bin-motifs.tsv
     cache_dir: /home/ubuntu/data/human_gut/pbinner_v3/cache
     # Nanomotif reads the 235 GB pileup as one stream (~3-5 h on this disk): left out here
-    methods: [original, pbinner]
+    methods: [original, epirefine]
   ZymoFecal:
     assembly: /home/ubuntu/data/ZymoFecal/m2_assembly.fasta
     pileup: /home/ubuntu/data/ZymoFecal/modkit.pileup.mmlong2.bed
@@ -41,8 +41,8 @@ samples:
     hic_r1: /home/ubuntu/data/ZymoFecal/HiC/HiC_ZymoFecal_R1.fastq
     hic_r2: /home/ubuntu/data/ZymoFecal/HiC/HiC_ZymoFecal_R2.fastq
     hic_index: /home/ubuntu/data/ZymoFecal/hic_map/m2_assembly.chromap.index
-    # Nanomotif left out for now (330 GB pileup, single stream): pbinner against Hi-C first.
+    # Nanomotif left out for now (330 GB pileup, single stream): epirefine against Hi-C first.
     # hic = Hi-C-only refinement (hic/refine.py), scored with CheckM2 as a reference;
     # hic_nonredundant = the same without changes whose contig is >= 30% contained in the target bin
-    # (hic/nonredundant.py, the same k-mer containment test as pbinner D21)
-    methods: [original, pbinner, hic, hic_nonredundant]
+    # (hic/nonredundant.py, the same k-mer containment test as epirefine D21)
+    methods: [original, epirefine, hic, hic_nonredundant]

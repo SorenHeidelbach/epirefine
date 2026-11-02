@@ -1,6 +1,6 @@
 """Scenarios with long chimeric contigs, long members and long contaminants, built from a monoculture community.
 
-The other benchmarks plant whole-contig errors only, so they can't test whether pbinner tells a contig
+The other benchmarks plant whole-contig errors only, so they can't test whether epirefine tells a contig
 that is partly foreign along its length (an island, a chimeric join) from one that is foreign as a
 whole. On ZymoFecal every flag that Hi-C contradicted on a long contig was of the first kind. This takes
 a community from benchmarks/monoculture_sets.py and joins its pieces into long contigs of known make-up,
@@ -161,7 +161,7 @@ def main():
     m = out / "remap.tsv"
     pl.DataFrame(remap, schema=["piece", "contig", "offset"], orient="row").write_csv(m, separator="\t", include_header=False)
     # bedMethyl: chrom, start, end, ..., thickStart (7), thickEnd (8); shift positions of joined pieces
-    # pbinner needs each contig's rows contiguous: rows of joined pieces go to a side file, which is
+    # epirefine needs each contig's rows contiguous: rows of joined pieces go to a side file, which is
     # sorted by new contig and position and appended
     side = out / "joined_rows.bed"
     awk = ('BEGIN{FS=OFS="\\t"} NR==FNR{n[$1]=$2; o[$1]=$3; next} '

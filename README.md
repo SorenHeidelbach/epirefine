@@ -1,4 +1,6 @@
-# pbinner
+# EpiRefine
+
+*Epi*genetics + *refine*: it refines metagenome bins using the methylation every genome carries. Formerly `pbinner`.
 
 Bin refinement from nanopore methylation, built on Nanomotif output:
 
@@ -20,10 +22,10 @@ cut from binned contigs.
 
 | Folder | Content |
 |---|---|
-| `src/pbinner/` | The package: methylation-based contamination detection and contig inclusion, nothing else |
+| `src/epirefine/` | The package: methylation-based contamination detection and contig inclusion, nothing else |
 | `tests/` | Unit tests (`.venv/bin/python -m pytest -q tests`) |
-| `workflow/` | Snakemake workflow: pbinner, Nanomotif, CheckM2 and, for samples with Hi-C reads, the Hi-C validation; R comparison script |
-| `hic/` | Hi-C validation, separate from pbinner: contig contacts, Hi-C bin calls, scoring of refinement decisions ([hic/README.md](hic/README.md)) |
+| `workflow/` | Snakemake workflow: EpiRefine, Nanomotif, CheckM2 and, for samples with Hi-C reads, the Hi-C validation; R comparison script |
+| `hic/` | Hi-C validation, separate from EpiRefine: contig contacts, Hi-C bin calls, scoring of refinement decisions ([hic/README.md](hic/README.md)) |
 | `benchmarks/` | Benchmark suite (`benchmark_suite.py`, `suite.json`) and the scripts that build its scenarios |
 | `dev/` | Development tooling: git hooks, speed prototypes |
 | `docs/` | Method and performance notes |
@@ -36,7 +38,7 @@ uv venv && uv pip install -e ".[dev]"
 .venv/bin/pytest -q
 ```
 
-## Running pbinner
+## Running EpiRefine
 
 | Flag | File | Notes |
 |---|---|---|
@@ -46,8 +48,8 @@ uv venv && uv pip install -e ".[dev]"
 | `--motifs` | Nanomotif `bin-motifs.tsv` | Only the **union** of motifs is used (+ `motif_complement`). Which bin carries which motif is re-estimated from the data. |
 
 ```bash
-pbinner run --assembly asm.fasta --pileup pileup.bed --contig-bin contig_bin.tsv \
-    --motifs nanomotif/bin-motifs.tsv --out pbinner_out --workers 16
+epirefine run --assembly asm.fasta --pileup pileup.bed --contig-bin contig_bin.tsv \
+    --motifs nanomotif/bin-motifs.tsv --out epirefine_out --workers 16
 ```
 
 **Decision thresholds:**
@@ -105,7 +107,7 @@ in parallel byte ranges; gzipped ones by a single worker.
 ## Workflow: refinement checked with CheckM2 and Hi-C
 
 `workflow/Snakefile` runs, per sample:
-1. Nanomotif (`detect_contamination` + `include_contigs`) and pbinner, on the same bins, motifs and
+1. Nanomotif (`detect_contamination` + `include_contigs`) and EpiRefine, on the same bins, motifs and
    pileup;
 2. writes the original and refined bin sets as FASTA;
 3. scores each set with CheckM2;
@@ -122,11 +124,11 @@ snakemake -s workflow/Snakefile --configfile workflow/config.yaml --use-conda --
 ```
 
 - Samples go in `workflow/config.yaml`: assembly, modkit pileup, the binner's contig-to-bin table and
-  Nanomotif's `bin-motifs.tsv`. Optional per sample: `cache_dir` (pbinner site cache), `methods`
+  Nanomotif's `bin-motifs.tsv`. Optional per sample: `cache_dir` (EpiRefine site cache), `methods`
   (bin sets to compare), `hic_r1`/`hic_r2`, `hic_index`, `hic_max_pairs`.
 - The first run creates the conda environments (Nanomotif 1.1.2, CheckM2 1.1.0, R, chromap) and
   downloads the CheckM2 database (3 GB) to `checkm2_db_dir`.
-- pbinner itself runs from the repository's `.venv`.
+- EpiRefine itself runs from the repository's `.venv`.
 
 ## Benchmarks
 

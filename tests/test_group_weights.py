@@ -1,7 +1,7 @@
 import numpy as np
 import polars as pl
 
-from pbinner.motifs import Motif, can_share_site, redundancy_weights
+from epirefine.motifs import Motif, can_share_site, redundancy_weights
 
 
 def test_can_share_site():

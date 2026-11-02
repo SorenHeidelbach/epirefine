@@ -214,7 +214,7 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
                   redundancy: np.ndarray | None = None, evidence: np.ndarray | None = None, min_evidence: float = 3.0,
                   coverage: np.ndarray | None = None, low_coverage: np.ndarray | None = None,
                   too_short: np.ndarray | None = None, regional: dict | None = None):
-    """Nanomotif-compatible files + pbinner's per-contig decision table."""
+    """Nanomotif-compatible files + epirefine's per-contig decision table."""
     H = len(bins)
     labels = bins + ["unknown"]
     given_lbl = np.array([bins[g] if g >= 0 else "" for g in given], dtype=object)
@@ -227,7 +227,7 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
 
     ci = np.flatnonzero(ref.contaminant)
     pl.DataFrame({
-        "contig": [contigs[i] for i in ci], "bin": [given_lbl[i] for i in ci], "method": ["pbinner"] * len(ci),
+        "contig": [contigs[i] for i in ci], "bin": [given_lbl[i] for i in ci], "method": ["epirefine"] * len(ci),
         "cluster": [labels[ref.best_alt[i]] for i in ci], "bin_cluster": [given_lbl[i] for i in ci],
         "bin_length": [bin_len[given_lbl[i]] for i in ci], "n_contigs_bin": [bin_n[given_lbl[i]] for i in ci],
         "fraction_contigs": [1 / bin_n[given_lbl[i]] for i in ci],
@@ -245,7 +245,7 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
     for i in np.flatnonzero(ref.candidate & (ref.best_alt < H) & (ref.p_best_alt >= CONFIDENCE[-1][0])):
         p = float(ref.p_best_alt[i])
         rows.append({"contig": contigs[i], "bin": given_lbl[i] or "unbinned", "assigned_bin": labels[ref.best_alt[i]],
-                     "method": "pbinner", "prob": p, "mean_prob": p, "confidence": confidence(p)})
+                     "method": "epirefine", "prob": p, "mean_prob": p, "confidence": confidence(p)})
     pl.DataFrame(rows, schema={"contig": pl.Utf8, "bin": pl.Utf8, "assigned_bin": pl.Utf8, "method": pl.Utf8,
                                "prob": pl.Float64, "mean_prob": pl.Float64, "confidence": pl.Utf8}).sort(
         "confidence", "contig").write_csv(out / "include_contigs.tsv", separator="\t", float_precision=4)

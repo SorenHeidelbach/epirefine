@@ -1,8 +1,8 @@
 # Hi-C validation
 
 Hi-C (proximity ligation) links DNA molecules that were in the same cell, so it measures what
-pbinner infers from methylation, through an independent signal. This folder turns raw Hi-C reads
-into contig contacts and scores bin refinement against them. It is separate from pbinner and runs
+EpiRefine infers from methylation, through an independent signal. This folder turns raw Hi-C reads
+into contig contacts and scores bin refinement against them. It is separate from EpiRefine and runs
 from the workflow (`workflow/Snakefile`, rules `hic_*`) for samples with `hic_r1` / `hic_r2` in the
 config.
 
