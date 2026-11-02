@@ -3,6 +3,22 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.10.0 (2026-11-02): first public release (PyPI, Bioconda)
+
+No change to results.
+- Packaging: MIT licence (`LICENSE`), author and project metadata, classifiers for Python 3.10-3.15, README
+  usable on PyPI (absolute links; `pip install epirefine`). The source distribution carries the package, tests,
+  docs and changelog.
+- `.github/workflows/release.yml`: on a version tag, checks the tag against the package version, builds and checks
+  the sdist and wheel, tests the installed wheel, publishes to TestPyPI and PyPI with trusted publishing, and
+  creates a GitHub release.
+- `tests/test_evaluate.py` skips when the repository's `benchmarks/` is not there (as in the sdist).
+- `dev/hooks/install.sh` sets `core.hooksPath` instead of a symlink in `.git/hooks`, which failed in worktrees.
+- README: a known limitation was out of date (sites shared by motif groups count in the most specific group; they
+  are not dropped).
+
+**Benchmark effect:** none (no package code changed).
+
 ## 0.9.2 (2026-11-02): tests on GitHub for every supported Python
 
 No change to results.

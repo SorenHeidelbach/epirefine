@@ -15,10 +15,10 @@ contigs of genomes that have no bin stay out of bins. Outputs include Nanomotif-
 `decontaminated_contig_bin.tsv`). Calibration is estimated inside each sample from pseudo-contigs
 cut from binned contigs.
 
-- Method: [docs/method.md](docs/method.md).
-- Performance work: [docs/scalability.md](docs/scalability.md).
-- Changes per version: [CHANGELOG.md](CHANGELOG.md).
-- Development rules: [CLAUDE.md](CLAUDE.md).
+- Method: [docs/method.md](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/method.md).
+- Performance work: [docs/scalability.md](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/scalability.md).
+- Changes per version: [CHANGELOG.md](https://github.com/SorenHeidelbach/epirefine/blob/main/CHANGELOG.md).
+- Development rules: [CLAUDE.md](https://github.com/SorenHeidelbach/epirefine/blob/main/CLAUDE.md).
 
 ## Repository layout
 
@@ -26,14 +26,21 @@ cut from binned contigs.
 |---|---|
 | `src/epirefine/` | The package: methylation-based contamination detection and contig inclusion, nothing else |
 | `tests/` | Unit tests (`.venv/bin/python -m pytest -q tests`) |
-| `benchmarks/` | Monoculture benchmark: suite runner, the scripts that build the sets, the evaluator; results of every version in [`benchmarks/results.tsv`](benchmarks/results.tsv) |
+| `benchmarks/` | Monoculture benchmark: suite runner, the scripts that build the sets, the evaluator; results of every version in [`benchmarks/results.tsv`](https://github.com/SorenHeidelbach/epirefine/blob/main/benchmarks/results.tsv) |
 | `dev/` | Development tooling: git hooks, speed prototypes |
 | `docs/` | Method and performance notes |
 
 ## Install
 
 ```bash
-git clone git@github.com:SorenHeidelbach/epirefine.git && cd epirefine
+pip install epirefine                 # from PyPI
+conda install -c bioconda epirefine   # from Bioconda (once the recipe is accepted)
+```
+
+From source, for development:
+
+```bash
+git clone https://github.com/SorenHeidelbach/epirefine.git && cd epirefine
 uv venv && uv pip install -e ".[dev]"
 .venv/bin/pytest -q
 ```
@@ -119,7 +126,7 @@ tool (`epirefine_workflow`; moved out in 0.9.1).
 communities built from isolates sequenced alone, so the origin of every contig is known, with planted errors
 (contaminants, removed members, genomes without a bin). By default it runs the six training communities
 (about 5 minutes); `--all` adds the held-out test and validation communities, for final evaluation only. Every
-run appends one row per benchmark group and version to [`benchmarks/results.tsv`](benchmarks/results.tsv):
+run appends one row per benchmark group and version to [`benchmarks/results.tsv`](https://github.com/SorenHeidelbach/epirefine/blob/main/benchmarks/results.tsv):
 contaminants found, flag precision, contigs put back, contigs of bin-less genomes placed, bin completeness and
 contamination after refinement, wall time and peak memory. `benchmarks/monoculture_sets.py` rebuilds the sets.
 
@@ -128,7 +135,8 @@ contamination after refinement, wall time and peak memory. `benchmarks/monocultu
 - **One bin per contig.** A contig assembled across two genomes is not split.
 - **Robust profiles assume a contaminant looks like a "random community genome".** A bin that is a
   50/50 merge of two genomes is not resolved.
-- **Motif sites shared by two motif groups are dropped** (about 20% of positions on human_gut).
+- **Motif groups are treated as independent.** A site matched by several groups counts in the most specific
+  one, so one methyltransferase can show up in several partly methylated groups and count more than once.
 - **No coverage, co-abundance or taxonomy evidence**: methylation only.
 - **Dropped constant:** the binomial coefficient is omitted from likelihoods, so reported
   log-likelihoods are relative. Bayes factors and posteriors are unaffected.
