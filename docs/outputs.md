@@ -1,0 +1,107 @@
+# Outputs
+
+Everything EpiRefine writes into `--out`. For most uses you need only the first two files.
+
+| File | Use it for |
+|---|---|
+| [`new_contig_bin.tsv`](#new_contig_bintsv) | **The refined binning.** |
+| [`contig_decisions.tsv`](#contig_decisionstsv) | **Every contig's decision, with probabilities.** |
+| [`decontaminated_contig_bin.tsv`](#nanomotif-compatible-files) | The bins with contaminants removed, nothing added. |
+| [`bin_contamination.tsv`, `include_contigs.tsv`](#nanomotif-compatible-files) | Nanomotif-format flags and inclusion candidates. |
+| [`bin_evidence.tsv`, `host_profiles.tsv`, `motif_fit.tsv`](#bins-and-motifs) | What each bin's methylation looks like. |
+| [`motif_groups.tsv`, `motif_noise.tsv`, `group_weights.tsv`, `detection_model.tsv`](#bins-and-motifs) | How the motifs were grouped, filtered and modelled. |
+| [`host_chunk_outliers.tsv`, `calibration/`, `params.json`](#diagnostics) | Diagnostics and fitted parameters. |
+| `cache/` | The site cache, reused by reruns (see `--cache-dir`). |
+
+All tables are tab-separated with a header. Empty fields are written as `""`.
+
+## `new_contig_bin.tsv`
+
+The refined binning, `contig`, `bin`: every binned contig that was kept (including `mixed` ones), plus the
+`included` and `moved` contigs in their new bin. Contigs flagged as contaminants without a new bin are not listed.
+To write FASTA files per bin, see [getting started, step 5](getting-started.md#5-write-the-refined-bins).
+
+## `contig_decisions.tsv`
+
+One row per contig of the assembly.
+
+| Column | Meaning |
+|---|---|
+| `contig`, `length` | contig name and length (bp) |
+| `n_sites` | motif sites with reads on the contig |
+| `given_bin` | its bin in the input (empty = unbinned) |
+| `status` | the decision ([table below](#statuses)) |
+| `new_bin` | its bin after refinement (empty = none) |
+| `p_contaminant` | binned contigs: probability that it does not belong to its bin |
+| `methylome_difference` | binned contigs: the largest gap between the contig's 95% interval for a motif group's methylated fraction and the bin's level; a flag needs at least `--min-methylome-difference` (0.4) |
+| `redundancy_with_bin` | share of the contig's 21-mers already in the bin it would join (checked for inclusions) |
+| `best_alternative`, `p_best_alternative` | the most probable home other than its own bin, and its probability among the alternatives; `unknown` = a genome without a bin |
+| `map`, `p_map` | the most probable explanation overall (own bin, another bin or `unknown`) and its probability |
+| `p_unknown` | probability that the contig comes from a genome without a bin |
+| `credible_set_95` | the smallest set of bins (and `unknown`) that together hold 95% of the probability; one entry = a clear answer, several = methylation cannot decide between them |
+| `expected_evidence` | how much methylation evidence (nats) the contig is expected to carry to tell bins apart; below `--min-evidence` (3) it is not judged |
+| `coverage` | median reads per motif site; below `--min-contig-coverage` (5) it is not judged |
+| `p_regional_foreign`, `p_regional_mixed` | long binned contigs: probability that it is foreign along its whole length, and that it is partly its bin's and partly foreign |
+| `foreign_segments`, `segment_bins` | for `mixed` contigs: the foreign stretches (`start-end` in bp, `;`-separated) and the bin each fits best |
+
+### Statuses
+
+| Status | Meaning | In `new_contig_bin.tsv` |
+|---|---|---|
+| `kept` | binned; its methylation fits its bin | yes, in its bin |
+| `contaminant` | binned; its methylation contradicts its bin (`p_contaminant` ≥ 0.5 and a clear difference in at least one motif group) | no |
+| `moved` | a contaminant whose best alternative bin has probability ≥ 0.9 | yes, in that bin |
+| `mixed` | a long binned contig that is partly its bin's and partly another genome's; nothing is split | yes, in its bin |
+| `included` | unbinned; one bin has probability ≥ 0.9 (≥ 0.95 for a bin without detected methylation) | yes, in that bin |
+| `unbinned` | unbinned; no bin is probable enough | no |
+| `redundant` | would be included, but ≥ 30% of its 21-mers are already in that bin (an assembly duplicate) | no |
+| `sole_contig_of_bin` | the only contig of its bin, so there is no profile without it to compare it with | yes, unchanged |
+| `no_methylation_evidence` | too little informative methylation to tell bins apart | binned: yes, unchanged |
+| `low_coverage` | median coverage below 5 reads per motif site | binned: yes, unchanged |
+| `too_short` | shorter than 1 kb | binned: yes, unchanged |
+
+## Nanomotif-compatible files
+
+Same names and columns as Nanomotif's `detect_contamination` and `include_contigs`, so tools built for those
+outputs can read EpiRefine's.
+
+- **`bin_contamination.tsv`**: one row per flagged contig: `contig`, `bin`, `method` (`epirefine`), `cluster` (the
+  best alternative), `bin_cluster`, `bin_length`, `n_contigs_bin`, `fraction_contigs`, `fraction_length`,
+  `p_contaminant`, `p_cluster`.
+- **`include_contigs.tsv`**: inclusion candidates with probability ≥ 0.5: `contig`, `bin` (its current bin or
+  `unbinned`), `assigned_bin`, `method`, `prob`, `mean_prob`, `confidence` (`high_confidence` ≥ 0.95,
+  `medium_confidence` ≥ 0.8, `low_confidence` ≥ 0.5). This lists candidates, not decisions: the contigs actually
+  added are those with status `included` or `moved` in `contig_decisions.tsv`.
+- **`decontaminated_contig_bin.tsv`**: `contig`, `bin`: the input bins minus the flagged contigs.
+
+## Bins and motifs
+
+- **`bin_evidence.tsv`**: per bin: `status` (`methylated`, or `no_methylation_detected` for bins without any
+  methylated motif group, which need the stricter inclusion threshold), motif groups with sites, methylated,
+  confidently unmethylated and undetermined, and the number of sites.
+- **`host_profiles.tsv`**: each bin's fingerprint: per bin and motif group, the methylated fraction (`phi_mean`),
+  its 95% interval (`phi_lo95`, `phi_hi95`) and the probability that it is above 0.5.
+- **`motif_fit.tsv`** (with `--motif-fit`): per contig and motif group, the contig's methylated fraction with its 95%
+  interval next to its bin's. Useful to see why a contig was flagged.
+- **`motif_groups.tsv`**: which Nanomotif motifs were merged into which motif group (`group`, `mod_type`, `motifs`),
+  with the number of sites and reads.
+- **`motif_noise.tsv`**: per motif group, whether it was dropped as basecaller noise (`noisy`), with the bins it
+  was measured in and its typical level.
+- **`group_weights.tsv`**: groups that behave as one enzyme and share one weight (`cluster`, `cluster_size`,
+  `weight`).
+- **`detection_model.tsv`**: the basecaller model per motif group: the share of reads called modified at
+  unmethylated (`mu0`) and methylated (`mu1`) sites, their spread (`kappa0`, `kappa1`), and the methylated share
+  across all sites (`pi1`).
+
+## Diagnostics
+
+- **`host_chunk_outliers.tsv`**: every 50 kb piece of every binned contig (`contig`, `start`, `bin`) with its
+  probability of being foreign to its bin (`p_foreign`). Pieces likely to be foreign are down-weighted when the bin's
+  fingerprint is built.
+- **`calibration/`**: how the probabilities were calibrated on pieces cut from the bins: accuracy, calibration error
+  and credible-set coverage per piece length before and after calibration (`summary.tsv`, `reliability.tsv`), the
+  fitted temperature, overall and by length (`temperature_fit.tsv`, `temperature_by_length.tsv`), the variation
+  parameter (`tau_fit.tsv`, `tau_groups.tsv`), the pieces themselves (`fragments.tsv`), how well each bin can be told
+  apart (`assignability.tsv`) and bins whose methylation looks alike (`lookalikes.tsv`).
+- **`params.json`**: the fitted and chosen parameters: temperature, variation, share of unbinned contigs from
+  genomes without a bin (`p_unknown`), share of contaminants (`contamination_rate`) and the settings used.

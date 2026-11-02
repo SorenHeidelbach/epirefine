@@ -4,3 +4,4 @@ date	version	commit	group	scenarios	contam_recall	contam_precision	inclusion_rec
 2026-11-02 08:53	0.9.0	2db6aee	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	39.0500	0.8800	0.9.0 rename pbinner -> EpiRefine (no model change)	1
 2026-11-02 08:59	0.9.1	60dd6c6	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	37.9500	0.8783	0.9.1 repository holds only the tool (no package change)	1
 2026-11-02 09:27	0.10.0	cf5f363	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	37.1667	0.8833	0.10.0 packaging for PyPI/Bioconda (no package code change)	1
+2026-11-02 11:41	0.10.1	64d76a8	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	36.6500	0.9000	0.10.1 user documentation (no package code change)	1

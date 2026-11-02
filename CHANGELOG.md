@@ -3,6 +3,21 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.10.1 (2026-11-02): user documentation
+
+No change to results.
+- README rewritten for new users: install, a quick start with the four inputs, what the outputs mean, a
+  documentation map, and when to trust the results.
+- New user guides in `docs/`: `getting-started.md` (from reads to refined bins, with tested commands),
+  `usage.md` (every option grouped, with defaults and when to change them), `outputs.md` (every file and column),
+  `how-it-works.md` (the model in plain terms) and `faq.md` (common questions and errors), indexed in
+  `docs/README.md`.
+- Developer notes moved to `docs/development/` (`method-notes.md`, `scalability.md`); the method notes are marked as
+  notes on the predecessor model.
+- `Documentation` link in the package metadata.
+
+**Benchmark effect:** none (no package code changed).
+
 ## 0.10.0 (2026-11-02): first public release (PyPI, Bioconda)
 
 No change to results.
