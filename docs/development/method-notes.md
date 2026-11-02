@@ -1,5 +1,8 @@
-# EpiRefine: method
+# Method notes (developer)
 
+> **For users:** see [how-it-works.md](../how-it-works.md). These are developer notes on the statistical model,
+> written for EpiRefine's predecessor, a plasmid-host assigner, and kept for the derivations.
+>
 > **Status (0.5.0):** EpiRefine is now bin refinement only (contamination detection and contig
 > inclusion). This document was written for the plasmid-host version and still describes the
 > shared model (sites, caller model, grid, host profiles, population prior, "unknown", calibration)
@@ -14,8 +17,7 @@
 
 This document describes the statistical model behind EpiRefine v2, how each part is estimated, how
 uncertainty is reported, and why each design choice was made. It matches the implementation in
-`src/epirefine/` (module names are given in each section). For usage, see the [README](../README.md).
-For the development history, see [conversation.md](conversation.md).
+`src/epirefine/` (module names are given in each section). For usage, see the [README](../../README.md).
 
 ---
 

@@ -1,6 +1,6 @@
 [project]
 name = "epirefine"
-version = "0.10.0"
+version = "0.10.1"
 description = "Refine metagenome bins from nanopore methylation: flag contaminants and place unbinned contigs, with calibrated probabilities"
 readme = "README.md"
 license = "MIT"
@@ -33,6 +33,7 @@ dev = ["pytest>=8"]
 [project.urls]
 Homepage = "https://github.com/SorenHeidelbach/epirefine"
 Repository = "https://github.com/SorenHeidelbach/epirefine"
+Documentation = "https://github.com/SorenHeidelbach/epirefine/blob/main/docs/README.md"
 Issues = "https://github.com/SorenHeidelbach/epirefine/issues"
 Changelog = "https://github.com/SorenHeidelbach/epirefine/blob/main/CHANGELOG.md"
 

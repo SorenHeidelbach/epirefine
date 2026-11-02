@@ -73,7 +73,7 @@ workflow, Hi-C validation and the other benchmarks live in a separate repository
 - Python ≥ 3.10, numpy, scipy, polars. New dependencies only after asking the user.
 - Scale: the target is ~50k contigs, ~1000 motifs, hundreds of bins, pileups of 100+ GB. Nothing may
   hold all motif records or a [units × bins × groups] tensor in memory; stream and batch instead
-  (see `docs/scalability.md`).
+  (see `docs/development/scalability.md`).
 - Runs must be reproducible: a fixed `--seed` gives identical outputs. Don't depend on polars
   `group_by` order; sort or use `maintain_order=True`.
 - Keep the Nanomotif-compatible outputs (`bin_contamination.tsv`, `include_contigs.tsv`,
@@ -92,5 +92,7 @@ workflow, Hi-C validation and the other benchmarks live in a separate repository
   paths on this server), `evaluate_refinement.py`, the set builders (`monoculture_sets.py`,
   `fragment_assembly.py`, `perturb_bins.py`) and `results.tsv` (summary per version).
 - `dev/`: git hooks and speed prototypes.
-- `docs/method.md` (the model), `docs/scalability.md` (performance work).
+- `docs/`: user documentation (`getting-started.md`, `usage.md`, `outputs.md`, `how-it-works.md`, `faq.md`);
+  keep it in step with the CLI and outputs. `docs/development/`: developer notes on the model
+  (`method-notes.md`) and performance (`scalability.md`).
 - Environment: `.venv` (`uv venv && uv pip install -e ".[dev]"`); run with `.venv/bin/epirefine`.

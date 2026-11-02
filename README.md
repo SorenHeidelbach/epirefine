@@ -1,43 +1,118 @@
 # EpiRefine
 
 [![tests](https://github.com/SorenHeidelbach/epirefine/actions/workflows/tests.yml/badge.svg)](https://github.com/SorenHeidelbach/epirefine/actions/workflows/tests.yml)
+[![PyPI](https://img.shields.io/pypi/v/epirefine.svg)](https://pypi.org/project/epirefine/)
+[![Python](https://img.shields.io/pypi/pyversions/epirefine.svg)](https://pypi.org/project/epirefine/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/SorenHeidelbach/epirefine/blob/main/LICENSE)
 
-*Epi*genetics + *refine*: it refines metagenome bins using the methylation every genome carries. Formerly `pbinner`.
+**Refine metagenome bins with nanopore methylation.** EpiRefine takes the bins from any binner and checks every
+contig against the methylation fingerprint of its bin. It removes contigs that don't belong (contamination) and
+puts unbinned contigs, such as plasmids, into the bin whose methylation they share. Every decision comes with a
+calibrated probability.
 
-Bin refinement from nanopore methylation, built on Nanomotif output:
+![What EpiRefine does to a bin](https://raw.githubusercontent.com/SorenHeidelbach/epirefine/main/docs/images/epirefine_overview.png)
 
-- **contamination detection:** flags binned contigs whose methylation doesn't fit their bin;
-- **contig inclusion:** places unbinned contigs into the bin they belong to.
+Bacteria methylate short DNA motifs everywhere in the cell, on the chromosome and on its plasmids and phages
+alike, and nanopore reads record that methylation. The set of methylated motifs is therefore a signature of the
+genome a contig comes from, and it is independent of the sequence composition and coverage that binners use.
 
-Every decision comes with a calibrated posterior, including an explicit "unbinned genome" class, so
-contigs of genomes that have no bin stay out of bins. Outputs include Nanomotif-compatible files
-(`bin_contamination.tsv`, `include_contigs.tsv`, `new_contig_bin.tsv`,
-`decontaminated_contig_bin.tsv`). Calibration is estimated inside each sample from pseudo-contigs
-cut from binned contigs.
-
-- Method: [docs/method.md](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/method.md).
-- Performance work: [docs/scalability.md](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/scalability.md).
-- Changes per version: [CHANGELOG.md](https://github.com/SorenHeidelbach/epirefine/blob/main/CHANGELOG.md).
-- Development rules: [CLAUDE.md](https://github.com/SorenHeidelbach/epirefine/blob/main/CLAUDE.md).
-
-## Repository layout
-
-| Folder | Content |
-|---|---|
-| `src/epirefine/` | The package: methylation-based contamination detection and contig inclusion, nothing else |
-| `tests/` | Unit tests (`.venv/bin/python -m pytest -q tests`) |
-| `benchmarks/` | Monoculture benchmark: suite runner, the scripts that build the sets, the evaluator; results of every version in [`benchmarks/results.tsv`](https://github.com/SorenHeidelbach/epirefine/blob/main/benchmarks/results.tsv) |
-| `dev/` | Development tooling: git hooks, speed prototypes |
-| `docs/` | Method and performance notes |
+**Contents:** [Install](#install) · [Quick start](#quick-start) · [What you get](#what-you-get) ·
+[Documentation](#documentation) · [When to trust it](#when-to-trust-it) · [Citing](#citing)
 
 ## Install
 
 ```bash
-pip install epirefine                 # from PyPI
-conda install -c bioconda epirefine   # from Bioconda (once the recipe is accepted)
+pip install epirefine
 ```
 
-From source, for development:
+or with conda (Bioconda):
+
+```bash
+conda install -c conda-forge -c bioconda epirefine
+```
+
+Python 3.10 or newer; Linux and macOS. Check it works with `epirefine --version`.
+
+## Quick start
+
+You need four files for the sample:
+
+| Input | What it is | Made with |
+|---|---|---|
+| `assembly.fasta` | the assembled contigs | any assembler (e.g. metaFlye) |
+| `contig_bin.tsv` | which bin each binned contig is in: `contig<TAB>bin`, no header | any binner |
+| `pileup.bed` | reads called modified / unmodified at every position | `modkit pileup` |
+| `bin-motifs.tsv` | the methylated motifs found in the bins | `nanomotif motif_discovery` |
+
+Then run:
+
+```bash
+epirefine run \
+    --assembly assembly.fasta \
+    --contig-bin contig_bin.tsv \
+    --pileup pileup.bed \
+    --motifs bin-motifs.tsv \
+    --out epirefine_out \
+    --workers 16
+```
+
+New to nanopore methylation? The [getting-started guide](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/getting-started.md)
+walks through making the pileup and the motif file, running EpiRefine, and writing the refined bins as FASTA.
+
+## What you get
+
+The refined binning is in **`epirefine_out/new_contig_bin.tsv`** (`contig<TAB>bin`): the bins without their
+contaminants and with the included contigs added. Every contig's decision, with its probabilities, is in
+**`contig_decisions.tsv`**:
+
+| Status | Meaning |
+|---|---|
+| `kept` | binned, and its methylation fits its bin |
+| `contaminant` | binned, but its methylation contradicts its bin: removed |
+| `moved` | a contaminant that clearly belongs to another bin: moved there |
+| `mixed` | a long contig that is partly its bin's and partly another genome's: kept, with a map of which stretch fits which bin |
+| `included` | unbinned, and its methylation fits one bin: added to it |
+| `unbinned` | unbinned, and no bin fits well enough: left out |
+| `redundant` | would be included, but its sequence is already in the bin |
+| `low_coverage`, `too_short`, `no_methylation_evidence`, `sole_contig_of_bin` | not judged: too few reads, too short, no informative methylation, or nothing to compare it with |
+
+The files `bin_contamination.tsv`, `include_contigs.tsv` and `decontaminated_contig_bin.tsv` have the same format
+as Nanomotif's, so pipelines built for Nanomotif's refinement can use EpiRefine's output directly. All files are
+described in [docs/outputs.md](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/outputs.md).
+
+## Documentation
+
+| Guide | For |
+|---|---|
+| [Getting started](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/getting-started.md) | a first run, step by step, from reads to refined bins |
+| [Options](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/usage.md) | every command-line option, its default and when to change it |
+| [Outputs](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/outputs.md) | every output file and column |
+| [How it works](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/how-it-works.md) | the model in plain terms, from read counts to decisions |
+| [FAQ and troubleshooting](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/faq.md) | common questions, runtime, memory, odd results |
+| [Changelog](https://github.com/SorenHeidelbach/epirefine/blob/main/CHANGELOG.md) | what changed in each version |
+
+## When to trust it
+
+- **When EpiRefine acts, it is almost always right.** On benchmarks with known truth, every flagged contig was a
+  true contaminant and 99-100% of placements were into the right bin. It found 90-97% of planted contaminants,
+  against 13-34% for Nanomotif's refinement on the same data.
+- **It declines rather than guesses.** Contigs below 5x coverage, shorter than 1 kb or without informative
+  methylation get no decision. On a complex fecal sample that was about half of the assembly.
+- **Methylation cannot separate genomes that methylate the same motifs**, such as very close strains. EpiRefine
+  then keeps both bins in its credible set or leaves the contig where it is.
+
+More in the [FAQ](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/faq.md).
+
+## Citing
+
+A manuscript is in preparation. Until then, please cite this repository and the version you used
+(`epirefine --version`). EpiRefine builds on [Nanomotif](https://github.com/MicrobialDarkMatter/nanomotif) for
+motif discovery and on [modkit](https://github.com/nanoporetech/modkit) for the pileup.
+
+## Contributing
+
+Bug reports and questions: [GitHub issues](https://github.com/SorenHeidelbach/epirefine/issues). To work on the
+code:
 
 ```bash
 git clone https://github.com/SorenHeidelbach/epirefine.git && cd epirefine
@@ -45,98 +120,10 @@ uv venv && uv pip install -e ".[dev]"
 .venv/bin/pytest -q
 ```
 
-Python 3.10-3.15 (tested on every push, together with the lowest dependency versions allowed:
-numpy 1.26, scipy 1.11, polars 1.2).
+Development rules are in [CLAUDE.md](https://github.com/SorenHeidelbach/epirefine/blob/main/CLAUDE.md), the
+benchmark used for every release in `benchmarks/` (results per version in
+[benchmarks/results.tsv](https://github.com/SorenHeidelbach/epirefine/blob/main/benchmarks/results.tsv)), and
+notes on the statistical model and performance in
+[docs/development/](https://github.com/SorenHeidelbach/epirefine/tree/main/docs/development).
 
-## Running EpiRefine
-
-| Flag | File | Notes |
-|---|---|---|
-| `--assembly` | assembly FASTA | |
-| `--pileup` | `modkit pileup` bedMethyl (`.bed`/`.bed.gz`) | Space-separated (older modkit) or all-tab formats. Only rows at motif sites are kept while streaming. |
-| `--contig-bin` | `contig<TAB>bin`, no header | The bins to refine |
-| `--motifs` | Nanomotif `bin-motifs.tsv` | Only the **union** of motifs is used (+ `motif_complement`). Which bin carries which motif is re-estimated from the data. |
-
-```bash
-epirefine run --assembly asm.fasta --pileup pileup.bed --contig-bin contig_bin.tsv \
-    --motifs nanomotif/bin-motifs.tsv --out epirefine_out --workers 16
-```
-
-**Decision thresholds:**
-- `--contamination-threshold` (0.5): flag a binned contig when P(foreign) is at least this,
-- `--min-methylome-difference` (0.3): ... and its 95% credible interval for some motif group's
-  methylated fraction lies at least this far from its bin's level (an effect size, so that many
-  weak site-level differences don't add up to a flag);
-- `--include-threshold` (0.95): include an unbinned contig when one bin's posterior is at least this;
-- `--max-redundancy` (0.3): don't include a contig when this share of its k-mers is already in the
-  bin (assembly duplicates; status `redundant`).
-
-**Model options:** `--variation beta|logit` (how a contig's methylation varies around its bin's;
-`--tau` overrides the calibrated value), `--temperature`, `--allow-sharpening` (default: the
-temperature is clipped at ≥ 1), `--p-unknown`, `--contam-eps`, `--chunk-size`.
-`--regional-inclusion` (experimental, off by default) also includes long unbinned contigs whose
-50 kb windows match a bin when the whole contig doesn't.
-
-**Running:**
-- `--workers N` sets the processes for the pileup and table passes (default: CPUs, at most 16).
-- `--cache-dir` holds the site cache (default `<out>/cache`). A rerun with the same assembly, pileup
-  and motifs reuses it and skips the pileup pass.
-- `--frag-budget` (default 6000) is the total number of calibration fragments, spread over bins and
-  lengths with at most `--frags-per-bin` each.
-- `--motif-fit` also writes each contig's methylated fraction per motif group next to its bin's.
-
-The pileup must have each contig's rows together (as modkit writes it). Uncompressed pileups are read
-in parallel byte ranges; gzipped ones by a single worker.
-
-## Outputs
-
-| File | Content |
-|---|---|
-| `contig_decisions.tsv` | Per contig: `status`, given and new bin, `p_contaminant`, `methylome_difference`, `redundancy_with_bin`, best alternative bin and its posterior, MAP, `p_unknown`, 95% credible set |
-| `bin_contamination.tsv`, `include_contigs.tsv`, `new_contig_bin.tsv`, `decontaminated_contig_bin.tsv` | Nanomotif-compatible results |
-| `host_profiles.tsv` | Per bin × motif group: methylated fraction (posterior mean, 95% interval) |
-| `host_chunk_outliers.tsv` | P(chunk is foreign to its bin) for every 50 kb chunk of a binned contig |
-| `detection_model.tsv` | Learned caller behaviour per motif group (μ0, μ1, κ0, κ1) |
-| `motif_groups.tsv` | Which motifs were merged into which feature, with site and read counts |
-| `motif_fit.tsv` | With `--motif-fit`: per contig × motif group, observed methylated fraction (95% CI) and the bin's |
-| `calibration/` | Pseudo-contig calibration: accuracy, ECE, credible-set coverage per length, temperature and τ fits |
-| `params.json` | Fitted parameters and settings |
-
-**Status** in `contig_decisions.tsv`:
-
-| Status | Meaning |
-|---|---|
-| `kept` | Binned contig that fits its bin |
-| `contaminant` | Binned contig flagged as foreign; removed from its bin |
-| `moved` | Flagged contaminant that confidently belongs to another bin; moved there |
-| `sole_contig_of_bin` | Only contig of its bin: no leave-one-out profile, not judged |
-| `included` | Unbinned contig placed into a bin |
-| `redundant` | Would be included, but its sequence is already in the bin |
-| `unbinned` | Unbinned contig left out (uncertain, or its genome has no bin) |
-
-## Workflow and evaluation
-
-The Snakemake workflow (Nanomotif, EpiRefine, CheckM2), the Hi-C validation and the benchmarks beyond the
-monocultures (ZymoOral pieces, simulated look-alikes, chimeras) live in a separate repository that calls this
-tool (`epirefine_workflow`; moved out in 0.9.1).
-
-## Benchmarks
-
-`benchmarks/benchmark_suite.py --note "<change>"` runs the monoculture benchmark (`benchmarks/suite_monocultures.json`):
-communities built from isolates sequenced alone, so the origin of every contig is known, with planted errors
-(contaminants, removed members, genomes without a bin). By default it runs the six training communities
-(about 5 minutes); `--all` adds the held-out test and validation communities, for final evaluation only. Every
-run appends one row per benchmark group and version to [`benchmarks/results.tsv`](https://github.com/SorenHeidelbach/epirefine/blob/main/benchmarks/results.tsv):
-contaminants found, flag precision, contigs put back, contigs of bin-less genomes placed, bin completeness and
-contamination after refinement, wall time and peak memory. `benchmarks/monoculture_sets.py` rebuilds the sets.
-
-## Known limitations
-
-- **One bin per contig.** A contig assembled across two genomes is not split.
-- **Robust profiles assume a contaminant looks like a "random community genome".** A bin that is a
-  50/50 merge of two genomes is not resolved.
-- **Motif groups are treated as independent.** A site matched by several groups counts in the most specific
-  one, so one methyltransferase can show up in several partly methylated groups and count more than once.
-- **No coverage, co-abundance or taxonomy evidence**: methylation only.
-- **Dropped constant:** the binomial coefficient is omitted from likelihoods, so reported
-  log-likelihoods are relative. Bayes factors and posteriors are unaffected.
+Licence: [MIT](https://github.com/SorenHeidelbach/epirefine/blob/main/LICENSE).
