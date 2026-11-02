@@ -2,9 +2,11 @@ import sys
 from pathlib import Path
 
 import polars as pl
+import pytest
 
+# the benchmark evaluator lives in the repository's benchmarks/, which the source distribution leaves out
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmarks"))
-from evaluate_refinement import evaluate  # noqa: E402
+evaluate = pytest.importorskip("evaluate_refinement").evaluate
 
 
 def test_unjudged_contigs_are_left_out(tmp_path):
