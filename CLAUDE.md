@@ -1,6 +1,6 @@
-# pbinner: rules for working on this project
+# EpiRefine: rules for working on this project
 
-pbinner refines metagenome bins from nanopore methylation: it flags binned contigs that don't belong
+EpiRefine refines metagenome bins from nanopore methylation: it flags binned contigs that don't belong
 to their bin (contamination detection) and places unbinned contigs into bins (contig inclusion), with
 calibrated posteriors and Nanomotif-compatible outputs. It builds on Nanomotif's motif output and a
 modkit pileup. The package does only that; the workflow, Hi-C validation and benchmarks live in
@@ -25,7 +25,7 @@ their own folders and call it.
   1. on the branch, bump `version` in `pyproject.toml` (semantic versioning, below) and add the
      version's section to `CHANGELOG.md`, including the benchmark effect;
   2. `git checkout main && git merge --no-ff <branch>` with a message naming the version;
-  3. `git tag -a v<version> -m "pbinner <version>"`; delete the merged branch.
+  3. `git tag -a v<version> -m "epirefine <version>"`; delete the merged branch.
   Ask the user before merging a change that alters outputs, defaults or the CLI.
 - **Versions.** MAJOR: breaking change to output files, their columns or the CLI. MINOR: new feature,
   new output, or a model change that changes results. PATCH: bug fix, speed-up with identical
@@ -78,19 +78,19 @@ their own folders and call it.
 
 ## Layout
 
-- `src/pbinner/`: the package, bin refinement only. `pipeline.py` runs everything; `sites.py`
+- `src/epirefine/`: the package, bin refinement only. `pipeline.py` runs everything; `sites.py`
   streams the pileup into a site cache; `model.py` holds the likelihood model; `calibrate.py` the
   pseudo-contig calibration; `refine.py` the contamination and inclusion decisions; `redundancy.py`
   the k-mer check against inclusions the bin already holds; `motifs.py` motif matching and grouping.
   Don't add tooling, plotting or other data types (Hi-C, coverage) here without asking the user.
 - `tests/`: unit tests.
-- `workflow/`: the Snakemake workflow (pbinner, Nanomotif, CheckM2, Hi-C validation) and its
+- `workflow/`: the Snakemake workflow (EpiRefine, Nanomotif, CheckM2, Hi-C validation) and its
   scripts (`write_bins.py`, `compare_bins.R`) and conda envs.
 - `hic/`: Hi-C validation (`contacts.py`, `validate.py`, `env.yaml`), run from the workflow. It
-  judges pbinner from outside; keep it independent of the package.
+  judges EpiRefine from outside; keep it independent of the package.
 - `benchmarks/`: `benchmark_suite.py`, `suite.json` (absolute paths on this server) and the scripts
   that build scenarios (`fragment_assembly.py`, `perturb_bins.py`, `simulate_community.py`,
   `make_truth.py`, `evaluate_refinement.py`, `sweep_thresholds.py`, `compare_nanomotif.py`).
 - `dev/`: git hooks and speed prototypes.
 - `docs/method.md` (the model), `docs/scalability.md` (performance work).
-- Environment: `.venv` (`uv venv && uv pip install -e ".[dev]"`); run with `.venv/bin/pbinner`.
+- Environment: `.venv` (`uv venv && uv pip install -e ".[dev]"`); run with `.venv/bin/epirefine`.

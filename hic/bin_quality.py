@@ -14,7 +14,7 @@ bin names. A bin set built from the Hi-C calls (hic/refine.py) scores well on fo
 missing_bp by construction; cis_share and CheckM2 are the fair comparisons for it.
 
     python hic/bin_quality.py --pairs hic/contig_pairs.parquet --hic-calls hic/hic_calls.tsv \
-        --lengths contig_lengths.tsv --set original contig_bin.tsv --set pbinner pbinner/new_contig_bin.tsv \
+        --lengths contig_lengths.tsv --set original contig_bin.tsv --set epirefine epirefine/new_contig_bin.tsv \
         [--checkm2 original checkm2/original/quality_report.tsv ...] --out hic_quality/
 Writes bins.tsv (one row per bin and set) and summary.tsv (one row per set).
 """

@@ -2,9 +2,9 @@
 # Compare bin sets (original and refined) by CheckM2 quality and by which contigs moved.
 #
 # Rscript compare_bins.R --sample ZymoOral \
-#   --checkm2 original/quality_report.tsv nanomotif/quality_report.tsv pbinner/quality_report.tsv \
-#   --contig-bin contig_bin.tsv nanomotif/new_contig_bin.tsv pbinner/new_contig_bin.tsv \
-#   --methods original nanomotif pbinner --lengths contig_lengths.tsv --out comparison/
+#   --checkm2 original/quality_report.tsv nanomotif/quality_report.tsv epirefine/quality_report.tsv \
+#   --contig-bin contig_bin.tsv nanomotif/new_contig_bin.tsv epirefine/new_contig_bin.tsv \
+#   --methods original nanomotif epirefine --lengths contig_lengths.tsv --out comparison/
 #
 # The first method is the reference the others are compared with. Quality tiers follow the MIMAG
 # completeness / contamination thresholds (rRNA and tRNA criteria are not checked):
@@ -34,9 +34,9 @@ sample <- if (length(opt$sample)) opt$sample else "sample"
 out <- opt$out
 dir.create(out, showWarnings = FALSE, recursive = TRUE)
 ref <- methods[1]
-labels <- c(original = "Original bins", nanomotif = "Nanomotif", pbinner = "pbinner")
+labels <- c(original = "Original bins", nanomotif = "Nanomotif", epirefine = "epirefine")
 lab <- function(m) ifelse(m %in% names(labels), labels[m], m)
-method_colours <- c("Original bins" = "#8C8C8C", "Nanomotif" = "#D55E00", "pbinner" = "#0072B2")
+method_colours <- c("Original bins" = "#8C8C8C", "Nanomotif" = "#D55E00", "epirefine" = "#0072B2")
 
 tier_of <- function(comp, cont) {
   case_when(is.na(comp) ~ "no bin",

@@ -7,9 +7,9 @@ from .calibrate import DEFAULT_LENGTHS
 
 def main(argv=None):
     from . import __version__
-    ap = argparse.ArgumentParser(prog="pbinner", description="Bin refinement from nanopore methylation: flags "
+    ap = argparse.ArgumentParser(prog="epirefine", description="Bin refinement from nanopore methylation: flags "
                                  "contaminating contigs in bins and places unbinned contigs into bins")
-    ap.add_argument("--version", action="version", version=f"pbinner {__version__}")
+    ap.add_argument("--version", action="version", version=f"epirefine {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     r = sub.add_parser("run", help="refine bins: contamination detection and contig inclusion")

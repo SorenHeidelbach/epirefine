@@ -1,6 +1,6 @@
-# pbinner: method
+# EpiRefine: method
 
-> **Status (0.5.0):** pbinner is now bin refinement only (contamination detection and contig
+> **Status (0.5.0):** EpiRefine is now bin refinement only (contamination detection and contig
 > inclusion). This document was written for the plasmid-host version and still describes the
 > shared model (sites, caller model, grid, host profiles, population prior, "unknown", calibration)
 > correctly. Obsolete: own MTases (4.7, 6.5), the plasmid parameters δ and τ_p (6.6), plasmid
@@ -12,9 +12,9 @@
 
 **Probabilistic plasmid–host assignment from nanopore DNA methylation**
 
-This document describes the statistical model behind pbinner v2, how each part is estimated, how
+This document describes the statistical model behind EpiRefine v2, how each part is estimated, how
 uncertainty is reported, and why each design choice was made. It matches the implementation in
-`src/pbinner/` (module names are given in each section). For usage, see the [README](../README.md).
+`src/epirefine/` (module names are given in each section). For usage, see the [README](../README.md).
 For the development history, see [conversation.md](conversation.md).
 
 ---
@@ -332,7 +332,7 @@ under-methylated plasmid with an unannotated own MTase was wrongly called "unkno
 ### 4.8 The "unknown host" class
 
 The host of a plasmid is often not among the bins: it was unbinned, low-abundance or not assembled.
-pbinner models this with an extra class, $h = 0$, whose methylation levels are a **random draw from
+EpiRefine models this with an extra class, $h = 0$, whose methylation levels are a **random draw from
 the community**. Its profile is the population prior itself, $p_{0m} = \pi_m$. The likelihood of a
 unit under "unknown" is therefore the prior predictive: how probable the data are for a host chosen
 at random from this community's methylome distribution.
@@ -550,7 +550,7 @@ $\tau_p \in \{10, 30, 100, 300, 1000, \infty\}$.
 
 *Module: `calibrate.py`.*
 
-Real samples have no ground truth for plasmid hosts. pbinner creates its own: **pseudo-plasmids**
+Real samples have no ground truth for plasmid hosts. EpiRefine creates its own: **pseudo-plasmids**
 are fragments cut from host contigs, so their source bin is known.
 
 ### 7.1 Construction
@@ -656,7 +656,7 @@ Assignability separates them by asking how strong the evidence would be *on aver
 were true. It depends only on where the unit's sites are and how deeply they are covered, not on the
 observed methylation.
 
-pbinner uses the **Asimov dataset** (Cowan et al. 2011): the observed counts are replaced by their
+EpiRefine uses the **Asimov dataset** (Cowan et al. 2011): the observed counts are replaced by their
 expectation under the hypothesised truth, and the resulting log Bayes factor approximates the
 expected log Bayes factor, i.e. a Kullback–Leibler divergence between the two hypotheses' predictive
 distributions.
@@ -810,7 +810,7 @@ This prior has **three roles**:
 ### 9.6 "Unknown" as the prior predictive
 
 The usual open-set approach rejects the best match when a distance exceeds a threshold. That
-threshold has no probabilistic meaning and must be tuned per dataset. pbinner instead asks how
+threshold has no probabilistic meaning and must be tuned per dataset. EpiRefine instead asks how
 probable the data would be *for a host drawn at random from this community*. Consequences:
 - The unknown class wins exactly when no binned host explains the data better than a typical
   community member would.
@@ -921,7 +921,7 @@ Planned fixes, in order of preference:
   (`sole_contig_of_bin`).
 
 **Inputs:**
-- Motif discovery must find the relevant motifs. pbinner uses the union across bins, so a motif needs
+- Motif discovery must find the relevant motifs. EpiRefine uses the union across bins, so a motif needs
   to be found in at least one bin.
 - MTase annotation is optional, but without it own-MTase plasmids rely on the base rate.
 

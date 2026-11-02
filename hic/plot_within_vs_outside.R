@@ -2,8 +2,8 @@
 # Plots for hic/within_vs_outside.py: Hi-C contacts inside vs outside the bin.
 #
 # Rscript plot_within_vs_outside.R --dir hic_within/ [--sample ZymoFecal] [--min-contacts 10]
-#   A  per binned contig: contacts within its bin vs contacts with other bins, per pbinner decision
-#   B  per binned contig: within-bin share against pbinner's P(belongs to its bin)
+#   A  per binned contig: contacts within its bin vs contacts with other bins, per epirefine decision
+#   B  per binned contig: within-bin share against epirefine's P(belongs to its bin)
 #   C  per bin: within-bin share of each refined bin set against the original
 # Writes within_vs_outside.pdf / .png into --dir.
 
@@ -42,13 +42,13 @@ pA <- ggplot(ct, aes(within + 1, outside + 1)) +
   geom_text(data = qa, aes(x = 1.2, y = lim[2], label = lab), hjust = 0, vjust = 1, size = 2.8, colour = INK, inherit.aes = FALSE) +
   scale_x_log10(breaks = 10^(0:6) + 1, labels = c(0, comma(10^(1:6))), limits = lim) +
   scale_y_log10(breaks = 10^(0:6) + 1, labels = c(0, comma(10^(1:6))), limits = lim) +
-  scale_colour_gradient(low = ORANGE, high = BLUE, limits = c(0, 1), labels = percent, name = "pbinner\nP(own bin)") +
+  scale_colour_gradient(low = ORANGE, high = BLUE, limits = c(0, 1), labels = percent, name = "epirefine\nP(own bin)") +
   facet_wrap(~decision) +
   labs(x = "Hi-C contacts with other contigs of its bin", y = "Hi-C contacts with contigs of other bins",
        title = "A  Hi-C contacts inside vs outside the bin, per contig",
        subtitle = sprintf("Binned contigs with >= %d contacts to binned contigs; above the dashed line most contacts leave the bin", minc))
 
-# ---- B: within share vs pbinner probability ----------------------------------------------------------
+# ---- B: within share vs epirefine probability ----------------------------------------------------------
 edges <- c(0, 0.05, 0.5, 0.95, 0.99, 1.0001)
 labs_p <- c("<0.05", "0.05-0.5", "0.5-0.95", "0.95-0.99", ">=0.99")
 ctb <- ct |> filter(!is.na(p_own)) |> mutate(pband = factor(labs_p[findInterval(p_own, edges)], levels = labs_p))
@@ -58,8 +58,8 @@ pB <- ggplot(ctb, aes(pband, within_share)) +
   geom_text(data = nb, aes(x = pband, y = 1.07, label = paste0("n = ", comma(n))), size = 2.7, colour = INK2, inherit.aes = FALSE) +
   scale_y_continuous(labels = percent, breaks = c(0, 0.25, 0.5, 0.75, 1)) +
   coord_cartesian(ylim = c(0, 1.1)) +
-  labs(x = "pbinner P(contig belongs to its bin)", y = "within-bin share of Hi-C contacts",
-       title = "B  Within-bin Hi-C share by pbinner probability",
+  labs(x = "epirefine P(contig belongs to its bin)", y = "within-bin share of Hi-C contacts",
+       title = "B  Within-bin Hi-C share by epirefine probability",
        subtitle = "within / (within + other bins); a reliable P(own bin) rises with the share")
 
 # ---- C: per bin, refined vs original ------------------------------------------------------------------

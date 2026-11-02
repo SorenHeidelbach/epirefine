@@ -1,9 +1,9 @@
 #!/usr/bin/env Rscript
-# Per binned contig: Hi-C within/outside-bin contact ratio against pbinner's contamination probability.
+# Per binned contig: Hi-C within/outside-bin contact ratio against epirefine's contamination probability.
 #
 # Rscript plot_ratio_vs_contamination.R --dir hic_within/ [--sample ZymoFecal] [--min-contacts 10]
 # Reads contigs.tsv (hic/within_vs_outside.py). y = log2((within + 1) / (outside + 1)): > 0 most of the
-# contig's contacts to binned contigs stay in its bin, < 0 most go to other bins. x = pbinner
+# contig's contacts to binned contigs stay in its bin, < 0 most go to other bins. x = epirefine
 # P(contaminant) = 1 - P(own bin). Writes ratio_vs_contamination.pdf / .png into --dir.
 
 suppressPackageStartupMessages({ library(dplyr); library(readr); library(ggplot2); library(scales) })
@@ -47,13 +47,13 @@ p <- ggplot(d, aes(p_contam, ratio)) +
   annotate("text", x = 0.52, y = max(d$ratio), label = lab, hjust = 0, vjust = 1, size = 3, colour = INK) +
   annotate("text", x = 0.45, y = 0.4, label = "more contacts within the bin", hjust = 1, size = 2.8, colour = INK2) +
   annotate("text", x = 0.45, y = -0.4, label = "more contacts with other bins", hjust = 1, size = 2.8, colour = INK2) +
-  scale_colour_manual(values = c(`kept in its bin` = BLUE, `flagged as contaminant` = ORANGE), name = "pbinner decision") +
+  scale_colour_manual(values = c(`kept in its bin` = BLUE, `flagged as contaminant` = ORANGE), name = "epirefine decision") +
   scale_x_continuous(labels = percent, breaks = seq(0, 1, 0.25)) +
   scale_y_continuous(breaks = seq(-16, 16, 2), labels = function(v) ifelse(v >= 0, paste0(2^v, ":1"), paste0("1:", 2^-v))) +
-  labs(x = "pbinner probability that the contig is a contaminant (dashed: flag threshold 0.5)",
+  labs(x = "epirefine probability that the contig is a contaminant (dashed: flag threshold 0.5)",
        y = "Hi-C contacts within its bin : with other bins (log scale)",
        title = paste0(if (nzchar(opt$sample)) paste0(opt$sample, ": ") else "",
-                      "Hi-C within/outside-bin ratio vs pbinner contamination probability"),
+                      "Hi-C within/outside-bin ratio vs epirefine contamination probability"),
        subtitle = sprintf("One point per binned contig with >= %d contacts to binned contigs; ratio of (within+1) to (outside+1).\nBlack: median and middle 50%% per probability band. Spearman rho = %.2f",
                           minc, rho)) +
   theme_minimal(base_size = 10) +

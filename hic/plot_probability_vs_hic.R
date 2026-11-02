@@ -1,16 +1,16 @@
 #!/usr/bin/env Rscript
-# Plots for hic/probability_vs_hic.py: does pbinner's probability for a contig's bin match the
+# Plots for hic/probability_vs_hic.py: does epirefine's probability for a contig's bin match the
 # confidence the Hi-C contact map gives that bin?
 #
 # Rscript plot_probability_vs_hic.R --dir hic_probability/ [--sample ZymoFecal]
 #
 # Reads contigs.tsv, calibration.tsv, correlation.tsv and params.tsv from --dir and writes
 # probability_vs_hic.pdf / .png there:
-#   A  pbinner probability vs Hi-C probability, contig counts on a probability grid, per comparison
-#   B  calibration: per pbinner probability interval, the share of contigs Hi-C supports (P >= 0.5,
+#   A  epirefine probability vs Hi-C probability, contig counts on a probability grid, per comparison
+#   B  calibration: per epirefine probability interval, the share of contigs Hi-C supports (P >= 0.5,
 #      95% Wilson interval) and the mean Hi-C probability, against the diagonal
-#   C  Hi-C verdict on pbinner's decisions: supports (Hi-C P >= 0.95), undecided, contradicts
-#      (Hi-C P < 0.05) for the bin pbinner keeps the contig in, moves or includes it into, or flags
+#   C  Hi-C verdict on epirefine's decisions: supports (Hi-C P >= 0.95), undecided, contradicts
+#      (Hi-C P < 0.05) for the bin epirefine keeps the contig in, moves or includes it into, or flags
 #      it out of
 
 suppressPackageStartupMessages({
@@ -60,8 +60,8 @@ pA <- ggplot(grid, aes(px, hy)) +
   scale_fill_gradient(low = "#dbe8f8", high = "#0d3b78", trans = "log10", na.value = "#f4f4f2", name = "contigs") +
   scale_colour_manual(values = c(`FALSE` = INK, `TRUE` = "white"), guide = "none") +
   facet_wrap(~comp, nrow = 1, labeller = as_labeller(function(x) ifelse(x %in% names(stripA), stripA[x], x))) +
-  labs(x = "pbinner probability for the bin", y = "Hi-C probability for the same bin",
-       title = "A  pbinner probability against Hi-C contact-map probability",
+  labs(x = "epirefine probability for the bin", y = "Hi-C probability for the same bin",
+       title = "A  epirefine probability against Hi-C contact-map probability",
        subtitle = sprintf("Contigs with >= %d contacts to binned contigs.\nHi-C model: within-genome contact share f ~ Beta(%.2f, %.2f) (mean %.2f), contacts to other bins in proportion to their Hi-C signal, prior P(no bin) = %.1f",
                           as.integer(pv["min_links"]), pv["f_beta_a"], pv["f_beta_b"], pv["f_mean"], pv["prior_none"])) +
   theme(axis.text.x = element_text(angle = 40, hjust = 1), panel.grid.major = element_blank())
@@ -78,11 +78,11 @@ pB <- ggplot(calp, aes(mean_p)) +
   scale_size_area(max_size = 6, breaks = c(10, 100, 1000), name = "contigs") +
   scale_x_continuous(limits = c(0, 1), labels = percent) + scale_y_continuous(limits = c(0, 1), labels = percent) +
   facet_wrap(~comp, nrow = 1) +
-  labs(x = "mean pbinner probability (per probability interval)", y = NULL,
+  labs(x = "mean epirefine probability (per probability interval)", y = NULL,
        title = "B  Calibration against Hi-C",
        subtitle = "Blue: share of contigs whose Hi-C probability for the bin is >= 0.5 (95% interval)   Orange: mean Hi-C probability   Dashed: perfect agreement")
 
-# ---- C: Hi-C verdict per pbinner decision ----------------------------------------------------------
+# ---- C: Hi-C verdict per epirefine decision ----------------------------------------------------------
 dec <- bind_rows(
   contigs |> filter(comparison == "own", status == "kept") |> mutate(decision = "kept in its bin"),
   contigs |> filter(comparison == "own", status %in% c("contaminant", "moved")) |> mutate(decision = "flagged as contaminant", hic_p = 1 - hic_p),
@@ -104,13 +104,13 @@ pC <- ggplot(decn, aes(frac, decision, fill = verdict)) +
             hjust = 0, size = 2.7, colour = INK2, inherit.aes = FALSE) +
   scale_fill_manual(values = c(`Hi-C contradicts` = ORANGE, `Hi-C undecided` = GREY, `Hi-C supports` = BLUE), name = NULL) +
   scale_x_continuous(labels = percent, expand = expansion(mult = c(0, 0.12))) +
-  labs(x = "share of contigs", y = NULL, title = "C  Does Hi-C agree with pbinner's decisions?",
-       subtitle = "Hi-C probability for the bin pbinner keeps the contig in, moves / includes it into, or (flagged) that it is NOT in its bin: >= 0.95 supports, < 0.05 contradicts") +
+  labs(x = "share of contigs", y = NULL, title = "C  Does Hi-C agree with epirefine's decisions?",
+       subtitle = "Hi-C probability for the bin epirefine keeps the contig in, moves / includes it into, or (flagged) that it is NOT in its bin: >= 0.95 supports, < 0.05 contradicts") +
   theme(legend.position = "top", panel.grid.major.y = element_blank())
 
 title <- if (length(opt$sample) && nzchar(opt$sample)) paste0(opt$sample, ": ") else ""
 fig <- (pA / pB / pC) + plot_layout(heights = c(1.15, 0.9, 0.9)) +
-  plot_annotation(title = paste0(title, "pbinner assignment probability vs Hi-C contact-map confidence"),
+  plot_annotation(title = paste0(title, "epirefine assignment probability vs Hi-C contact-map confidence"),
                   theme = theme(plot.title = element_text(face = "bold", size = 14)))
 ggsave(file.path(dir, "probability_vs_hic.pdf"), fig, width = 13, height = 15)
 ggsave(file.path(dir, "probability_vs_hic.png"), fig, width = 13, height = 15, dpi = 150, bg = "white")

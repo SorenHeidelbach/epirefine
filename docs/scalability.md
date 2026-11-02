@@ -1,6 +1,6 @@
-# pbinner: scalability evaluation and speed-up plan
+# EpiRefine: scalability evaluation and speed-up plan
 
-This document evaluates how pbinner v2 scales, measured on this server (16 cores, 62 GB RAM), and
+This document evaluates how EpiRefine v2 scales, measured on this server (16 cores, 62 GB RAM), and
 lists concrete ways to make the critical steps faster: by lowering their complexity or by more
 efficient code. Each speed-up is estimated either from a prototype timed here or from a scaling
 argument; the table says which.
@@ -18,7 +18,7 @@ argument; the table says which.
 
 ## 2. Measurements
 
-**Benchmark script:** `scripts/scale_components.py` (removed in 0.5.0; the benchmark suite now measures speed). It times pbinner's real functions at the
+**Benchmark script:** `scripts/scale_components.py` (removed in 0.5.0; the benchmark suite now measures speed). It times EpiRefine's real functions at the
 target size, scaling linearly from a timed fraction where a full run would exceed the machine.
 
 **Inputs:**

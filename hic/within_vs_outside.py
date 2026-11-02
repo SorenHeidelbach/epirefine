@@ -1,16 +1,16 @@
-"""Hi-C contacts inside vs outside the bin, per contig and per bin, next to pbinner's decisions.
+"""Hi-C contacts inside vs outside the bin, per contig and per bin, next to epirefine's decisions.
 
 Per binned contig (original binning): contacts with other contigs of its own bin (within), with
-contigs of other bins (outside) and with unbinned contigs, together with pbinner's status and
+contigs of other bins (outside) and with unbinned contigs, together with epirefine's status and
 P(belongs to its bin) = 1 - p_contaminant. A genuine member has most of its binned contacts within
 its bin; a misbinned contig has them outside.
 
-Per bin and bin set (e.g. original, pbinner, hic): within-bin share = contacts between the bin's own
+Per bin and bin set (e.g. original, epirefine, hic): within-bin share = contacts between the bin's own
 contigs / contacts of its contigs with any binned contig (each counted from both ends). Refinement
 that removes foreign contigs and adds members raises it.
 
     python hic/within_vs_outside.py --pairs hic/contig_pairs.parquet --contig-bin contig_bin.tsv \
-        --decisions pbinner/contig_decisions.tsv --set original contig_bin.tsv --set pbinner pbinner/new_contig_bin.tsv \
+        --decisions epirefine/contig_decisions.tsv --set original contig_bin.tsv --set epirefine epirefine/new_contig_bin.tsv \
         --out hic_within/
 Writes contigs.tsv and bins.tsv.
 """
@@ -33,7 +33,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pairs", required=True, help="contig_pairs.parquet (hic/contacts.py)")
     ap.add_argument("--contig-bin", required=True, help="original contig -> bin table")
-    ap.add_argument("--decisions", required=True, help="pbinner contig_decisions.tsv")
+    ap.add_argument("--decisions", required=True, help="epirefine contig_decisions.tsv")
     ap.add_argument("--set", nargs=2, action="append", metavar=("NAME", "CONTIG_BIN"), required=True)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()

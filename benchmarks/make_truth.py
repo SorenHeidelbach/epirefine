@@ -13,7 +13,7 @@ from collections import defaultdict
 
 import polars as pl
 
-from pbinner.io import read_contig_bin, read_fasta
+from epirefine.io import read_contig_bin, read_fasta
 
 
 def union_len(iv):

@@ -2,7 +2,7 @@
 
 From confident Hi-C calls (hic/contacts.py): a binned contig whose Hi-C bin is another bin is moved
 there; an unbinned contig with a confident Hi-C bin is added to it. Everything else keeps its bin.
-Writes new_contig_bin.tsv (contig<TAB>bin, no header, like pbinner and Nanomotif) so the workflow can
+Writes new_contig_bin.tsv (contig<TAB>bin, no header, like epirefine and Nanomotif) so the workflow can
 score it with CheckM2 next to the methylation-based methods.
 
     python hic/refine.py --hic-calls hic/hic_calls.tsv --contig-bin contig_bin.tsv --out hic/new_contig_bin.tsv

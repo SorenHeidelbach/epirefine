@@ -3,12 +3,12 @@
 Hi-C links strain variants and duplicated stretches of a genome to their bin, correctly, but their
 extra copies of marker genes read as contamination to CheckM2. For every contig Hi-C adds to or moves
 into a bin, the FracMinHash containment of the contig in the target bin's original contigs is
-measured (pbinner's redundancy sketch, k = 21, scale 50); changes with containment >= --max-redundancy
+measured (epirefine's redundancy sketch, k = 21, scale 50); changes with containment >= --max-redundancy
 are undone (an added contig stays unbinned, a moved one stays in its bin).
 
     python hic/nonredundant.py --assembly asm.fasta --contig-bin contig_bin.tsv --hic-calls hic/hic_calls.tsv \
         --out-redundancy hic_quality/hic_change_redundancy.tsv --out hic_nonredundant/new_contig_bin.tsv
-Needs pbinner importable (the repository's .venv) for the sketches.
+Needs epirefine importable (the repository's .venv) for the sketches.
 """
 from __future__ import annotations
 
@@ -19,9 +19,9 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from pbinner.io import read_fasta
-from pbinner.motifs import encode
-from pbinner.redundancy import containment, sketch
+from epirefine.io import read_fasta
+from epirefine.motifs import encode
+from epirefine.redundancy import containment, sketch
 
 
 def main():

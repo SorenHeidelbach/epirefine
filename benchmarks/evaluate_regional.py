@@ -1,8 +1,8 @@
-"""Score pbinner on chimera scenarios (benchmarks/chimera_sets.py): long chimeras, long members, long contaminants.
+"""Score epirefine on chimera scenarios (benchmarks/chimera_sets.py): long chimeras, long members, long contaminants.
 
     python benchmarks/evaluate_regional.py --truth chim_1/truth_actions.tsv --decisions run/contig_decisions.tsv
 
-Per kind of planted long contig: how many pbinner flagged as a whole (status contaminant / moved),
+Per kind of planted long contig: how many epirefine flagged as a whole (status contaminant / moved),
 called mixed, kept, or left undecided; for chimeras also how well the reported foreign segments match
 the true foreign part (base-pair Jaccard of the two intervals' union). Right answers: chimera -> not
 flagged as a whole (ideally mixed, with the foreign segment found); long member -> kept; long

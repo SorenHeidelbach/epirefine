@@ -1,6 +1,6 @@
 import numpy as np
 
-from pbinner.refine import regional_pattern
+from epirefine.refine import regional_pattern
 
 
 def test_regional_pattern_separates_whole_foreign_member_and_mixed():

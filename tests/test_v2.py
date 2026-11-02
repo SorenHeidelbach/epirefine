@@ -1,11 +1,11 @@
 import numpy as np
 import polars as pl
 
-from pbinner.assignability import expected_tables, margin_vs_competitors
-from pbinner.detection import DetectionParams
-from pbinner.grid import Grid
-from pbinner.model import FittedModel
-from pbinner.motifs import Motif, assign_sites, build_records, revcomp
+from epirefine.assignability import expected_tables, margin_vs_competitors
+from epirefine.detection import DetectionParams
+from epirefine.grid import Grid
+from epirefine.model import FittedModel
+from epirefine.motifs import Motif, assign_sites, build_records, revcomp
 
 G = Grid(48)
 DET = {g: DetectionParams(0.04, 20, 0.88, 20) for g in range(3)}
@@ -13,7 +13,7 @@ DET = {g: DetectionParams(0.04, 20, 0.88, 20) for g in range(3)}
 
 def _sim_L(phi, n_sites, cov=20, rng=None):
     """L[m, g] for one unit with true phi per group, using the model's own site likelihood."""
-    from pbinner.model import unit_loglik
+    from epirefine.model import unit_loglik
     rng = rng or np.random.default_rng(0)
     rows = []
     for m, p in enumerate(phi):
@@ -72,7 +72,7 @@ def test_expected_margin_zero_for_lookalikes_and_grows_with_sites():
 
 
 def test_summed_scores_match_full_tensor():
-    from pbinner.model import group_scores, summed_scores
+    from epirefine.model import group_scores, summed_scores
     rng = np.random.default_rng(3)
     Lp = rng.normal(-5, 3, (7, 5, G.size))
     prof = rng.normal(-4, 2, (40, 5, G.size))
@@ -86,7 +86,7 @@ def test_summed_scores_match_full_tensor():
 
 def test_npmle_vectorised_matches_per_group_em():
     from scipy.special import logsumexp as lse
-    from pbinner.model import npmle
+    from epirefine.model import npmle
     rng = np.random.default_rng(4)
     ell = -rng.gamma(2, 20, (30, 4, G.size))
     got = npmle(ell, iters=200, tol=0)
@@ -100,7 +100,7 @@ def test_npmle_vectorised_matches_per_group_em():
 
 def test_motif_matcher_matches_regex_with_iupac_and_n():
     import re
-    from pbinner.motifs import IUPAC, MotifMatcher, encode
+    from epirefine.motifs import IUPAC, MotifMatcher, encode
     rng = np.random.default_rng(5)
     seq = "".join(rng.choice(list("ACGT"), 5000)) + "NNN" + "".join(rng.choice(list("ACGT"), 3000))
     motifs = [Motif("RGATCY", 2, "a"), Motif("GANTC", 1, "a"), Motif("CCWGG", 1, "m"),
@@ -117,7 +117,7 @@ def test_motif_matcher_matches_regex_with_iupac_and_n():
 
 
 def test_fragment_selection_is_reproducible():
-    from pbinner.calibrate import select_fragments
+    from epirefine.calibrate import select_fragments
     hc = pl.DataFrame({"contig": list(range(40)), "bin_idx": [i % 7 for i in range(40)],
                        "length": [50_000 + 1000 * i for i in range(40)]})
     a = [select_fragments(hc.sample(fraction=1.0, shuffle=True, seed=s), (2000, 10000), 3, np.random.default_rng(1))
@@ -126,7 +126,7 @@ def test_fragment_selection_is_reproducible():
 
 
 def test_refine_flags_contaminant_includes_member_and_leaves_orphan():
-    from pbinner.refine import em_weight, refine
+    from epirefine.refine import em_weight, refine
     # 3 bins; contig likelihoods strongly favour one explanation each
     S = np.array([[0., -50, -50],    # binned in 0, fits 0: keep
                   [-50, 0., -50],    # binned in 0, fits 1: contaminant, move to 1
@@ -145,7 +145,7 @@ def test_refine_flags_contaminant_includes_member_and_leaves_orphan():
 
 def test_caller_fit_by_bin_recovers_rare_methylated_component():
     """One motif methylated in 2 of 40 bins: the pooled fit degenerates, the bin-labelled fit doesn't."""
-    from pbinner.detection import fit_detection, fit_detection_by_bin
+    from epirefine.detection import fit_detection, fit_detection_by_bin
     rng = np.random.default_rng(7)
     rows = []
     for b in range(40):
@@ -161,7 +161,7 @@ def test_caller_fit_by_bin_recovers_rare_methylated_component():
 
 
 def test_contamination_needs_a_methylome_difference():
-    from pbinner.refine import refine
+    from epirefine.refine import refine
     S = np.array([[-50., -50, -50], [-50., -50, -50]])  # both fit their bin (0) badly, nothing else well
     Su = np.array([0., 0.])
     given = np.array([0, 0])
@@ -171,8 +171,8 @@ def test_contamination_needs_a_methylome_difference():
 
 
 def test_redundancy_containment():
-    from pbinner.motifs import encode
-    from pbinner.redundancy import containment, sketch
+    from epirefine.motifs import encode
+    from epirefine.redundancy import containment, sketch
     rng = np.random.default_rng(11)
     genome = "".join(rng.choice(list("ACGT"), 200_000))
     variant = list(genome[50_000:80_000])
@@ -197,14 +197,14 @@ def test_logit_kernel_spreads_intermediate_levels_more_than_extremes():
 
 
 def test_calibration_leaves_the_whole_source_contig_out():
-    from pbinner.calibrate import contig_chunks
+    from epirefine.calibrate import contig_chunks
     chunk_contig = np.array([7, 7, 3, 7, 3, 9])
     got = contig_chunks(np.array([7, 3, 5]), chunk_contig)
     assert got[0].tolist() == [0, 1, 3] and got[1].tolist() == [2, 4] and got[2].tolist() == []
 
 
 def test_bin_evidence_status():
-    from pbinner.refine import bin_evidence_table
+    from epirefine.refine import bin_evidence_table
     mean = np.array([[0.95, 0.02], [0.02, 0.01], [0.4, 0.3]])
     lo = np.array([[0.9, 0.0], [0.0, 0.0], [0.05, 0.02]])
     hi = np.array([[0.99, 0.05], [0.05, 0.03], [0.9, 0.8]])
@@ -214,7 +214,7 @@ def test_bin_evidence_status():
 
 
 def test_low_evidence_contigs_get_their_own_status(tmp_path):
-    from pbinner.refine import refine, write_outputs
+    from epirefine.refine import refine, write_outputs
     S = np.array([[0., -50, -50], [0., -50, -50], [-50, -50, 0.], [-1., -1, -1]])
     Su = np.array([-40., -40, -40, -1])
     given = np.array([0, 0, -1, -1])
@@ -227,7 +227,7 @@ def test_low_evidence_contigs_get_their_own_status(tmp_path):
 
 
 def test_low_coverage_binned_contigs_are_not_judged(tmp_path):
-    from pbinner.refine import refine, write_outputs
+    from epirefine.refine import refine, write_outputs
     S = np.array([[0., -50, -50], [0., -50, -50], [-50, -50, 0.]])
     given = np.array([0, 0, -1])
     low = np.array([False, True, False])
@@ -241,7 +241,7 @@ def test_low_coverage_binned_contigs_are_not_judged(tmp_path):
 
 
 def test_no_decision_below_coverage_cutoff():
-    from pbinner.refine import refine
+    from epirefine.refine import refine
     S = np.array([[0., -50, -50], [-50, 0., -50], [-50, -50, 0.], [-50, -50, 0.]])
     given = np.array([0, 0, -1, -1])
     dec = np.array([True, False, True, False])  # contigs 1 and 3: coverage too low
@@ -251,7 +251,7 @@ def test_no_decision_below_coverage_cutoff():
 
 
 def test_short_contigs_get_status_too_short(tmp_path):
-    from pbinner.refine import refine, write_outputs
+    from epirefine.refine import refine, write_outputs
     S = np.array([[0., -50, -50], [-50, -50, 0.], [-50, -50, 0.]])
     given = np.array([0, -1, -1])
     short = np.array([False, False, True])  # contig c fits bin z but is shorter than the cutoff
@@ -264,7 +264,7 @@ def test_short_contigs_get_status_too_short(tmp_path):
 
 
 def test_inclusion_into_unmethylated_bin_needs_higher_posterior():
-    from pbinner.refine import refine
+    from epirefine.refine import refine
     # contig 0 fits bin 1 (unmethylated) with ~0.93 posterior, contig 1 fits bin 0 (methylated) alike
     S = np.array([[-2.6, 0.0, -50.0], [0.0, -2.6, -50.0]])
     given = np.array([-1, -1])

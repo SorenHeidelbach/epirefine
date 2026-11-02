@@ -41,7 +41,7 @@ import polars as pl
 sys.path.insert(0, str(Path(__file__).parent))
 from fragment_assembly import cut_points  # noqa: E402
 
-from pbinner import io as pio  # noqa: E402
+from epirefine import io as pio  # noqa: E402
 
 COLS = [f"c{i}" for i in range(1, 19)]  # modkit bedMethyl, 18 columns
 COUNTS = ["c12", "c13", "c14", "c15", "c16", "c17", "c18"]  # Nmod Ncanonical Nother Ndelete Nfail Ndiff Nnocall

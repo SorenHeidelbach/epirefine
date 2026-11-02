@@ -1,6 +1,6 @@
 import polars as pl
 
-from pbinner.motifs import noisy_groups
+from epirefine.motifs import noisy_groups
 
 
 def test_noise_is_intermediate_sites_in_many_genomes(tmp_path):

@@ -1,28 +1,28 @@
-"""pbinner's assignment probabilities against the confidence of the Hi-C contact map, per contig.
+"""epirefine's assignment probabilities against the confidence of the Hi-C contact map, per contig.
 
 Only contigs whose Hi-C call is confident (hic/contacts.py: enough contacts, a clear majority to one
 bin, several distinct partner contigs, not explained by random ligation) are scored: elsewhere the
-mapping doesn't support a Hi-C statement strong enough to judge pbinner by.
+mapping doesn't support a Hi-C statement strong enough to judge epirefine by.
 
 Hi-C probability: the contact map turned into a posterior over bins (model in hic_posterior), so
-it reads on the same scale as pbinner's. Its prior uses neither methylation nor the binning: P(no
+it reads on the same scale as epirefine's. Its prior uses neither methylation nor the binning: P(no
 bin) = --prior-none, the rest uniform over bins. Few contacts give a Hi-C probability near the
 prior, many contacts a confident one; a contig that is its whole bin gets no Hi-C evidence.
 
-Three comparisons, each pairing a pbinner probability with the Hi-C probability of the same bin:
+Three comparisons, each pairing a epirefine probability with the Hi-C probability of the same bin:
 
   own        binned contigs: P(belongs to its bin) = 1 - p_contaminant
-  alt        p_best_alternative (the bin pbinner would move or include the contig into)
-  map        p_map (pbinner's most probable bin; contigs whose MAP is "unknown" left out)
+  alt        p_best_alternative (the bin epirefine would move or include the contig into)
+  map        p_map (epirefine's most probable bin; contigs whose MAP is "unknown" left out)
 
 Only contigs with at least --min-links contacts to binned contigs are scored. Outputs:
-  contigs.tsv       one row per comparison and contig: p (pbinner), hic_p (Hi-C), contact share, ...
-  calibration.tsv   per comparison and pbinner probability interval: mean p, mean hic_p, share of
+  contigs.tsv       one row per comparison and contig: p (epirefine), hic_p (Hi-C), contact share, ...
+  calibration.tsv   per comparison and epirefine probability interval: mean p, mean hic_p, share of
                     contigs whose Hi-C probability for the bin is >= 0.5 (Wilson 95% interval)
   correlation.tsv   Spearman correlation of p and hic_p per comparison
   params.tsv        f, prior, contig counts
 
-    python hic/probability_vs_hic.py --decisions pbinner/contig_decisions.tsv \
+    python hic/probability_vs_hic.py --decisions epirefine/contig_decisions.tsv \
         --links hic/contig_bin_links.tsv --contig-bin contig_bin.tsv --out hic_probability/
 """
 from __future__ import annotations
@@ -183,9 +183,9 @@ def main():
     x.write_csv(out / "contigs.tsv", separator="\t", float_precision=4)
 
     # one row per contig: the probability each method gives the same statement
-    #   binned:   "the contig belongs to its bin"   pbinner 1 - p_contaminant, Hi-C P(own bin)
-    #   included: "the contig belongs to bin X"     pbinner P(X),             Hi-C P(X)
-    #   unbinned: "the contig belongs to some bin"  pbinner 1 - p_unknown,     Hi-C 1 - P(no bin)
+    #   binned:   "the contig belongs to its bin"   epirefine 1 - p_contaminant, Hi-C P(own bin)
+    #   included: "the contig belongs to bin X"     epirefine P(X),             Hi-C P(X)
+    #   unbinned: "the contig belongs to some bin"  epirefine 1 - p_unknown,     Hi-C 1 - P(no bin)
     own = x.filter(pl.col("comparison") == "own").select("contig", pl.col("p").alias("p_meth"), pl.col("hic_p").alias("p_hic"), "target")
     inc = x.filter((pl.col("comparison") == "alt") & (pl.col("status") == "included")).select(
         "contig", pl.col("p").alias("p_meth"), pl.col("hic_p").alias("p_hic"), "target")

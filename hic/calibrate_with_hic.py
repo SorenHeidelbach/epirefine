@@ -1,22 +1,22 @@
-"""Calibrate pbinner's contamination probability against Hi-C.
+"""Calibrate epirefine's contamination probability against Hi-C.
 
-pbinner's P(contaminant) measures how strongly a contig's methylation disagrees with its bin. Whether
+epirefine's P(contaminant) measures how strongly a contig's methylation disagrees with its bin. Whether
 that disagreement means a foreign genome (or a plasmid, phage or strain variant that lives in the same
 cells) is something methylation can't tell; Hi-C can. For binned contigs with enough contacts to
 binned contigs (>= --min-contacts), the Hi-C label is "foreign" when fewer than half of those contacts
 are with other contigs of its own bin (hic/within_vs_outside.py). A monotone (isotonic, pool adjacent
-violators) fit of that label on pbinner's log-odds gives, for every binned contig, the share of
+violators) fit of that label on epirefine's log-odds gives, for every binned contig, the share of
 contigs with that much methylation disagreement that Hi-C finds outside their bin:
 
-    p_hic_calibrated = P(Hi-C foreign | pbinner P(contaminant))
+    p_hic_calibrated = P(Hi-C foreign | epirefine P(contaminant))
 
-Contigs without enough contacts get the fitted value for their pbinner probability too, so the
+Contigs without enough contacts get the fitted value for their epirefine probability too, so the
 calibrated probability is defined for every binned contig. The fit is sample-specific.
 
-    python hic/calibrate_with_hic.py --within hic_within/contigs.tsv --decisions pbinner/contig_decisions.tsv \
+    python hic/calibrate_with_hic.py --within hic_within/contigs.tsv --decisions epirefine/contig_decisions.tsv \
         --out hic_calibration/
-Writes contigs.tsv (pbinner p, calibrated p, Hi-C label where known), curve.tsv (the step function)
-and thresholds.tsv (pbinner p needed for a given Hi-C precision of the flags).
+Writes contigs.tsv (epirefine p, calibrated p, Hi-C label where known), curve.tsv (the step function)
+and thresholds.tsv (epirefine p needed for a given Hi-C precision of the flags).
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def isotonic(x: np.ndarray, y: np.ndarray, w: np.ndarray | None = None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--within", required=True, help="contigs.tsv from hic/within_vs_outside.py")
-    ap.add_argument("--decisions", required=True, help="pbinner contig_decisions.tsv")
+    ap.add_argument("--decisions", required=True, help="epirefine contig_decisions.tsv")
     ap.add_argument("--min-contacts", type=int, default=20)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
@@ -78,7 +78,7 @@ def main():
                        "contigs": int(sel.sum()), "hic_foreign_rate": float(v)})
     pl.DataFrame(blocks).sort("p_from").write_csv(out / "curve.tsv", separator="\t", float_precision=4)
 
-    # pbinner threshold for a given Hi-C precision among flagged contigs (contigs with p >= threshold)
+    # epirefine threshold for a given Hi-C precision among flagged contigs (contigs with p >= threshold)
     rows = []
     xi = x.filter(pl.col("hic_informative"))
     for thr in (0.5, 0.9, 0.99, 0.999, 0.9999, 1 - 1e-6):
