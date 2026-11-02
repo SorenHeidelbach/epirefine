@@ -14,6 +14,9 @@ Breaking (name only; no model or result change).
   `epirefine_extra`); `benchmarks/compare_nanomotif.py --epirefine`. Data and cache folders on disk keep
   their old names.
 
+**Benchmark effect:** none; every benchmark identical to 0.8.0 (mono-train 0.948 / 1.000 / 0.893 / 2.0;
+ZymoOral 5-150 kb, 2-30 kb and the simulated look-alikes unchanged). Outputs byte-identical except the `method` value.
+
 ## 0.8.0 (2026-10-29): regional inclusion off by default
 
 Changes default results and adds a CLI flag.
