@@ -3,6 +3,17 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.9.2 (2026-11-02): tests on GitHub for every supported Python
+
+No change to results.
+- `.github/workflows/tests.yml`: the unit tests run on every push, tag and pull request, on Python 3.10, 3.11,
+  3.12, 3.13, 3.14 and 3.15, and once with the lowest dependency versions `pyproject.toml` allows.
+- Fix: polars must be >= 1.2 (was >= 1.0). EpiRefine reads pileups with `read_csv(infer_schema=False)`, which
+  polars 1.0 and 1.1 don't have; with them pileup parsing failed (2 tests). Found by the lowest-versions job.
+
+**Benchmark effect:** none (no code change). All 35 tests pass locally on Python 3.10-3.15 and on
+numpy 1.26.0 / scipy 1.11.1 / polars 1.2.1.
+
 ## 0.9.1 (2026-11-02): the repository holds only the tool
 
 No change to the epirefine package or its outputs.

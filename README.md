@@ -1,5 +1,7 @@
 # EpiRefine
 
+[![tests](https://github.com/SorenHeidelbach/epirefine/actions/workflows/tests.yml/badge.svg)](https://github.com/SorenHeidelbach/epirefine/actions/workflows/tests.yml)
+
 *Epi*genetics + *refine*: it refines metagenome bins using the methylation every genome carries. Formerly `pbinner`.
 
 Bin refinement from nanopore methylation, built on Nanomotif output:
@@ -35,6 +37,9 @@ git clone git@github.com:SorenHeidelbach/epirefine.git && cd epirefine
 uv venv && uv pip install -e ".[dev]"
 .venv/bin/pytest -q
 ```
+
+Python 3.10-3.15 (tested on every push, together with the lowest dependency versions allowed:
+numpy 1.26, scipy 1.11, polars 1.2).
 
 ## Running EpiRefine
 
