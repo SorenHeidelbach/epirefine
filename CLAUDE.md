@@ -3,8 +3,9 @@
 EpiRefine refines metagenome bins from nanopore methylation: it flags binned contigs that don't belong
 to their bin (contamination detection) and places unbinned contigs into bins (contig inclusion), with
 calibrated posteriors and Nanomotif-compatible outputs. It builds on Nanomotif's motif output and a
-modkit pileup. The package does only that; the workflow, Hi-C validation and benchmarks live in
-their own folders and call it.
+modkit pileup. This repository holds only the tool, its tests and its monoculture benchmark. The Snakemake
+workflow, Hi-C validation and the other benchmarks live in a separate repository that calls the tool
+(`/home/ubuntu/epirefine_workflow`); keep them out of here.
 
 ## Before changing anything
 
@@ -43,14 +44,17 @@ their own folders and call it.
 ## Measuring and reporting the effect of every change
 
 - Run `benchmarks/benchmark_suite.py --note "<what changed>"` before merging any change to the model,
-  the pipeline or performance. It takes about 15 minutes, records accuracy (contaminants found,
-  flag precision, contigs put back, contigs of unbinned genomes wrongly placed, bin completeness
-  and contamination), wall time and peak memory, and prints the change against the last recorded
-  version. Add `--all` (adds human_gut, about 1 hour) when a change affects speed or memory at scale.
+  the pipeline or performance, and for every new version. It runs the monoculture training communities
+  (about 5 minutes), records accuracy (contaminants found, flag precision, contigs put back, contigs of
+  unbinned genomes wrongly placed, bin completeness and contamination), wall time and peak memory,
+  and prints the change against the last recorded version. `--all` adds the held-out test and
+  validation communities: final evaluation only, never for tuning. For changes that may behave
+  differently on other data, also run the workflow repository's suite (`--suite <its suite.json>`).
 - Report the effect to the user after every implemented change, as numbers: what got faster or
   slower and by how much, which metric moved, on which benchmark. Say so plainly when nothing
   measurable changed, or when something got worse.
-- The benchmark history lives in the dev log (`benchmarks/history.tsv`), not in the repo.
+- Every run appends its summary per benchmark group to `benchmarks/results.tsv` (in the repository; commit
+  the row of each released version) and to the dev log (`benchmarks/history.tsv`, with per-scenario rows).
 
 ## Development log (outside git)
 
@@ -84,13 +88,9 @@ their own folders and call it.
   the k-mer check against inclusions the bin already holds; `motifs.py` motif matching and grouping.
   Don't add tooling, plotting or other data types (Hi-C, coverage) here without asking the user.
 - `tests/`: unit tests.
-- `workflow/`: the Snakemake workflow (EpiRefine, Nanomotif, CheckM2, Hi-C validation) and its
-  scripts (`write_bins.py`, `compare_bins.R`) and conda envs.
-- `hic/`: Hi-C validation (`contacts.py`, `validate.py`, `env.yaml`), run from the workflow. It
-  judges EpiRefine from outside; keep it independent of the package.
-- `benchmarks/`: `benchmark_suite.py`, `suite.json` (absolute paths on this server) and the scripts
-  that build scenarios (`fragment_assembly.py`, `perturb_bins.py`, `simulate_community.py`,
-  `make_truth.py`, `evaluate_refinement.py`, `sweep_thresholds.py`, `compare_nanomotif.py`).
+- `benchmarks/`: the monoculture benchmark: `benchmark_suite.py`, `suite_monocultures.json` (absolute
+  paths on this server), `evaluate_refinement.py`, the set builders (`monoculture_sets.py`,
+  `fragment_assembly.py`, `perturb_bins.py`) and `results.tsv` (summary per version).
 - `dev/`: git hooks and speed prototypes.
 - `docs/method.md` (the model), `docs/scalability.md` (performance work).
 - Environment: `.venv` (`uv venv && uv pip install -e ".[dev]"`); run with `.venv/bin/epirefine`.

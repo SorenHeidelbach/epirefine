@@ -1,6 +1,6 @@
 [project]
 name = "epirefine"
-version = "0.9.0"
+version = "0.9.1"
 description = "EpiRefine: bin refinement from nanopore methylation, contamination detection and contig inclusion (builds on Nanomotif output)"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.26", "scipy>=1.11", "polars>=1.0"]

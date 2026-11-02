@@ -24,16 +24,14 @@ cut from binned contigs.
 |---|---|
 | `src/epirefine/` | The package: methylation-based contamination detection and contig inclusion, nothing else |
 | `tests/` | Unit tests (`.venv/bin/python -m pytest -q tests`) |
-| `workflow/` | Snakemake workflow: EpiRefine, Nanomotif, CheckM2 and, for samples with Hi-C reads, the Hi-C validation; R comparison script |
-| `hic/` | Hi-C validation, separate from EpiRefine: contig contacts, Hi-C bin calls, scoring of refinement decisions ([hic/README.md](hic/README.md)) |
-| `benchmarks/` | Benchmark suite (`benchmark_suite.py`, `suite.json`) and the scripts that build its scenarios |
+| `benchmarks/` | Monoculture benchmark: suite runner, the scripts that build the sets, the evaluator; results of every version in [`benchmarks/results.tsv`](benchmarks/results.tsv) |
 | `dev/` | Development tooling: git hooks, speed prototypes |
 | `docs/` | Method and performance notes |
 
 ## Install
 
 ```bash
-cd plasmid_binner
+git clone git@github.com:SorenHeidelbach/epirefine.git && cd epirefine
 uv venv && uv pip install -e ".[dev]"
 .venv/bin/pytest -q
 ```
@@ -104,37 +102,21 @@ in parallel byte ranges; gzipped ones by a single worker.
 | `redundant` | Would be included, but its sequence is already in the bin |
 | `unbinned` | Unbinned contig left out (uncertain, or its genome has no bin) |
 
-## Workflow: refinement checked with CheckM2 and Hi-C
+## Workflow and evaluation
 
-`workflow/Snakefile` runs, per sample:
-1. Nanomotif (`detect_contamination` + `include_contigs`) and EpiRefine, on the same bins, motifs and
-   pileup;
-2. writes the original and refined bin sets as FASTA;
-3. scores each set with CheckM2;
-4. compares them in R (`workflow/scripts/compare_bins.R`): `comparison/summary.tsv`,
-   `comparison/bins.tsv` and `comparison/bin_refinement.pdf` (bins per quality tier, sequence moved,
-   an arrow per changed bin from original to refined quality);
-5. for samples with Hi-C reads: maps them with chromap, calls each contig's Hi-C bin and scores both
-   methods' flags and inclusions against it (`hic_validation/summary.tsv`); see
-   [hic/README.md](hic/README.md).
-
-```bash
-# once: micromamba + a snakemake environment (see the dev log's DATA.md for this server)
-snakemake -s workflow/Snakefile --configfile workflow/config.yaml --use-conda --cores 16
-```
-
-- Samples go in `workflow/config.yaml`: assembly, modkit pileup, the binner's contig-to-bin table and
-  Nanomotif's `bin-motifs.tsv`. Optional per sample: `cache_dir` (EpiRefine site cache), `methods`
-  (bin sets to compare), `hic_r1`/`hic_r2`, `hic_index`, `hic_max_pairs`.
-- The first run creates the conda environments (Nanomotif 1.1.2, CheckM2 1.1.0, R, chromap) and
-  downloads the CheckM2 database (3 GB) to `checkm2_db_dir`.
-- EpiRefine itself runs from the repository's `.venv`.
+The Snakemake workflow (Nanomotif, EpiRefine, CheckM2), the Hi-C validation and the benchmarks beyond the
+monocultures (ZymoOral pieces, simulated look-alikes, chimeras) live in a separate repository that calls this
+tool (`epirefine_workflow`; moved out in 0.9.1).
 
 ## Benchmarks
 
-`benchmarks/benchmark_suite.py --note "<change>"` runs the scenarios in `benchmarks/suite.json`
-(ZymoOral with planted binning errors at two fragment lengths, a simulated community; `--all` adds
-human_gut) and records accuracy, wall time and peak memory in the dev log.
+`benchmarks/benchmark_suite.py --note "<change>"` runs the monoculture benchmark (`benchmarks/suite_monocultures.json`):
+communities built from isolates sequenced alone, so the origin of every contig is known, with planted errors
+(contaminants, removed members, genomes without a bin). By default it runs the six training communities
+(about 5 minutes); `--all` adds the held-out test and validation communities, for final evaluation only. Every
+run appends one row per benchmark group and version to [`benchmarks/results.tsv`](benchmarks/results.tsv):
+contaminants found, flag precision, contigs put back, contigs of bin-less genomes placed, bin completeness and
+contamination after refinement, wall time and peak memory. `benchmarks/monoculture_sets.py` rebuilds the sets.
 
 ## Known limitations
 
