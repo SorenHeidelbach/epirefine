@@ -1,0 +1,5 @@
+date	version	commit	group	scenarios	contam_recall	contam_precision	inclusion_recall	placed_wrongly	should_stay_unbinned	contamination_after	completeness_after	wall_s	peak_rss_gb	note	jobs
+2026-10-28 13:40	0.6.1	39ab5ae	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	43.6333	0.8617	regional model final (tied inclusion, segment map)	2
+2026-10-29 09:01	0.7.2	bc822e3	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	39.1167	0.8733	regional inclusion off	2
+2026-11-02 08:53	0.9.0	2db6aee	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	39.0500	0.8800	0.9.0 rename pbinner -> EpiRefine (no model change)	1
+2026-11-02 08:59	0.9.1	60dd6c6	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	37.9500	0.8783	0.9.1 repository holds only the tool (no package change)	1

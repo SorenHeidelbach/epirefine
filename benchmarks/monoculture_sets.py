@@ -17,7 +17,8 @@ synthetic communities from them with realistic problems, in three disjoint sets:
     moved into a wrong bin (should be flagged);
   * motifs are Nanomotif's calls (bin-motifs.tsv, with complements) of the BINNED isolates only, as
     Nanomotif run on the bins would see them; pileups are modkit pileups. Both come from the isolate
-    folders or, where missing, from workflow/monocultures.smk (modkit pileup, nanomotif motif_discovery).
+    folders or, where missing, from the workflow repository's workflow/monocultures.smk (modkit pileup,
+    nanomotif motif_discovery).
 
     python benchmarks/monoculture_sets.py --isolates mono_bench/isolates_inputs.tsv \
         --out /home/ubuntu/data/mono_bench --suite benchmarks/suite_monocultures.json

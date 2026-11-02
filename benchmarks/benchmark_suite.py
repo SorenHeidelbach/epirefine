@@ -1,14 +1,17 @@
 """Run epirefine on the benchmark suite and record accuracy, speed and memory per version.
 
-    python benchmarks/benchmark_suite.py                   # default scenarios (~15 min)
-    python benchmarks/benchmark_suite.py --all             # also optional ones (human_gut, ~1 h)
-    python benchmarks/benchmark_suite.py --only sim_s1     # chosen scenarios
+    python benchmarks/benchmark_suite.py                   # monoculture training communities (~5 min)
+    python benchmarks/benchmark_suite.py --all             # also the held-out test and validation sets
+    python benchmarks/benchmark_suite.py --only mono_train_1
+    python benchmarks/benchmark_suite.py --suite <other suite.json>   # e.g. the workflow repository's benchmarks
 
-Scenarios are listed in benchmarks/suite.json. Each run reuses its dataset's site cache, so wall
-time measures everything after the pileup pass unless the cache had to be rebuilt (column
-`cache_reused`). Per-scenario rows go to <devlog>/benchmarks/runs/<version>_<commit>.tsv; one
-summary row per benchmark group is appended to <devlog>/benchmarks/history.tsv, and the change
-against the last recorded version of each group is printed.
+Scenarios are listed in benchmarks/suite_monocultures.json (benchmarks/monoculture_sets.py); the held-out test and
+validation communities are optional and are for final evaluation only, never for tuning. Each run reuses its
+dataset's site cache, so wall time measures everything after the pileup pass unless the cache had to be rebuilt
+(column `cache_reused`). One summary row per benchmark group and version is appended to benchmarks/results.tsv in
+this repository and to <devlog>/benchmarks/history.tsv, per-scenario rows go to
+<devlog>/benchmarks/runs/<version>_<commit>.tsv, and the change against the last recorded version of each group is
+printed.
 """
 from __future__ import annotations
 
@@ -67,7 +70,9 @@ def run_scenario(sc: dict, out_root: Path, workers: int = 16) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--suite", default=str(REPO / "benchmarks/suite.json"))
+    ap.add_argument("--suite", default=str(REPO / "benchmarks/suite_monocultures.json"))
+    ap.add_argument("--results", default=str(REPO / "benchmarks/results.tsv"),
+                    help="per-version summary kept in the repository (one row per benchmark group and run)")
     ap.add_argument("--devlog", default=str(Path.home() / "plasmid_binner_devlog"))
     ap.add_argument("--out-root", default="/home/ubuntu/data/bench_runs")
     ap.add_argument("--all", action="store_true", help="include optional scenarios")
@@ -139,7 +144,11 @@ def main():
     else:
         hist = summ
     hist.write_csv(hist_path, separator="\t", float_precision=4)
-    print(f"\nrows: {bdir / 'runs' / (tag + '.tsv')}\nhistory: {hist_path}")
+    res_path = Path(a.results)
+    res = pl.read_csv(res_path, separator="\t") if res_path.exists() else None
+    res = summ if res is None else pl.concat([res, summ], how="diagonal_relaxed")
+    res.write_csv(res_path, separator="\t", float_precision=4)
+    print(f"\nrows: {bdir / 'runs' / (tag + '.tsv')}\nhistory: {hist_path}\nresults (repository): {res_path}")
 
 
 if __name__ == "__main__":

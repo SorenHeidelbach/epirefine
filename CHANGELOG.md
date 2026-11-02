@@ -3,6 +3,17 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.9.1 (2026-11-02): the repository holds only the tool
+
+No change to the epirefine package or its outputs.
+- `workflow/`, `hic/` and the benchmarks other than the monocultures (ZymoOral pieces, simulated
+  look-alikes, chimeras, simulator, truth tables, Nanomotif comparison, threshold sweeps) moved to a
+  separate repository that calls the tool (`epirefine_workflow`; their history up to here stays in this one).
+- `benchmarks/benchmark_suite.py` runs the monoculture benchmark by default and appends a summary per
+  version to `benchmarks/results.tsv` in the repository (seeded with the released versions 0.6.1, 0.7.2, 0.9.0).
+
+**Benchmark effect:** none; mono-train identical to 0.9.0 (0.948 / 1.000 / 0.893 / 2.0).
+
 ## 0.9.0 (2026-11-02): renamed to EpiRefine
 
 Breaking (name only; no model or result change).
