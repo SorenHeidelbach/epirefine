@@ -12,6 +12,8 @@ No change to the epirefine package or its outputs.
 - `benchmarks/benchmark_suite.py` runs the monoculture benchmark by default and appends a summary per
   version to `benchmarks/results.tsv` in the repository (seeded with the released versions 0.6.1, 0.7.2, 0.9.0).
 
+**Benchmark effect:** none; mono-train identical to 0.9.0 (0.948 / 1.000 / 0.893 / 2.0).
+
 ## 0.9.0 (2026-11-02): renamed to EpiRefine
 
 Breaking (name only; no model or result change).
