@@ -74,6 +74,8 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
            decidable: np.ndarray | None = None, unmethylated_bins: np.ndarray | None = None,
            include_threshold_unmethylated: float = 0.95) -> Refinement:
     """given[i] = bin index of contig i, -1 if unbinned; testable[i] = binned and scored leave-one-out.
+    With one bin only (H = 1) no binned contig is tested for contamination (eps is NaN); unbinned contigs are
+    still tested for inclusion into it.
     decidable[i] = False: no decision about contig i at all (e.g. coverage too low): it is neither
     flagged nor included and doesn't enter the estimates of p_unknown and the contamination rate.
 
@@ -106,15 +108,31 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     Zx = Z.copy()
     Zx[np.arange(N)[given >= 0], own[given >= 0]] = -np.inf  # exclude the own bin
     n_alt = np.where(given >= 0, H - 1, H)
-    alt_logits = np.concatenate([Zx + lpb - np.log(n_alt)[:, None], (Zu + lpu)[:, None]], axis=1)
+    if H > 1:
+        bin_logits = Zx + lpb - np.log(n_alt)[:, None]
+    else:
+        # one bin only: a binned contig has no other bin to come from (n_alt = 0; -inf - log(0) made every
+        # probability NaN). Its row stays -inf here and is settled below; unbinned contigs have n_alt = 1.
+        bin_logits = Zx + lpb
+    alt_logits = np.concatenate([bin_logits, (Zu + lpu)[:, None]], axis=1)
     l_alt = logsumexp(alt_logits, axis=1)
     p_alt = np.exp(alt_logits - l_alt[:, None])
     best_alt = p_alt.argmax(1)
     p_best_alt = p_alt.max(1)
+    if H == 1:
+        # Contamination detection is skipped: with a single bin "foreign" could only mean "a genome without a
+        # bin", and neither the contamination rate nor the calibration (which tests bins against each other)
+        # was built or measured for that question. Binned contigs are left untested (P(foreign) NaN like every
+        # untested contig, never flagged); the only alternative to their bin is "unknown", with probability 1.
+        b = given >= 0
+        testable = testable & ~b
+        best_alt[b], p_best_alt[b] = H, 1.0
 
     p_foreign = np.full(N, np.nan)
     t = testable & (given >= 0)
     eps, r = em_weight(Z[t, own[t]], l_alt[t], *eps_prior)
+    if H == 1:
+        eps = np.nan  # not estimated (params.json: null)
     p_foreign[t] = r
     contaminant = np.zeros(N, bool)
     contaminant[t] = r >= contamination_threshold

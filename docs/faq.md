@@ -41,6 +41,15 @@ in parallel by `--workers` processes. The pileup is read only once per set of in
 
 ## Results
 
+### Can I run it on a single bin (an isolate or one MAG)?
+
+Yes, but only contig inclusion is done. A contaminant is recognised by fitting other bins, or a genome without a
+bin, better than its own bin, and both the contamination rate and the calibration are built on several bins. With
+one bin in the contig-bin table EpiRefine says so in the log (`WARNING: ... one bin only`), keeps every binned
+contig untested (`p_contaminant` is `NaN`, `best_alternative` is `unknown`, `bin_contamination.tsv` is empty) and
+writes `"contamination_detection": "skipped: one bin only"` and `"contamination_rate": null` to `params.json`.
+Unbinned contigs are still tested for inclusion into the bin.
+
 ### Why did so many contigs get no decision?
 
 EpiRefine declines rather than guesses. A contig gets no decision (`low_coverage`, `too_short` or

@@ -1,9 +1,11 @@
 """End-to-end runs on the small synthetic community (conftest.py): provenance, the log, edge-case inputs."""
 import json
+import math
+import warnings
 import polars as pl
 import pytest
 
-from conftest import run_community
+from conftest import run_community, write_community
 from epirefine.io import InputError
 
 
@@ -55,3 +57,38 @@ def test_json_safe_writes_no_bare_nan_or_infinity(tmp_path):
     write_params(tmp_path / "p.json", {"a": float("inf"), "b": float("nan"), "c": np.array([1.0, -np.inf]),
                                        "d": np.float32(0.5), "e": (1, 2)})
     assert _strict_json(tmp_path / "p.json") == {"a": "inf", "b": None, "c": [1.0, "-inf"], "d": 0.5, "e": [1, 2]}
+
+
+def test_single_bin_skips_contamination_detection_with_a_warning(tmp_path, capsys):
+    paths = write_community(tmp_path / "data", single_bin=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)  # no "divide by zero" / "invalid value"
+        run_community(paths, tmp_path / "out")
+    log = capsys.readouterr().out
+    assert "WARNING: the contig-bin table names one bin only" in log and "contamination detection is skipped" in log
+    d = pl.read_csv(tmp_path / "out" / "contig_decisions.tsv", separator="\t")
+    binned = d.filter(pl.col("given_bin") == "g1")
+    assert binned.height == 3
+    # binned contigs are not tested: kept in their bin, no P(contaminant), the only alternative is no bin at all
+    assert binned["new_bin"].to_list() == ["g1"] * 3 and binned["p_contaminant"].is_nan().all()
+    assert binned["best_alternative"].to_list() == ["unknown"] * 3 and binned["p_best_alternative"].to_list() == [1.0] * 3
+    assert not d["p_best_alternative"].is_nan().any()
+    assert pl.read_csv(tmp_path / "out" / "bin_contamination.tsv", separator="\t").height == 0
+    p = _strict_json(tmp_path / "out" / "params.json")
+    assert p["contamination_rate"] is None and p["contamination_detection"] == "skipped: one bin only"
+    assert math.isfinite(p["p_unknown"])
+
+
+def test_refine_with_one_bin_gives_no_nan_alternatives():
+    import numpy as np
+    from epirefine.refine import refine
+    # two binned contigs (one fits its bin badly) and two unbinned ones (one fits the bin)
+    S = np.array([[0.], [-500.], [0.], [-80.]])
+    Su = np.array([-40., -50., -40., -40.])
+    given = np.array([0, 0, -1, -1])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        r = refine(S, Su, given, given >= 0, temperature=1.0)
+    assert not r.contaminant.any() and np.isnan(r.p_foreign).all() and np.isnan(r.eps)
+    assert r.best_alt.tolist()[:2] == [1, 1] and r.p_best_alt.tolist()[:2] == [1.0, 1.0]
+    assert not np.isnan(r.p_best_alt).any() and r.include_bin.tolist() == [-1, -1, 0, -1]

@@ -112,6 +112,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     targets = sorted(lengths)
     H = len(bins)
     _log(f"{len(lengths)} contigs, {H} bins, {len(host_contigs)} host contigs, {len(targets)} targets")
+    if H == 1:
+        _log("WARNING: the contig-bin table names one bin only: contamination detection is skipped (a contaminant is "
+             "recognised by fitting its own bin worse than other bins or a genome without a bin, which needs at "
+             "least two bins); binned contigs are kept untested, unbinned contigs are still tested for inclusion")
 
     # motif groups, from the records of a random sample of the sequence
     relevant = sorted(host_set | set(targets))
@@ -492,7 +496,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         ref.include_bin[drop] = -1
         _log(f"redundancy: {len(drop)} of {len(inc)} inclusions dropped (>= {max_redundancy:g} of their k-mers already in the bin)")
     p_unknown = ref.p_unknown
-    params.update(p_unknown=p_unknown, contamination_rate=ref.eps)
+    params.update(p_unknown=p_unknown, contamination_rate=ref.eps,
+                  contamination_detection="skipped: one bin only" if H == 1 else "done")
     P = posterior(sc.S, sc.Su, p_unknown, temperature)
     write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff, redundancy,
                   evidence=evidence, min_evidence=min_evidence, coverage=coverage, low_coverage=low_cov, too_short=short,
