@@ -172,21 +172,37 @@ def _group_term(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     am = a.max(1, keepdims=True)
     bm = b.max(1, keepdims=True)
     q = np.exp(a - am).astype(np.float64) @ np.exp(b - bm).T
-    return np.log(np.maximum(q, 1e-300)) + am + bm.T
+    np.log(np.maximum(q, 1e-300, out=q), out=q)  # in place: q is [U, H]
+    q += am
+    q += bm.T
+    return q
 
 
 def _n_threads():
     return min(16, os.cpu_count() or 1)
 
 
-def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None):
+SCORE_BYTES = 4 << 30  # memory summed_scores may use for the [U, H] work arrays of its threads
+
+
+def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None, max_bytes: int | None = None):
     """S[u, h] = sum_m log P(group m of u | h).
 
     Equal to group_scores(...).sum(-1) without the [U, H, M] tensor: groups are accumulated one at
-    a time, split over threads (numpy releases the GIL).
+    a time, in blocks of groups that run on threads (numpy releases the GIL).
     rel = (eta, Au[U, M]) also returns R[u, h] = sum_m log((1 - eta) P(group m | h) + eta exp(Au_um)):
     the score of an unbinned relative of bin h, whose level in each group is h's with prob 1 - eta
     and the community's otherwise.
+
+    Memory: a running block holds three [U, H] float64 arrays (its two sums and the current group's
+    term, updated in place), and only as many blocks run at once as fit in max_bytes (at least one);
+    a finished block is added to the result and freed. With every block on its own thread, each
+    keeping its sums to the end next to four temporaries, 581,835 contigs x 495 bins needed 74 GB
+    kept and up to 220 GB at peak; it now needs five arrays (11.5 GB), S and R included.
+    The additions are the same in the same order whatever max_bytes is (groups within a block, then
+    the blocks), and each group's matrix product is still one call over all units: scoring units in
+    batches instead would cap memory further, but the BLAS product gives a row different last bits
+    depending on the height of the batch (measured, up to 5e-16 relative), so results would change.
     """
     U, M, _ = Lp.shape
     H = log_prof.shape[0]
@@ -200,17 +216,28 @@ def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None
             A = _group_term(Lp[:, m, :], log_prof[:, m, :])
             acc += A
             if rel is not None:
-                accR += np.logaddexp(A + le1, le0[:, m, None])
+                A += le1
+                accR += np.logaddexp(A, le0[:, m, None], out=A)
         return acc, accR
 
     blocks = [b for b in np.array_split(np.arange(M), min(M, _n_threads())) if len(b)]
     if len(blocks) <= 1 or U * H < 10_000:
         S, R = work(range(M))
-    else:
-        with ThreadPoolExecutor(len(blocks)) as ex:
-            parts = list(ex.map(work, blocks))
-        S = sum(p[0] for p in parts)
-        R = sum(p[1] for p in parts) if rel is not None else None
+        return (S, R) if rel is not None else S
+    per_block = (3 if rel is not None else 2) * 8 * U * H
+    at_once = int(max(1, min(len(blocks), (SCORE_BYTES if max_bytes is None else max_bytes) // per_block)))
+    S = R = None
+    with ThreadPoolExecutor(at_once) as ex:
+        for i in range(0, len(blocks), at_once):
+            for acc, accR in ex.map(work, blocks[i:i + at_once]):
+                if S is None:  # 0 + first block, as sum() starts
+                    S = np.add(acc, 0, out=acc)
+                    R = np.add(accR, 0, out=accR) if rel is not None else None
+                else:
+                    S += acc
+                    if rel is not None:
+                        R += accR
+                del acc, accR
     return (S, R) if rel is not None else S
 
 

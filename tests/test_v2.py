@@ -316,3 +316,34 @@ def test_site_terms_blocks_are_bit_identical():
                          bb_logpmf(kf, nf, mu0, k0)[:, None] + grid.log1mx[None, :])
     for block in (1, 7, 256, 65_536):
         assert np.array_equal(site_terms(keys, det, grid, block=block), whole)
+
+
+def test_summed_scores_same_bits_whatever_the_memory_budget():
+    """Scores don't depend on how many group blocks run at once, and equal the block-wise sums they replace."""
+    from epirefine import model as md
+    rng = np.random.default_rng(11)
+    U, M, G, H = 400, 37, 64, 30
+    Lp = (-rng.gamma(2.0, 20.0, (U, M, G))).astype(np.float32)
+    prof = np.log(rng.dirichlet(np.ones(G) * 0.3, (H, M)))
+    Au = -rng.gamma(2.0, 5.0, (U, M))
+    eta = 0.05
+    # the sums as they were formed before: one accumulator per block of groups, then the blocks added up
+    A = md.group_scores(Lp, prof)                                   # [U, H, M]
+    RA = np.logaddexp(A + np.log1p(-eta), (np.log(eta) + Au)[:, None, :])
+    blocks = [b for b in np.array_split(np.arange(M), min(M, md._n_threads())) if len(b)]
+
+    def blockwise(X):
+        parts = []
+        for b in blocks:
+            acc = np.zeros((U, H))
+            for m in b:
+                acc += X[:, :, m]
+            parts.append(acc)
+        return sum(parts)
+    S0, R0 = blockwise(A), blockwise(RA)
+    per_block = 3 * 8 * U * H
+    for budget in (1, per_block, 3 * per_block, 7 * per_block, 1 << 40, None):
+        S, R = md.summed_scores(Lp, prof, rel=(eta, Au), max_bytes=budget)
+        assert np.array_equal(S, S0) and np.array_equal(R, R0), budget
+        assert np.array_equal(md.summed_scores(Lp, prof, max_bytes=budget), S0), budget
+    assert np.allclose(S0, A.sum(-1), rtol=1e-12, atol=0)
