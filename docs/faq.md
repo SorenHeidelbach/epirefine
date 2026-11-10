@@ -134,7 +134,11 @@ Yes. The same inputs and `--seed` (default 1) give identical outputs.
 
 ### Something went wrong
 
-Check the log first: each step reports what it read and fitted. Common causes:
+Check the log first (standard output): it starts with the version, the command line and the inputs, and each step
+reports what it read and fitted. Every line begins with the seconds since the start and the peak memory of the main
+process so far, e.g. `[  312.4s   2.1 GB]`; the last line also gives the peak memory of the largest worker process.
+Errors are written to the same stream (`ERROR: ...`, with the traceback for an unexpected failure) and in one line to
+standard error; the exit code is 2 for a problem with the inputs or options and 1 otherwise. Common causes:
 
 - **Few contigs have sites** (`n_sites` is 0): contig names in the pileup, the assembly and
   `contig_bin.tsv` must match exactly, and the pileup must be made against the same assembly. The inputs are

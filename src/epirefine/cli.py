@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import sys
+import traceback
 
 from .calibrate import DEFAULT_LENGTHS
 
@@ -65,7 +67,7 @@ def main(argv=None):
     r.add_argument("--frags-per-bin", type=int, default=30, help="cap on calibration fragments per bin and length")
     r.add_argument("--frag-budget", type=int, default=6000,
                    help="total calibration fragments; spread over bins and lengths (at most --frags-per-bin each)")
-    r.add_argument("--contam-eps", type=float, default=0.05, help="prior share of foreign chunks in a bin (0 = off)")
+    r.add_argument("--contam-eps", type=float, default=0.05, help="prior share of foreign chunks in a bin (0 = no such down-weighting and no regional model)")
     r.add_argument("--min-cov", type=int, default=1)
     r.add_argument("--chunk-size", type=int, default=50_000, help="binned contigs are split into chunks of this size")
     r.add_argument("--grid-size", type=int, default=64)
@@ -82,15 +84,31 @@ def main(argv=None):
 
     a = ap.parse_args(argv)
     if a.cmd == "run":
-        from .pipeline import run
-        run(a.assembly, a.pileup, a.contig_bin, a.motifs, a.out, min_cov=a.min_cov, chunk_size=a.chunk_size,
-            grid_size=a.grid_size, p_unknown=a.p_unknown, contamination_threshold=a.contamination_threshold,
-            include_threshold=a.include_threshold, min_methylome_difference=a.min_methylome_difference,
-            max_redundancy=a.max_redundancy, min_evidence=a.min_evidence, min_contig_coverage=a.min_contig_coverage, min_contig_length=a.min_contig_length, motif_noise_filter=not a.no_motif_noise_filter, group_weights=not a.no_group_weights, regional_model=not a.no_regional_model, regional_inclusion=a.regional_inclusion, include_threshold_unmethylated=a.include_threshold_unmethylated, do_calibrate=not a.no_calibrate, frag_lengths=a.frag_lengths,
-            frags_per_bin=a.frags_per_bin, frag_budget=a.frag_budget, tau=a.tau, temperature=a.temperature,
-            contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, min_jaccard=a.min_jaccard,
-            variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
-            cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed)
+        from . import pipeline
+        from .io import InputError
+        from .runinfo import log
+        try:
+            pipeline.run(
+                a.assembly, a.pileup, a.contig_bin, a.motifs, a.out, min_cov=a.min_cov, chunk_size=a.chunk_size,
+                grid_size=a.grid_size, p_unknown=a.p_unknown, contamination_threshold=a.contamination_threshold,
+                include_threshold=a.include_threshold, min_methylome_difference=a.min_methylome_difference,
+                max_redundancy=a.max_redundancy, min_evidence=a.min_evidence, min_contig_coverage=a.min_contig_coverage, min_contig_length=a.min_contig_length, motif_noise_filter=not a.no_motif_noise_filter, group_weights=not a.no_group_weights, regional_model=not a.no_regional_model, regional_inclusion=a.regional_inclusion, include_threshold_unmethylated=a.include_threshold_unmethylated, do_calibrate=not a.no_calibrate, frag_lengths=a.frag_lengths,
+                frags_per_bin=a.frags_per_bin, frag_budget=a.frag_budget, tau=a.tau, temperature=a.temperature,
+                contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, min_jaccard=a.min_jaccard,
+                variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
+                cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed)
+        except InputError as e:
+            # a problem with the inputs or options: the message says what; no traceback needed
+            log(f"ERROR: {e}")
+            print(f"epirefine: error: {e}", file=sys.stderr)
+            sys.exit(2)
+        except Exception as e:
+            # progress goes to standard output; the traceback follows it there, so that a captured log holds
+            # the error, and standard error gets one line
+            sys.stdout.flush()
+            log("ERROR: the run failed:\n" + traceback.format_exc().rstrip())
+            print(f"epirefine: error: {type(e).__name__}: {e} (traceback in the log on standard output)", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

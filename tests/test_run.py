@@ -1,6 +1,7 @@
 """End-to-end runs on the small synthetic community (conftest.py): provenance, the log, edge-case inputs."""
 import json
 import math
+import re
 import warnings
 import polars as pl
 import pytest
@@ -36,7 +37,7 @@ def test_params_json_is_valid_json_with_provenance(community, finished):
               "min_contig_coverage", "min_contig_length", "motif_noise_filter", "group_weights", "regional_model",
               "regional_inclusion", "do_calibrate", "frag_lengths", "frags_per_bin", "frag_budget", "allow_sharpening",
               "min_jaccard", "variation", "group_sample_bp", "p_unknown_given", "tau_given", "temperature_given",
-              "start_time", "command_line"):
+              "start_time", "command_line", "peak_rss_gb", "elapsed_s"):
         assert k in p, k
     assert p["p_unknown_given"] is None and isinstance(p["p_unknown"], float)
     for name in ("assembly", "pileup", "contig_bin", "motifs"):
@@ -92,3 +93,35 @@ def test_refine_with_one_bin_gives_no_nan_alternatives():
     assert not r.contaminant.any() and np.isnan(r.p_foreign).all() and np.isnan(r.eps)
     assert r.best_alt.tolist()[:2] == [1, 1] and r.p_best_alt.tolist()[:2] == [1.0, 1.0]
     assert not np.isnan(r.p_best_alt).any() and r.include_bin.tolist() == [-1, -1, 0, -1]
+
+
+def test_log_starts_before_any_work_and_reports_memory(community, tmp_path, capsys, monkeypatch):
+    import epirefine
+    from epirefine import io as pio
+    seen = {}
+    real = pio.fasta_lengths
+
+    def spy(path):
+        seen["log_before_assembly"] = capsys.readouterr().out
+        return real(path)
+    monkeypatch.setattr(pio, "fasta_lengths", spy)
+    run_community(community, tmp_path / "out")
+    first = seen["log_before_assembly"].splitlines()
+    assert f"epirefine {epirefine.__version__} starting" in first[0] and "command:" in first[0]
+    assert str(community["pileup"]) in first[1] and "workers=1" in first[1] and "seed=1" in first[1]
+    lines = capsys.readouterr().out.splitlines()
+    # every line: elapsed seconds and the peak memory so far
+    assert all(re.match(r"\[ *\d+\.\d+s +\d+\.\d+ GB\] ", ln) for ln in first + lines)
+    assert float(lines[0].split("s")[0].strip("[ ")) < 60  # the clock starts with the run, not with the import
+    assert "done" in lines[-1] and "peak memory" in lines[-1]
+
+
+def test_contam_eps_zero_runs_without_the_regional_model(community, tmp_path, capsys):
+    run_community(community, tmp_path / "out", contam_eps=0.0)
+    assert "--contam-eps 0: no robust bin profiles and no regional model" in capsys.readouterr().out
+    d = pl.read_csv(tmp_path / "out" / "contig_decisions.tsv", separator="\t")
+    assert d["p_regional_foreign"].is_nan().all()
+    with pytest.raises(InputError, match="--contam-eps"):
+        run_community(community, tmp_path / "out2", contam_eps=1.0)
+    with pytest.raises(InputError, match="--contam-eps"):
+        run_community(community, tmp_path / "out2", contam_eps=-0.1)

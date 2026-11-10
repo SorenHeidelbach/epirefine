@@ -71,7 +71,7 @@ estimates. Leave them unset unless you are testing the model.
 | `--frag-lengths` | `2000,5000,10000,20000,50000,100000` | Lengths of the calibration pieces in bp, comma-separated. |
 | `--frag-budget` | 6000 | Total number of calibration pieces, spread over bins and lengths. |
 | `--frags-per-bin` | 30 | At most this many pieces per bin and length. |
-| `--contam-eps` | 0.05 | Prior share of foreign pieces in a bin when building its fingerprint (0 = trust every piece). |
+| `--contam-eps` | 0.05 | Prior share of foreign pieces in a bin when building its fingerprint (0 = trust every piece; the regional model for long contigs is then off too, and the log says so; must be below 1). |
 | `--grid-size` | 64 | Points on the grid of methylated fractions. |
 
 ## Speed and caching

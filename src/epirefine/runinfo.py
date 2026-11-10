@@ -1,5 +1,5 @@
-"""Run bookkeeping: the checks made on the inputs before any heavy work, and params.json, the record of what
-a run was made with.
+"""Run bookkeeping: the log, the checks made on the inputs and options before any heavy work, and params.json,
+the record of what a run was made with.
 
 Nothing here touches the model; a run with valid inputs gives the same decisions with or without it.
 """
@@ -9,12 +9,44 @@ import json
 import math
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 
 from .io import InputError, _open
+
+
+try:  # not on Windows
+    import resource
+except ImportError:  # pragma: no cover
+    resource = None
+
+_T0 = [time.time()]
+
+
+def start_clock():
+    """Elapsed times in the log count from here (the start of a run), not from the import."""
+    _T0[0] = time.time()
+
+
+def elapsed() -> float:
+    return time.time() - _T0[0]
+
+
+def peak_rss_gb(children: bool = False) -> float:
+    """Peak resident memory of this process (or of its largest finished worker process), in GB."""
+    if resource is None:
+        return float("nan")
+    r = resource.getrusage(resource.RUSAGE_CHILDREN if children else resource.RUSAGE_SELF).ru_maxrss
+    return r / (1e9 if sys.platform == "darwin" else 1e6)  # bytes on macOS, kB on Linux
+
+
+def log(msg):
+    """One progress line on standard output: elapsed time, peak memory of the main process so far, message.
+    Errors are reported on the same stream by the command line (cli.main), so one captured stream holds both."""
+    print(f"[{elapsed():7.1f}s {peak_rss_gb():5.1f} GB] {msg}", file=sys.stdout, flush=True)
 
 
 def package_version() -> str:
@@ -26,6 +58,23 @@ def package_version() -> str:
 # checks before any heavy work
 
 INPUT_NAMES = {"assembly": "assembly", "pileup": "pileup", "contig_bin": "contig-bin table", "motifs_path": "motif table"}
+
+
+def begin(args: dict, log=log) -> None:
+    """Start of a run, before anything is read (args: the arguments of pipeline.run by name): start the clock,
+    write the first log lines (version, command line, inputs, workers, seed) and check the option ranges. A run
+    killed while the assembly is loaded then still leaves a log that says what it was."""
+    start_clock()
+    log(f"epirefine {package_version()} starting; command: {' '.join(sys.argv)}")
+    log("inputs: " + ", ".join(f"{k.removesuffix('_path')}={args[k]}" for k in INPUT_NAMES) + f"; out={args['out']}; "
+        f"workers={n_workers(args['workers'])}; seed={args['seed']}")
+    check_settings(args)
+    if args["contam_eps"] == 0:
+        log("--contam-eps 0: no robust bin profiles and no regional model (long contigs are judged as a whole)")
+
+
+def n_workers(workers) -> int:
+    return workers or min(16, os.cpu_count() or 1)
 
 
 def check_inputs(args: dict) -> None:
@@ -76,7 +125,7 @@ def check_pileup_head(path) -> str:
     return f[0]
 
 
-def match_contig_bin(cb: dict[str, str], lengths: dict[str, int], path, log=print) -> dict[str, str]:
+def match_contig_bin(cb: dict[str, str], lengths: dict[str, int], path, log=log) -> dict[str, str]:
     """Rows of the contig-bin table whose contig is in the assembly; stops when none is, says how many were
     dropped otherwise (they would vanish from the refined bins without a trace)."""
     kept = {c: b for c, b in cb.items() if c in lengths}
@@ -94,6 +143,27 @@ def match_contig_bin(cb: dict[str, str], lengths: dict[str, int], path, log=prin
             f"{len(set(cb.values()))} bins remain"
             + ("; fewer than half match: check that the table belongs to this assembly" if share < 0.5 else ""))
     return kept
+
+
+def check_settings(a: dict) -> None:
+    """Ranges of the numeric options; a value outside gives NaN or an obscure error much later."""
+    def need(ok, msg):
+        if not ok:
+            raise InputError(msg)
+    for k in ("contamination_threshold", "include_threshold", "include_threshold_unmethylated", "max_redundancy",
+              "min_methylome_difference", "min_jaccard"):
+        need(0 <= a[k] <= 1, f"--{k.replace('_', '-')} must be between 0 and 1, got {a[k]}")
+    need(a["p_unknown"] is None or 0 <= a["p_unknown"] <= 1, f"--p-unknown must be between 0 and 1, got {a['p_unknown']}")
+    # contam_eps is a prior share: at 1 (or above) its log-odds are infinite; 0 switches the robust profiles and
+    # the regional model off
+    need(0 <= a["contam_eps"] < 1, f"--contam-eps must be at least 0 (off) and below 1, got {a['contam_eps']}")
+    for k in ("chunk_size", "grid_size", "frags_per_bin", "frag_budget"):
+        need(a[k] >= 1, f"--{k.replace('_', '-')} must be at least 1, got {a[k]}")
+    need(a["min_cov"] >= 0, f"--min-cov must not be negative, got {a['min_cov']}")
+    need(a["workers"] is None or a["workers"] >= 0, f"--workers must not be negative, got {a['workers']}")
+    need(len(a["frag_lengths"]) > 0 and all(x > 0 for x in a["frag_lengths"]),
+         f"--frag-lengths needs positive lengths, got {a['frag_lengths']}")
+    need(a["temperature"] is None or a["temperature"] > 0, f"--temperature must be positive, got {a['temperature']}")
 
 
 def check_calibration_contigs(lengths_ok: list[int], n_binned: int, min_contig_coverage: float, frag_lengths) -> None:
@@ -164,10 +234,16 @@ def provenance(args: dict) -> dict:
         "inputs": {k: _input(v) for k, v in inputs.items()},
         "out": str(Path(args["out"]).resolve()),
         "cache_dir": str(Path(args["cache_dir"]).resolve()) if args["cache_dir"] else None,
-        "workers": args["workers"] or min(16, os.cpu_count() or 1),
+        "workers": n_workers(args["workers"]),
         "python": sys.version.split()[0],
     }
     # the options as given (p_unknown, tau and temperature under *_given: their plain keys hold the values
     # used, estimated or calibrated when not given)
     prov.update({given.get(k, k): v for k, v in args.items() if k not in skip})
     return prov
+
+
+def finish(params: dict) -> dict:
+    """Closing entries of params.json."""
+    return {**params, "finished": True, "elapsed_s": round(elapsed(), 1), "peak_rss_gb": round(peak_rss_gb(), 3),
+            "peak_rss_worker_gb": round(peak_rss_gb(children=True), 3)}

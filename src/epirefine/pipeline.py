@@ -31,8 +31,8 @@ from .sites import EncodedAssembly, extract_sites, unit_tables
 
 
 
-def _log(msg, t0=[time.time()]):
-    print(f"[{time.time() - t0[0]:7.1f}s] {msg}", flush=True)
+def _log(msg):
+    runinfo.log(msg)  # elapsed time since the start of the run, peak memory so far, message
 
 
 def _write(df: pl.DataFrame, path, precision=4):
@@ -83,6 +83,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
     args = dict(locals())  # first statement: the options as given
+    runinfo.begin(args, _log)  # first log lines (version, command, inputs) and option ranges, before any work
     # the inputs are checked before anything is read or written: a missing file or a wrong table must not
     # cost the minutes (hours on a large sample) it takes to reach the place where it is used
     runinfo.check_inputs(args)
@@ -369,7 +370,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # (chunk-level evidence from the robust host-profile fit; flags on mixed contigs are withdrawn and
     # their foreign segments reported)
     regional = None
-    if regional_model:
+    if regional_model and contam_eps > 0:  # at 0 the prior log-odds of a foreign chunk are infinite
         llr_chunk = (np.log(np.clip(p_foreign, 1e-12, 1 - 1e-12)) - np.log(np.clip(1 - p_foreign, 1e-12, None))
                      - np.log(contam_eps / (1 - contam_eps)))
         order = np.lexsort((chunk_no, chunk_contig))
@@ -526,6 +527,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         "bin": np.repeat(bins + ["_population_prior_"], n_groups), "group": np.tile(np.arange(n_groups), nb),
         "motifs": np.tile(group_label, nb), "phi_mean": mean.ravel(), "phi_lo95": lo.ravel(), "phi_hi95": hi.ravel(),
         "p_phi_gt_0.5": pp.ravel()}), out / "host_profiles.tsv")
-    runinfo.write_params(out / "params.json", {**params, "finished": True})
-    _log(f"done -> {out}")
+    runinfo.write_params(out / "params.json", runinfo.finish(params))
+    _log(f"done -> {out}; peak memory {runinfo.peak_rss_gb():.2f} GB (main process), "
+         f"{runinfo.peak_rss_gb(children=True):.2f} GB (largest worker process)")
     return out
