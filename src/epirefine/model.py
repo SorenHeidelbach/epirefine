@@ -297,10 +297,13 @@ def posterior(S_hosts: np.ndarray, S_unknown: np.ndarray, p_unknown: float, temp
     """Posterior over [bins..., unknown]. host_mask[u, h] = False removes bin h as a candidate for unit u."""
     U, H = S_hosts.shape
     prior = np.r_[np.full(H, np.log((1 - p_unknown) / H)), np.log(p_unknown)]
-    logits = np.concatenate([S_hosts, S_unknown[:, None]], 1) / temperature + prior[None, :]
+    logits = np.concatenate([S_hosts, S_unknown[:, None]], 1)  # one [U, H + 1] array, updated in place
+    logits /= temperature
+    logits += prior[None, :]
     if host_mask is not None:
         logits[:, :H] = np.where(host_mask, logits[:, :H], -np.inf)
-    return np.exp(logits - logsumexp(logits, axis=1, keepdims=True))
+    logits -= logsumexp(logits, axis=1, keepdims=True)
+    return np.exp(logits, out=logits)
 
 
 def credible_set(post_row: np.ndarray, labels: list[str], level: float = 0.95) -> list[str]:

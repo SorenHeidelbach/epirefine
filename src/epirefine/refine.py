@@ -100,12 +100,20 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
 
     # alternatives to the contig's own bin: other bins (uniform) and unknown
     own = np.where(given >= 0, given, 0)
-    Zx = Z.copy()
-    Zx[np.arange(N)[given >= 0], own[given >= 0]] = -np.inf  # exclude the own bin
+    # built in one [N, H + 1] array and turned into p_alt in place (same operations in the same order as
+    # concatenate([Zx + lpb - log(n_alt), Zu + lpu]) and exp(alt_logits - l_alt), which held four more
+    # arrays of that size: 2.3 GB each for 581,835 contigs x 495 bins)
     n_alt = np.where(given >= 0, H - 1, H)
-    alt_logits = np.concatenate([Zx + lpb - np.log(n_alt)[:, None], (Zu + lpu)[:, None]], axis=1)
+    alt_logits = np.empty((N, H + 1))
+    alt_logits[:, :H] = Z
+    alt_logits[np.arange(N)[given >= 0], own[given >= 0]] = -np.inf  # exclude the own bin
+    alt_logits[:, :H] += lpb
+    alt_logits[:, :H] -= np.log(n_alt)[:, None]
+    alt_logits[:, H] = Zu + lpu
     l_alt = logsumexp(alt_logits, axis=1)
-    p_alt = np.exp(alt_logits - l_alt[:, None])
+    alt_logits -= l_alt[:, None]
+    p_alt = np.exp(alt_logits, out=alt_logits)
+    del alt_logits
     best_alt = p_alt.argmax(1)
     p_best_alt = p_alt.max(1)
 
