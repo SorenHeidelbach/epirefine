@@ -80,9 +80,10 @@ def main(argv=None):
                    help="a motif and its reverse complement in the motif list: one two-strand site per occurrence, paired "
                         "by sequence (sequence), paired only when each has a single modified position (position), or "
                         "kept as two motifs with single-strand sites (separate)")
-    r.add_argument("--strand-sites", choices=["sum", "split"], default="sum",
+    r.add_argument("--strand-sites", choices=["sum", "split", "auto"], default="sum",
                    help="reads of the two strands at one occurrence of a palindrome or complement pair: summed into one "
-                        "site (sum) or kept as one site per strand (split)")
+                        "site (sum), kept as one site per strand (split), or summed unless the strands can differ: "
+                        "complement pairs, and occurrences where one strand is also a site of another motif group (auto)")
     r.add_argument("--group-sample-mb", type=float, default=50,
                    help="Mb of sequence sampled to measure motif overlap for grouping")
     r.add_argument("--workers", type=int, help="processes for the pileup and table passes (default: CPUs, max 16)")

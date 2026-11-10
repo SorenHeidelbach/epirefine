@@ -198,3 +198,34 @@ def test_can_share_site_reads_both_motifs_on_the_modified_strand():
     assert not can_share_site(Motif("GAANNNNNNTGC", 2, "a"), Motif("GCANNNNNNTTC", 2, "a"))
     # known limit: two Type I motifs with one half-site in common can share a site (GAANNNNNNTGCTG)
     assert can_share_site(Motif("GAANNNNNNTGC", 2, "a"), Motif("GAANNNNNNNNCTG", 2, "a"))
+
+
+def test_auto_splits_strands_only_where_they_can_differ(tmp_path):
+    #      0123456789012345678901234567890123456
+    seq = "TTATCGATCTTTTTTGGATCAATTTTTGGATGTTTT"
+    assert seq[2:8] == "ATCGAT" and seq[5:9] == "GATC" and seq[16:20] == "GATC" and seq[27:32] == "GGATG"
+    contigs = {"c": seq}
+    motifs = [Motif("GATC", 1, "a"), Motif("ATCGAT", 4, "a"), Motif("GGATG", 2, "a"), Motif("CATCC", 1, "a")]
+    group_of = [0, 1, 2, 2]
+    rank = [8, 2, 1, 1]
+    asm = EncodedAssembly.write(contigs, tmp_path / "asm")
+    # a Dam genome without the ATCGAT enzyme: every GATC adenine is methylated, the ATCGAT adenine outside GATC is not
+    rows = [("c", 3, "a", "-", 10, 0),   # ATCGAT, - strand: not a GATC position
+            ("c", 6, "a", "+", 10, 10),  # ATCGAT, + strand: also the GATC adenine of ATCGATC
+            ("c", 7, "a", "-", 10, 10),  # that GATC, - strand
+            ("c", 17, "a", "+", 9, 9), ("c", 18, "a", "-", 11, 11),  # a plain GATC
+            ("c", 29, "a", "+", 6, 6), ("c", 30, "a", "-", 4, 0)]    # GGATG methylated, CATCC not
+    pile = tmp_path / "pileup.bed"
+    pile.write_text("".join(_pileup_line(*r) for r in rows))
+
+    def run(mode):
+        parts = extract_sites(asm, pile, motifs, group_of, rank, tmp_path / mode, workers=1, log=lambda *_: None,
+                              strand_sites=mode)
+        return pl.concat([pl.read_parquet(p) for p in parts]).sort("pos").select("group", "pos", "n", "k").rows()
+
+    # summed: the ATCGAT occurrence and the GGATG/CATCC occurrence read one half
+    assert run("sum") == [(1, 3, 20, 10), (0, 7, 10, 10), (0, 17, 20, 20), (2, 29, 10, 6)]
+    # auto: those two occurrences are one site per strand; the plain GATC stays one two-strand site
+    assert run("auto") == [(1, 3, 10, 0), (1, 6, 10, 10), (0, 7, 10, 10), (0, 17, 20, 20), (2, 29, 6, 6), (2, 30, 4, 0)]
+    assert run("split") == [(1, 3, 10, 0), (1, 6, 10, 10), (0, 7, 10, 10), (0, 17, 9, 9), (0, 18, 11, 11),
+                            (2, 29, 6, 6), (2, 30, 4, 0)]

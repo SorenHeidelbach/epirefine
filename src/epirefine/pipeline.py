@@ -106,8 +106,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     motifs = pio.read_motifs(motifs_path)
     relevant = sorted(host_set | set(targets))
     sample = pio.fasta_subset(assembly, _sample_names(lengths, relevant, group_sample_bp, rng))
-    if strand_sites not in ("sum", "split"):
-        raise ValueError(f"strand_sites must be 'sum' or 'split', not {strand_sites!r}")
+    if strand_sites not in ("sum", "split", "auto"):
+        raise ValueError(f"strand_sites must be 'sum', 'split' or 'auto', not {strand_sites!r}")
     records = build_records(sample, motifs, pairing=complement_pairs)
     group_of = group_motifs(records, motifs, min_jaccard, pairing=complement_pairs)
     rank_d = dict(records.group_by("motif").len().iter_rows())

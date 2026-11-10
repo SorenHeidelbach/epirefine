@@ -338,7 +338,15 @@ class _Worker:
         self.asm = EncodedAssembly(cfg["asm_dir"])
         self.motifs = [Motif(*m) for m in cfg["motifs"]]
         self.matcher = MotifMatcher(self.motifs, cfg.get("pairing", "sequence"))
-        self.split = cfg.get("strand_sites", "sum") == "split"  # every record its own site (strands not summed)
+        # strand_sites: "sum" = one site per occurrence of a palindrome or complement pair (strands summed);
+        # "split" = every record its own site; "auto" = summed unless the strands can differ for a known reason:
+        # the occurrence belongs to a complement pair (two motifs, possibly two enzymes), or its two records are
+        # matched by different numbers of groups (one strand is also another motif's site, e.g. the A of ATCGATC
+        # that Dam methylates on one strand only)
+        self.strand_sites = cfg.get("strand_sites", "sum")
+        canon = self.matcher.canon
+        paired = np.bincount(canon, minlength=len(self.motifs)) > 1
+        self.pair = paired[canon]  # motif is half of a complement pair
         self.group = np.array(cfg["group_of"], np.int32)
         self.rank = np.array(cfg["motif_rank"], np.int64)
         # order of the groups for shared positions: summed record counts, or the given ranks (motifs.specificity_ranks)
@@ -363,16 +371,22 @@ class _Worker:
         mi = rec["motif"]
         key = (cidx.astype(np.int64) << 36) | (pos << 3) | (rec["strand"].astype(np.int64) << 2) | self.modc[mi]
         g = self.group[mi]
-        if self.split:  # the site is the record itself: position, strand and modification type
-            site = (cidx.astype(np.int64) << 50) | (key & ((1 << 36) - 1))
-        else:  # the occurrence of the canonical motif: both strands of a palindrome or of a complement pair
-            site = (cidx.astype(np.int64) << 50) | (rec["occ_motif"].astype(np.int64) << 36) | occ
+        # a site is the occurrence of the canonical motif (both strands of a palindrome or of a complement pair), or
+        # the record itself (position, strand, modification type; bit 62 keeps the two kinds of id apart)
+        occ_site = (cidx.astype(np.int64) << 50) | (rec["occ_motif"].astype(np.int64) << 36) | occ
+        rec_site = (1 << 62) | (cidx.astype(np.int64) << 50) | (key & ((1 << 36) - 1))
         df = pl.DataFrame({"key": key, "group": g, "gsize": self.gsize[g], "rank": self.rank[mi], "motif": mi,
-                           "site": site})
+                           "site": rec_site if self.strand_sites == "split" else occ_site})
+        if self.strand_sites == "auto":
+            df = df.with_columns(pl.Series("rec_site", rec_site), pl.Series("pair", self.pair[mi]),
+                                 pl.col("group").n_unique().over("key").alias("n_groups"))
         # same rules as motifs.assign_sites: most specific group, then its most general motif
-        return (df.sort(["key", "gsize", "group", "rank", "motif"], descending=[False, False, False, True, False])
-                .unique(subset="key", keep="first", maintain_order=True)
-                .select("key", "group", "site"))
+        df = (df.sort(["key", "gsize", "group", "rank", "motif"], descending=[False, False, False, True, False])
+              .unique(subset="key", keep="first", maintain_order=True))
+        if self.strand_sites == "auto":
+            uneven = pl.col("n_groups").min().over("site") != pl.col("n_groups").max().over("site")
+            df = df.with_columns(pl.when(pl.col("pair") | uneven).then(pl.col("rec_site")).otherwise(pl.col("site")).alias("site"))
+        return df.select("key", "group", "site")
 
     def process(self, pile: pl.DataFrame, seen: set) -> pl.DataFrame | None:
         names = pile["contig"].unique(maintain_order=True).to_list()
@@ -403,7 +417,7 @@ class _Worker:
             return None
         agg = hit.group_by("site").agg(pl.col("group").first(), (pl.col("key") // 8).min().alias("pk"),
                                        pl.col("n_valid").sum().alias("n"), pl.col("n_mod").sum().alias("k"))
-        cid = np.array(cids, np.int32)[(agg["site"].to_numpy() >> 50)]
+        cid = np.array(cids, np.int32)[(agg["site"].to_numpy() >> 50) & 0xFFF]
         return pl.DataFrame({"contig": cid, "group": agg["group"], "pos": agg["pk"].to_numpy() & ((1 << 33) - 1),
                              "n": agg["n"], "k": agg["k"]}).cast(SITE_SCHEMA)
 
