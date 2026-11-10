@@ -82,7 +82,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1,
-        shared_sites="sample"):
+        shared_sites="sample", complement_pairs="sequence", strand_sites="sum"):
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
@@ -106,8 +106,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     motifs = pio.read_motifs(motifs_path)
     relevant = sorted(host_set | set(targets))
     sample = pio.fasta_subset(assembly, _sample_names(lengths, relevant, group_sample_bp, rng))
-    records = build_records(sample, motifs)
-    group_of = group_motifs(records, motifs, min_jaccard)
+    if strand_sites not in ("sum", "split"):
+        raise ValueError(f"strand_sites must be 'sum' or 'split', not {strand_sites!r}")
+    records = build_records(sample, motifs, pairing=complement_pairs)
+    group_of = group_motifs(records, motifs, min_jaccard, pairing=complement_pairs)
     rank_d = dict(records.group_by("motif").len().iter_rows())
     motif_rank = [int(rank_d.get(i, 0)) for i in range(len(motifs))]
     del records
@@ -133,6 +135,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                     motif_rank=motif_rank, relevant=len(relevant), shared_sites="most_specific_group")
     if group_rank is not None:  # (keys are added only for non-default rules, so existing caches stay valid)
         man.update(shared_sites="motif_frequency", group_rank=group_rank)
+    if complement_pairs != "sequence":
+        man.update(complement_pairs=complement_pairs)
+    if strand_sites != "sum":
+        man.update(strand_sites=strand_sites)
     if cached and cached.get("inputs") == man:
         parts = [str(cache / "sites" / Path(f).name) for f in cached["parts"]]  # wherever the cache now lives
         asm = EncodedAssembly(cache / "asm")
@@ -143,7 +149,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
             f.unlink()
         wanted = None if len(relevant) == len(lengths) else {asm.index[c] for c in relevant}
         parts = extract_sites(asm, pileup, motifs, group_of, motif_rank, cache / "sites", wanted=wanted,
-                              workers=workers, log=_log, group_rank=group_rank)
+                              workers=workers, log=_log, group_rank=group_rank, pairing=complement_pairs,
+                              strand_sites=strand_sites)
         man_path.write_text(json.dumps({"inputs": man, "parts": parts}))
     del sample
     cid = asm.index

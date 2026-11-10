@@ -3,8 +3,8 @@ implementation (motifs.assign_sites) and against hand-worked pileups."""
 import numpy as np
 import polars as pl
 
-from epirefine.motifs import (Motif, assign_sites, build_records, expected_frequency, group_motifs, revcomp,
-                              specificity_ranks)
+from epirefine.motifs import (Motif, MotifMatcher, assign_sites, build_records, can_share_site, canonical_index,
+                              encode, expected_frequency, group_motifs, revcomp, specificity_ranks)
 from epirefine.sites import MOD_CODE, EncodedAssembly, _Worker, extract_sites
 
 MOTIFS = [Motif("GATC", 1, "a"), Motif("RGATCY", 2, "a"), Motif("CCWGG", 1, "m"), Motif("CCWGG", 1, "21839"),
@@ -134,3 +134,67 @@ def test_extract_sites_hand_worked(tmp_path):
         (0, 1, 12, 10, 6),   # GGATG/CATCC merged: a hemimethylated occurrence reads 0.6
         (0, 2, 23, 12, 11),  # the Type I pair
         (1, 0, 5, 3, 1)]
+
+    def run(tag, **kw):
+        recs = build_records(contigs, motifs, pairing=kw.get("pairing", "sequence"))
+        g = group_motifs(recs, motifs, pairing=kw.get("pairing", "sequence"))
+        parts = extract_sites(asm, pile, motifs, g, rank, tmp_path / tag, workers=1, log=lambda *_: None, **kw)
+        return g, pl.concat([pl.read_parquet(p) for p in parts]).sort("contig", "pos").select("contig", "group", "pos", "n", "k").rows()
+
+    # one site per strand, groups unchanged: the hemimethylated occurrence is one methylated and one unmethylated site
+    g, rows_split = run("split", strand_sites="split")
+    assert g == [0, 1, 1, 2, 2]
+    assert rows_split == [(0, 0, 3, 10, 9), (0, 0, 4, 8, 8), (0, 1, 12, 6, 6), (0, 1, 13, 4, 0),
+                          (0, 2, 23, 5, 5), (0, 2, 31, 7, 6), (1, 0, 5, 3, 1)]
+    # complement motifs as motifs of their own: single-strand sites in separate groups; the palindrome still sums
+    g, rows_sep = run("separate", pairing="separate")
+    assert g == [0, 1, 2, 3, 4]
+    assert rows_sep == [(0, 0, 3, 18, 17), (0, 1, 12, 6, 6), (0, 2, 13, 4, 0), (0, 3, 23, 5, 5), (0, 4, 31, 7, 6),
+                        (1, 0, 5, 3, 1)]
+    # unambiguous pairs: "position" pairs exactly as "sequence" does
+    assert run("position", pairing="position") == ([0, 1, 1, 2, 2], got.select("contig", "group", "pos", "n", "k").rows())
+
+
+def test_two_modification_types_on_one_cytosine_stay_two_sites_when_split(tmp_path):
+    contigs = {"c": "TTCCAGGTT"}
+    motifs = [Motif("CCWGG", 1, "m"), Motif("CCWGG", 1, "21839")]
+    asm = EncodedAssembly.write(contigs, tmp_path / "asm")
+    pile = tmp_path / "pileup.bed"
+    pile.write_text("".join(_pileup_line(*r) for r in [("c", 3, "m", "+", 10, 9), ("c", 3, "21839", "+", 10, 1),
+                                                        ("c", 5, "m", "-", 8, 7), ("c", 5, "21839", "-", 8, 0)]))
+    for mode, want in (("sum", [(0, 3, 18, 16), (1, 3, 18, 1)]),
+                       ("split", [(0, 3, 10, 9), (0, 5, 8, 7), (1, 3, 10, 1), (1, 5, 8, 0)])):
+        parts = extract_sites(asm, pile, motifs, [0, 1], [1, 1], tmp_path / mode, workers=1, log=lambda *_: None,
+                              strand_sites=mode)
+        got = pl.concat([pl.read_parquet(p) for p in parts]).sort("group", "pos")
+        assert got.select("group", "pos", "n", "k").rows() == want
+
+
+def test_complement_pairing_with_two_modified_positions():
+    a2, a1, c2 = Motif("GAANNNNNNTGC", 2, "a"), Motif("GAANNNNNNTGC", 1, "a"), Motif("GCANNNNNNTTC", 2, "a")
+    # by sequence: the outcome depends on the row order, and one order sums two adenines of one strand
+    assert canonical_index([c2, a2, a1]) == [0, 0, 0]
+    assert canonical_index([a2, a1, c2]) == [0, 1, 1]
+    seq = "TTGAACCCCCCTGCTT"
+    rec = MotifMatcher([c2, a2, a1]).find(encode(seq))
+    assert len(set(zip(rec["occ_motif"].tolist(), rec["occ"].tolist()))) == 1  # A at 3, A at 4 and the complement A
+    # by position: the ambiguous pair is not merged, in any order; three sites
+    for order in ([c2, a2, a1], [a2, a1, c2], [a1, c2, a2]):
+        assert canonical_index(order, "position") == [0, 1, 2]
+        rec = MotifMatcher(order, "position").find(encode(seq))
+        assert len(set(zip(rec["occ_motif"].tolist(), rec["occ"].tolist()))) == 3
+    # unambiguous pairs and palindromes are as before; a palindrome with two positions keeps two site sets
+    ms = [Motif("GAGNNNNNGTCA", 1, "a"), Motif("TGACNNNNNCTC", 2, "a"), Motif("CCWGG", 0, "m"), Motif("CCWGG", 1, "m"),
+          Motif("GATC", 1, "a")]
+    assert canonical_index(ms, "position") == canonical_index(ms) == [0, 0, 2, 3, 4]
+    assert canonical_index(ms, "separate") == [0, 1, 2, 3, 4]
+
+
+def test_can_share_site_reads_both_motifs_on_the_modified_strand():
+    assert can_share_site(Motif("GCWGC", 1, "m"), Motif("CGCWGCR", 2, "m"))
+    assert not can_share_site(Motif("GATC", 1, "a"), Motif("CCWGG", 1, "m"))
+    assert not can_share_site(Motif("GATC", 1, "a"), Motif("GTAC", 2, "a"))
+    # a motif and its reverse complement modify different bases: never one site
+    assert not can_share_site(Motif("GAANNNNNNTGC", 2, "a"), Motif("GCANNNNNNTTC", 2, "a"))
+    # known limit: two Type I motifs with one half-site in common can share a site (GAANNNNNNTGCTG)
+    assert can_share_site(Motif("GAANNNNNNTGC", 2, "a"), Motif("GAANNNNNNNNCTG", 2, "a"))

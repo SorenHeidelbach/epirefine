@@ -337,7 +337,8 @@ class _Worker:
     def __init__(self, cfg: dict):
         self.asm = EncodedAssembly(cfg["asm_dir"])
         self.motifs = [Motif(*m) for m in cfg["motifs"]]
-        self.matcher = MotifMatcher(self.motifs)
+        self.matcher = MotifMatcher(self.motifs, cfg.get("pairing", "sequence"))
+        self.split = cfg.get("strand_sites", "sum") == "split"  # every record its own site (strands not summed)
         self.group = np.array(cfg["group_of"], np.int32)
         self.rank = np.array(cfg["motif_rank"], np.int64)
         # order of the groups for shared positions: summed record counts, or the given ranks (motifs.specificity_ranks)
@@ -362,8 +363,12 @@ class _Worker:
         mi = rec["motif"]
         key = (cidx.astype(np.int64) << 36) | (pos << 3) | (rec["strand"].astype(np.int64) << 2) | self.modc[mi]
         g = self.group[mi]
+        if self.split:  # the site is the record itself: position, strand and modification type
+            site = (cidx.astype(np.int64) << 50) | (key & ((1 << 36) - 1))
+        else:  # the occurrence of the canonical motif: both strands of a palindrome or of a complement pair
+            site = (cidx.astype(np.int64) << 50) | (rec["occ_motif"].astype(np.int64) << 36) | occ
         df = pl.DataFrame({"key": key, "group": g, "gsize": self.gsize[g], "rank": self.rank[mi], "motif": mi,
-                           "site": (cidx.astype(np.int64) << 50) | (rec["occ_motif"].astype(np.int64) << 36) | occ})
+                           "site": site})
         # same rules as motifs.assign_sites: most specific group, then its most general motif
         return (df.sort(["key", "gsize", "group", "rank", "motif"], descending=[False, False, False, True, False])
                 .unique(subset="key", keep="first", maintain_order=True)
@@ -445,7 +450,8 @@ def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, bloc
 
 def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: list[int], motif_rank,
                   out_dir, wanted: set[int] | None = None, workers: int | None = None,
-                  block: int = 128 << 20, flush_rows: int = 20_000_000, log=print, group_rank=None) -> list[str]:
+                  block: int = 128 << 20, flush_rows: int = 20_000_000, log=print, group_rank=None,
+                  pairing: str = "sequence", strand_sites: str = "sum") -> list[str]:
     """Run the pileup pass. Returns the Parquet part files (each holds whole contigs)."""
     out = Path(out_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -453,7 +459,8 @@ def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: l
     ranges = split_pileup(pileup, workers * 4)
     cfg = {"asm_dir": asm.directory, "motifs": [(m.seq, m.mod_pos, m.mod_type) for m in motifs],
            "group_of": list(group_of), "motif_rank": list(motif_rank), "wanted": wanted,
-           "group_rank": list(group_rank) if group_rank is not None else None}
+           "group_rank": list(group_rank) if group_rank is not None else None,
+           "pairing": pairing, "strand_sites": strand_sites}
     log(f"  pileup pass: {len(ranges)} byte ranges on {min(workers, len(ranges))} workers")
     env_before = os.environ.get("POLARS_MAX_THREADS")
     os.environ["POLARS_MAX_THREADS"] = "1"

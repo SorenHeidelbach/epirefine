@@ -75,9 +75,9 @@ class MotifMatcher:
     non-N offsets share a shape; degenerate bases are expanded into concrete variants.
     """
 
-    def __init__(self, motifs: list[Motif]):
+    def __init__(self, motifs: list[Motif], pairing: str = "sequence"):
         self.motifs = motifs
-        canon = canonical_index(motifs)
+        canon = canonical_index(motifs, pairing)
         self.canon = np.array(canon, np.int32)
         self.flip = np.array([canon[i] != i for i in range(len(motifs))])
         self.mod_pos = np.array([m.mod_pos for m in motifs], np.int64)
@@ -198,19 +198,51 @@ def find_records(seq: str, motif: Motif) -> tuple[np.ndarray, np.ndarray, np.nda
     return rec["pos"], rec["strand"], rec["occ"]
 
 
-def canonical_index(motifs: list[Motif]) -> list[int]:
-    """Index of the canonical motif for each motif: a motif and its reverse complement share one."""
-    by_key = {(m.seq, m.mod_type): i for i, m in enumerate(motifs)}
+PAIRINGS = ("sequence", "position", "separate")
+
+
+def canonical_index(motifs: list[Motif], pairing: str = "sequence") -> list[int]:
+    """Index of the canonical motif for each motif: a motif and its reverse complement share one, so that
+    their records at one occurrence are one two-strand site (a Type I motif and its complement: one enzyme,
+    both strands).
+
+    pairing:
+      "sequence"  a motif is paired with the last listed motif that has the reverse-complement sequence and the
+                  same modification type, whatever their modified positions. If a sequence is listed with two
+                  positions (GAAN6TGC a-1 and a-2) next to its complement, which of them pair, and whether all three
+                  collapse into one site (two adenines of one strand summed), depends on the row order.
+      "position"  a motif and its complement are paired only when each is listed with exactly one modified position
+                  for that modification type; otherwise every entry keeps its own sites. Independent of row order,
+                  and two positions of one strand are never summed.
+      "separate"  no pairing: a motif and its complement are different motifs with their own single-strand sites
+                  (and their own groups), so a genome that methylates one strand only (GGATG without CATCC) reads
+                  on / off instead of 0.5 at merged sites.
+    """
+    if pairing not in PAIRINGS:
+        raise ValueError(f"pairing must be one of {PAIRINGS}, not {pairing!r}")
+    if pairing == "separate":
+        return list(range(len(motifs)))
+    if pairing == "sequence":
+        by_key = {(m.seq, m.mod_type): i for i, m in enumerate(motifs)}
+        out = []
+        for i, m in enumerate(motifs):
+            j = by_key.get((revcomp(m.seq), m.mod_type), i)
+            out.append(min(i, j))
+        return out
+    by_seq: dict[tuple, list[int]] = {}
+    for i, m in enumerate(motifs):
+        by_seq.setdefault((m.seq, m.mod_type), []).append(i)
     out = []
     for i, m in enumerate(motifs):
-        j = by_key.get((revcomp(m.seq), m.mod_type), i)
-        out.append(min(i, j))
+        own, comp = by_seq[(m.seq, m.mod_type)], by_seq.get((revcomp(m.seq), m.mod_type), [])
+        out.append(min(i, comp[0]) if not m.is_palindrome and len(own) == 1 and len(comp) == 1 else i)
     return out
 
 
-def build_records(contigs: dict[str, str], motifs: list[Motif], matcher: MotifMatcher | None = None) -> pl.DataFrame:
+def build_records(contigs: dict[str, str], motifs: list[Motif], matcher: MotifMatcher | None = None,
+                  pairing: str = "sequence") -> pl.DataFrame:
     """All motif records in the assembly, before grouping (one row per motif x record)."""
-    matcher = matcher or MotifMatcher(motifs)
+    matcher = matcher or MotifMatcher(motifs, pairing)
     mod_types = pl.Series([m.mod_type for m in motifs])
     frames = []
     for names, cidx, rec in matcher.find_many(contigs):
@@ -225,7 +257,8 @@ def build_records(contigs: dict[str, str], motifs: list[Motif], matcher: MotifMa
     return pl.concat(frames)
 
 
-def group_motifs(records: pl.DataFrame, motifs: list[Motif], min_jaccard: float = 0.9) -> list[int]:
+def group_motifs(records: pl.DataFrame, motifs: list[Motif], min_jaccard: float = 0.9,
+                 pairing: str = "sequence") -> list[int]:
     """Union-find over motifs: same mod type and (reverse-complement pair or near-identical site sets).
 
     Motifs are merged only when they describe the same sites (Jaccard >= min_jaccard), not when one
@@ -246,7 +279,7 @@ def group_motifs(records: pl.DataFrame, motifs: list[Motif], min_jaccard: float 
     def union(i, j):
         parent[find(i)] = find(j)
 
-    canon = canonical_index(motifs)
+    canon = canonical_index(motifs, pairing)
     for i, c in enumerate(canon):
         union(i, c)
 
@@ -373,18 +406,18 @@ def _bases(c: str) -> set:
 
 def can_share_site(a: Motif, b: Motif) -> bool:
     """True when a and b (same modification type) can both match one modified base: aligned on their
-    modified positions, every overlapping position has a base both allow (b on either strand). Such
-    motifs can be one methyltransferase's sites (GCWGC, CGCWGCR, YGGCAGCA); unrelated motifs of one
-    genome (GATC, CCWGG) cannot."""
-    if a.mod_type != b.mod_type:
+    modified positions, every overlapping position has a base both allow. Such motifs can be one
+    methyltransferase's sites (GCWGC, CGCWGCR, YGGCAGCA); unrelated motifs of one genome (GATC, CCWGG) cannot.
+
+    Both motifs are read on the strand of the modified base: a modified base is one (position, strand), so b on
+    the other strand can never share it (its base there is the complement, T or G). Positions of one motif beyond
+    the end of the other, or on its N positions, are unconstrained, so two Type I motifs with one half-site in
+    common (GAAN6TGC, GAAN8CTG) can share a site too (1/16 of their sites); the co-methylation test of
+    redundancy_weights, not this function, has to tell such enzymes apart."""
+    if a.mod_type != b.mod_type or not (_bases(b.seq[b.mod_pos]) & _bases(a.seq[a.mod_pos])):
         return False
-    for sb, pb in ((b.seq, b.mod_pos), (revcomp(b.seq), len(b.seq) - 1 - b.mod_pos)):
-        if sb[pb] != a.seq[a.mod_pos] and not (_bases(sb[pb]) & _bases(a.seq[a.mod_pos])):
-            continue
-        off = a.mod_pos - pb
-        if all(not (0 <= i + off < len(a.seq)) or (_bases(a.seq[i + off]) & _bases(c)) for i, c in enumerate(sb)):
-            return True
-    return False
+    off = a.mod_pos - b.mod_pos
+    return all(not (0 <= i + off < len(a.seq)) or bool(_bases(a.seq[i + off]) & _bases(c)) for i, c in enumerate(b.seq))
 
 
 def redundancy_weights(counts_bin: "pl.DataFrame", motifs: list[Motif], group_of: list[int], n_groups: int, *,
