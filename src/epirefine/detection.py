@@ -93,8 +93,23 @@ def _fit_one(args):
     return fit_mixture(n, k, w, prior, sd)
 
 
+POOL_MIN_ROWS = 60_000  # count patterns over all jobs below which the fits run in this process
+
+
+def _job_rows(job) -> int:
+    """Count patterns (rows of n, k, w) a fit job holds, at any nesting of its arguments."""
+    if isinstance(job, np.ndarray):
+        return len(job) // 3 if job.ndim == 1 else 0
+    return sum(_job_rows(x) for x in job) if isinstance(job, (tuple, list)) else 0
+
+
 def _map(fn, jobs, workers):
-    if workers <= 1 or len(jobs) <= 1:
+    """fn over jobs, on `workers` processes when the work is worth starting them.
+
+    Spawning the pool costs about 3 s; the fits of a 20-group monoculture set (10,000 count patterns)
+    take 0.5 s in one process. Each fit depends on its own job only, so where it runs changes nothing.
+    """
+    if workers <= 1 or len(jobs) <= 1 or sum(_job_rows(j) for j in jobs) < POOL_MIN_ROWS:
         return [fn(j) for j in jobs]
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
