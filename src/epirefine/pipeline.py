@@ -22,10 +22,13 @@ from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
-from .model import FittedModel, posterior
+from scipy.special import logsumexp
+
+from .model import FittedModel, posterior, summed_scores
 from .motifs import build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights
 from .redundancy import inclusion_redundancy
-from .refine import bin_evidence_table, refine, regional_pattern, write_outputs
+from .refine import (bin_evidence_table, flagged_share_per_bin, refine, regional_pattern, withdraw_as_mixed,
+                     write_outputs)
 from .sites import EncodedAssembly, extract_sites, unit_tables
 
 
@@ -80,7 +83,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
-        variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
+        variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1,
+        robust_fit="alternating", max_flagged_share=1.0, regional_leave_out="chunk", regional_withdraw="vs_foreign",
+        regional_tempered=False, gate_leave_out="none", gate_unweighted=False, eps_gated=False,
+        redundancy_order="independent", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2):
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
@@ -244,7 +250,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     p_cal = 0.1 if p_unknown is None else p_unknown  # prior used before p_unknown is estimated (refinement)
     params = {"chunk_size": chunk_size, "grid_size": grid_size, "p_unknown": p_unknown, "min_cov": min_cov,
               "contam_eps": contam_eps}
-    model_kw = {"contam_eps": contam_eps}
+    model_kw = {"contam_eps": contam_eps, "robust_fit": robust_fit}
     if do_calibrate:
         _log("calibration with pseudo-contigs")
         chunks_of = fragment_chunks(frags, chunk_size, chunk_index)
@@ -286,12 +292,27 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                          "bin": [bins[b] for b in chunk_bin], "p_foreign": p_foreign}),
            out / "host_chunk_outliers.tsv")
     _log(f"robust host profiles: {int((p_foreign > 0.5).sum())} of {len(p_foreign)} chunks flagged as foreign to their bin")
+    # a bin whose chunk weights still moved in the last round has no settled profile (two methylomes in
+    # comparable shares under the alternating scheme): its chunk calls and its contigs' scores are not reliable
+    unconverged = model.robust_unconverged()
+    two_share, two_group = model.two_state_share()
+    if unconverged.any():
+        _log(f"WARNING: robust host profile did not converge for {int(unconverged.sum())} of {H} bins "
+             f"({', '.join(bins[b] for b in np.flatnonzero(unconverged)[:10])}{', ...' if unconverged.sum() > 10 else ''}): "
+             f"the bin may hold two genomes in comparable shares (bin_evidence.tsv, column robust_fit)")
 
     params.update(tau=tau, temperature=temperature)
 
     # score every contig against every bin; binned contigs leave-one-out, so their own bin's profile
     # is built without them
     sc = model.score(L_t)
+    # each contig's methylated fraction per group with its 95% interval (for the effect-size gate below). Group
+    # weights were multiplied into the tables; gate_unweighted takes them out again, so that a group sharing its
+    # weight with variants of the same methyltransferase keeps the interval its own sites give it
+    gw = (group_w.astype(np.float64)[None, :, None] if gate_unweighted and group_weights and (group_w < 1).any() else None)
+    phi_obs = _batched_summary(grid, lambda sl: L_t[sl].astype(np.float64) / (1.0 if gw is None else gw), len(targets))
+    diff = np.zeros(len(targets))
+    llr_loo = np.zeros(len(chunk_bin))
     sole_contig = set()
     bin_chunks = np.bincount(chunk_bin, minlength=H)
     own_chunks: dict[int, list[int]] = {}
@@ -305,7 +326,15 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         if len(own) and len(own) == bin_chunks[b]:
             sole_contig.add(c)  # leave-one-out would empty the bin: not an independent test
             continue
-        model.loo_rescore(sc, i, b, own)
+        prof = model.loo_profile(b, own)
+        model.loo_rescore(sc, i, b, own, prof=prof)
+        if gate_leave_out == "contig":
+            # distance between the two 95% intervals: the contig's and that of its bin without the contig
+            _, lo_b, hi_b, _ = grid.summarize(prof[0])
+            gap = np.maximum(np.maximum(phi_obs[1][i] - hi_b, lo_b - phi_obs[2][i]), 0.0)
+            diff[i] = np.where(n_sites_group[i] > 0, gap, 0.0).max()
+        if regional_leave_out == "contig" and len(own) >= 2:
+            llr_loo[own] = model.chunk_llr(own, prof)
 
     # bin refinement: contamination of binned contigs, inclusion of unbinned ones
     given = np.array([bin_idx[cb[c]] if c in cb else -1 for c in targets])
@@ -334,25 +363,64 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # the bin's methylated fraction and the contig's 95% credible interval for its own. Short
     # contigs with a real difference have wide intervals that still clear the bin's level; long
     # contigs with a small, precise shift do not.
-    phi_obs = _batched_summary(grid, lambda sl: L_t[sl].astype(np.float64), len(targets))
+    # gate_leave_out "none" (up to 0.10.x): the bin's level from the profile that still holds the contig, as a
+    # point. "contig": the bin's 95% interval without the contig (computed in the loop above), as for the score:
+    # a contig that is a large share of its bin otherwise pulls the bin's level toward itself and clears itself.
     phi_bin = grid.summarize(model.log_prof)[0]
-    diff = np.zeros(len(targets))
     has = given >= 0
-    pb = phi_bin[given[has]]
-    gap = np.maximum(np.maximum(phi_obs[1][has] - pb, pb - phi_obs[2][has]), 0.0)
-    diff[has] = np.where(n_sites_group[has] > 0, gap, 0.0).max(1)
+    if gate_leave_out != "contig":
+        pb = phi_bin[given[has]]
+        gap = np.maximum(np.maximum(phi_obs[1][has] - pb, pb - phi_obs[2][has]), 0.0)
+        diff[has] = np.where(n_sites_group[has] > 0, gap, 0.0).max(1)
     bin_ev = bin_evidence_table(bins, grid.summarize(model.log_prof), n_sites_group, given)
     unmeth_bins = (bin_ev["status"] == "no_methylation_detected").to_numpy()
     ref = refine(sc.S, sc.Su, given, testable, temperature, contamination_threshold, include_threshold,
                  methylome_difference=diff, min_difference=min_methylome_difference,
-                 p_unknown=p_unknown, decidable=~low_cov & ~short, unmethylated_bins=unmeth_bins, include_threshold_unmethylated=include_threshold_unmethylated)
+                 p_unknown=p_unknown, decidable=~low_cov & ~short, unmethylated_bins=unmeth_bins, include_threshold_unmethylated=include_threshold_unmethylated,
+                 eps_gated=eps_gated, S_unlisted=model.unlisted_score(sc) if unlisted_genome else None)
+    if unlisted_genome:
+        sc.Su = ref.Su
+        params["unlisted_share"] = ref.unlisted_share
+        _log(f"unbinned genomes: {ref.unlisted_share:.3f} without any listed motif (unlisted), the rest community draws")
+    if inclusion_support == "methylated_groups":
+        # An inclusion must be supported by the motif groups its bin methylates: the posterior of the bin is
+        # recomputed from those groups alone and must reach the inclusion threshold too. Absence of methylation
+        # at the other listed motifs can speak against a bin (through the full posterior) but not for it, since
+        # a genome without a bin lacks them by construction (the list comes from the bins).
+        on = grid.summarize(model.log_prof)[1] >= 0.5
+        Tm = float(np.median(np.atleast_1d(temperature)))
+        pu = min(max(ref.p_unknown, 1e-6), 1 - 1e-6)
+        cand = np.flatnonzero(ref.include_bin >= 0)
+        support = np.zeros(len(targets))
+        for h in np.unique(ref.include_bin[cand]):
+            rows = cand[ref.include_bin[cand] == h]
+            ms = np.flatnonzero(on[h])
+            S_on = (summed_scores(sc.Lp[rows][:, ms], model.log_prof[:, ms]) if len(ms) else np.zeros((len(rows), H)))
+            n_alt = np.where(given[rows] >= 0, H - 1, H)
+            lg = np.concatenate([S_on / Tm + np.log((1 - pu) / n_alt)[:, None],
+                                 (sc.Au[rows][:, ms].sum(1) / Tm + np.log(pu))[:, None]], 1)
+            b_ = given[rows] >= 0
+            lg[np.flatnonzero(b_), given[rows][b_]] = -np.inf
+            support[rows] = np.exp(lg[:, h] - logsumexp(lg, axis=1))
+        thr_s = np.where(unmeth_bins[np.maximum(ref.include_bin, 0)], include_threshold_unmethylated, include_threshold)
+        weak = (ref.include_bin >= 0) & (support < thr_s)
+        _log(f"inclusion support: {int(weak.sum())} of {len(cand)} inclusions dropped (the bin's methylated motif groups "
+             f"alone do not support them)")
+        ref.include_bin[weak] = -1
+
     # long binned contigs: whole contig foreign, or partly the bin's and partly foreign along its length?
     # (chunk-level evidence from the robust host-profile fit; flags on mixed contigs are withdrawn and
     # their foreign segments reported)
     regional = None
     if regional_model:
-        llr_chunk = (np.log(np.clip(p_foreign, 1e-12, 1 - 1e-12)) - np.log(np.clip(1 - p_foreign, 1e-12, None))
-                     - np.log(contam_eps / (1 - contam_eps)))
+        if regional_leave_out == "contig":
+            # chunk evidence against the same profile as the contig's own score: the bin without the whole
+            # contig. With only the chunk left out, the other chunks of a long foreign contig that makes up
+            # much of a small bin vouch for it.
+            llr_chunk = llr_loo / (float(np.median(np.atleast_1d(temperature))) if regional_tempered else 1.0)
+        else:
+            llr_chunk = (np.log(np.clip(p_foreign, 1e-12, 1 - 1e-12)) - np.log(np.clip(1 - p_foreign, 1e-12, None))
+                         - np.log(contam_eps / (1 - contam_eps)))
         order = np.lexsort((chunk_no, chunk_contig))
         by_contig: dict[int, list[int]] = {}
         for k in order:
@@ -370,7 +438,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
             ks = by_contig[u]
             fk = [chunk_no[k] for k, pf in zip(ks, chunk_post[j]) if pf >= 0.5]
             segments[i] = ";".join(f"{c * chunk_size}-{min((c + 1) * chunk_size, lengths[targets[i]])}" for c in fk)
-            if ref.contaminant[i] and post[j, 2] > post[j, 1]:
+            # a flag is withdrawn when "mixed" explains the contig best; "vs_foreign" (up to 0.10.x) compared it
+            # with "foreign" only, so a contig the chunks call a plain member was labelled mixed as well
+            if ref.contaminant[i] and withdraw_as_mixed(post[j], regional_withdraw)[0]:
                 mixed[i] = True
         ref.contaminant[mixed] = False
         ref.include_bin[mixed & (given >= 0)] = -1
@@ -463,6 +533,36 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         regional = {"p": reg_p, "segments": segments, "mixed": mixed, "segment_bins": seg_bins}
         _log(f"regional: {len(long_u)} binned contigs with >= 2 chunks; {int(mixed.sum())} flags withdrawn as mixed "
              f"(partly the bin's, partly foreign along the contig)")
+    # a bin in which the flagged contigs hold at least max_flagged_share of the sequence has no identifiable
+    # majority genome: contamination is by definition the smaller part, so this is a merge of genomes (or a
+    # profile that settled on the wrong one), and removing "the contaminants" would remove a genome. No flag
+    # of such a bin is applied; the bin is reported (bin_evidence.tsv).
+    L_arr = np.array([lengths[c] for c in targets], dtype=float)
+    judged = testable & ~low_cov & ~short
+    flagged_share = flagged_share_per_bin(given, ref.contaminant, judged, L_arr, H)
+    merged_bins = flagged_share >= max_flagged_share
+    if merged_bins.any():
+        undo = ref.contaminant & merged_bins[np.maximum(given, 0)]
+        ref.contaminant[undo] = False
+        ref.include_bin[undo] = -1
+        ref.candidate[undo] = False
+        _log(f"WARNING: {int(merged_bins.sum())} bins look like a merge of genomes (flagged contigs hold >= "
+             f"{max_flagged_share:g} of the bin): {int(undo.sum())} flags not applied "
+             f"({', '.join(bins[b] for b in np.flatnonzero(merged_bins)[:10])})")
+    bin_ev = bin_ev.with_columns(
+        pl.Series("robust_fit", np.where(unconverged, "not_converged", "converged")),
+        pl.Series("flagged_share", flagged_share),
+        pl.Series("two_state_share", two_share),
+        pl.Series("two_state_group", [group_label[g] if g >= 0 else "" for g in two_group]),
+        pl.Series("warning", [";".join(w for w, on in (("merged_bin_suspected_flags_not_applied", merged_bins[b]),
+                                                       ("two_methylation_states", two_share[b] >= two_state_warning),
+                                                       ("profile_not_converged", unconverged[b])) if on)
+                              for b in range(H)]))
+    if (two_share >= two_state_warning).any():
+        tb = np.flatnonzero(two_share >= two_state_warning)
+        _log(f"WARNING: {len(tb)} bins show two methylation states in a motif group among their chunks (the smaller state "
+             f"holds >= {two_state_warning:g} of the evidence; bin_evidence.tsv, two_state_share): they may hold two genomes. "
+             + ", ".join(f"{bins[b]} ({two_share[b]:.2f})" for b in tb[:10]))
     # don't include contigs whose sequence the target bin already holds (strain variants, haplotigs):
     # methylation can't see redundancy (D21)
     redundancy = np.full(len(targets), np.nan)
@@ -472,7 +572,11 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         for i, c in enumerate(targets):
             if given[i] >= 0 and not ref.contaminant[i]:
                 members.setdefault(int(given[i]), []).append(cid[c])
-        redundancy[inc] = inclusion_redundancy(asm, [(cid[targets[i]], int(ref.include_bin[i])) for i in inc], members)
+        # redundancy_order "sequential": candidates of a bin in order of their probability, each accepted one
+        # joining the bin before the next is compared (two unbinned copies of one sequence are not both included)
+        redundancy[inc] = inclusion_redundancy(asm, [(cid[targets[i]], int(ref.include_bin[i])) for i in inc], members,
+                                               priority=ref.p_best_alt[inc] if redundancy_order == "sequential" else None,
+                                               max_redundancy=max_redundancy)
         drop = inc[redundancy[inc] >= max_redundancy]
         ref.include_bin[drop] = -1
         _log(f"redundancy: {len(drop)} of {len(inc)} inclusions dropped (>= {max_redundancy:g} of their k-mers already in the bin)")
