@@ -115,7 +115,7 @@ def _z_by_length(x, length, members, targets, floor, min_ref=8):
     return out
 
 
-def contamination_scores(f: dict, given_bin: dict, min_sites: int = 10) -> pl.DataFrame:
+def contamination_scores(f: dict, given_bin: dict, min_sites: int = 3) -> pl.DataFrame:
     """One row per binned contig with every baseline's contamination score (nan-free: no evidence = 0)."""
     names, L = f["names"], f["length"].astype(float)
     bins = sorted(set(given_bin.values()))
@@ -154,7 +154,7 @@ def contamination_scores(f: dict, given_bin: dict, min_sites: int = 10) -> pl.Da
     return pl.DataFrame({"contig": [c for c, k in zip(names, keep) if k], **{k: v[keep] for k, v in cols.items()}})
 
 
-def inclusion_scores(f: dict, given_bin: dict, min_sites: int = 10) -> pl.DataFrame:
+def inclusion_scores(f: dict, given_bin: dict, min_sites: int = 3) -> pl.DataFrame:
     """One row per unbinned contig and baseline: the bin it would be given and the score of that choice."""
     names, L = f["names"], f["length"].astype(float)
     bins = sorted(set(given_bin.values()))
@@ -208,7 +208,7 @@ def main():
     ap.add_argument("--cache", required=True, help="site cache of an epirefine run on these inputs")
     ap.add_argument("--truth", help="truth_actions.tsv (its given_bin is the binning)")
     ap.add_argument("--contig-bin", help="contig<TAB>bin without header (instead of --truth)")
-    ap.add_argument("--min-sites", type=int, default=10)
+    ap.add_argument("--min-sites", type=int, default=3)
     ap.add_argument("--out", required=True, help="prefix: writes <out>.contamination.tsv and <out>.inclusion.tsv")
     a = ap.parse_args()
     if a.truth:

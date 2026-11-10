@@ -71,6 +71,7 @@ NEEDS_SWITCH = [
 UNDECIDED = ("low_coverage", "too_short", "no_methylation_evidence")
 BASELINES = ("coverage", "tetra", "gc", "cov_tetra", "cov_and_tetra", "naive_meth", "naive_meth2")
 STRATA = (("all", 0.0), (">= 5x", 5.0), (">= 10x", 10.0))
+MIN_SITES_GRID = (1, 2, 3, 5, 10, 20)
 
 
 def slug(name: str) -> str:
@@ -146,6 +147,11 @@ def baselines(a, out: Path, scen: list[dict]) -> None:
         f = tb.load_features(sc["cache"])
         pl.DataFrame({"contig": f["names"], "site_coverage": f["cov_median"]}).write_csv(f"{pre}.features.tsv", separator="\t")
         tb.contamination_scores(f, given, a.min_sites).write_csv(f"{pre}.contamination.tsv", separator="\t", float_precision=4)
+        # the naive methylation rule at other minimum site counts (its one free parameter besides the threshold)
+        pl.concat([tb.contamination_scores(f, given, m).select("contig", pl.lit(m).alias("min_sites"), "naive_meth", "naive_meth2")
+                   for m in MIN_SITES_GRID]).write_csv(f"{pre}.minsites_contamination.tsv", separator="\t", float_precision=4)
+        pl.concat([tb.inclusion_scores(f, given, m).filter(pl.col("baseline") == "naive_meth").with_columns(pl.lit(m).alias("min_sites"))
+                   for m in MIN_SITES_GRID]).write_csv(f"{pre}.minsites_inclusion.tsv", separator="\t", float_precision=4)
         tb.inclusion_scores(f, given, a.min_sites).write_csv(f"{pre}.inclusion.tsv", separator="\t", float_precision=4)
         print(f"  baselines: {sc['name']}", flush=True)
 
@@ -291,6 +297,33 @@ def inclusion_table(D: pl.DataFrame, out: Path, n_boot: int) -> pl.DataFrame:
     return pl.DataFrame(rows, infer_schema_length=None)
 
 
+def min_sites_table(D: pl.DataFrame, out: Path) -> pl.DataFrame:
+    """The naive methylation rule against its minimum number of sites, for flags (all contigs and >= 5x) and inclusion."""
+    rows = []
+    key = ["scenario", "contig"]
+    for (group,), g in D.group_by("group", maintain_order=True):
+        names = g["scenario"].unique(maintain_order=True)
+        rd = lambda kind: pl.concat([pl.read_csv(out / "baselines" / f"{s}.minsites_{kind}.tsv", separator="\t", schema_overrides={"score": pl.Float64} if kind == "inclusion" else None)  # noqa: E731
+                                     .with_columns(pl.lit(s).alias("scenario")) for s in names])
+        con = rd("contamination").join(g.select(*key, "tp", "fn", "site_coverage"), on=key)
+        inc = rd("inclusion").join(g.select(*key, "category", "true_bin"), on=key)
+        for m in MIN_SITES_GRID:
+            for stratum, lo in STRATA[:2]:
+                x = con.filter((pl.col("min_sites") == m) & (pl.col("site_coverage") >= lo))
+                pos = ((x["tp"] + x["fn"]) > 0).to_numpy()
+                for b in ("naive_meth", "naive_meth2"):
+                    s = x[b].to_numpy()
+                    rows.append({"group": group, "task": "flags", "coverage": stratum, "rule": b, "min_sites": m, "average_precision": em.average_precision(s, pos),
+                                 **{f"recall_at_p{int(100 * p)}": em.recall_at_precision(s, pos, p)[0] for p in (0.90, 0.95, 1.0)}})
+            x = inc.filter(pl.col("min_sites") == m)
+            miss = (x["category"] == "missing").to_numpy()
+            ok = miss & (x["bin"].fill_null("") == x["true_bin"]).to_numpy()
+            s = x["score"].to_numpy()
+            rows.append({"group": group, "task": "inclusion", "coverage": "all", "rule": "naive_meth", "min_sites": m, "average_precision": em.average_precision(s, ok, miss),
+                         **{f"recall_at_p{int(100 * p)}": em.recall_at_precision(s, ok, p, miss)[0] for p in (0.90, 0.95, 1.0)}})
+    return pl.DataFrame(rows)
+
+
 ABL_METRICS = ("contam_recall", "contam_precision", "inclusion_recall", "placement_precision")
 
 
@@ -357,7 +390,8 @@ def report(a, out: Path, scen: list[dict]) -> None:
     con, lens, cells = contamination_tables(D, out, a.n_boot)
     inc = inclusion_table(D, out, a.n_boot)
     abl = ablation_table(out, scen, D, 2000, a.ablation_groups)
-    for name, t in (("contamination", con), ("contamination_by_length", lens), ("contamination_cells", cells), ("inclusion", inc), ("ablations", abl)):
+    ms = min_sites_table(D, out)
+    for name, t in (("naive_rule_min_sites", ms), ("contamination", con), ("contamination_by_length", lens), ("contamination_cells", cells), ("inclusion", inc), ("ablations", abl)):
         t.write_csv(tables / f"{name}.tsv", separator="\t", float_precision=4)
     planted = [pl.read_csv(Path(sc["truth"]).parent / "planting.tsv", separator="\t").with_columns(pl.lit(sc["name"]).alias("scenario"))
                for sc in scen if sc["group"] != "standard"]
@@ -387,6 +421,9 @@ def report(a, out: Path, scen: list[dict]) -> None:
                     "placement_precision": "placement precision %", "put_back": "put back % (all)", "no_bin_placed": "no-bin placed",
                     "average_precision": "AP", "average_precision_ci": "AP 95% CI", "recall_at_epirefine_precision": "recall % at EpiRefine precision",
                     "recall_at_p90": "recall % at 90% precision"}),
+           "\n## The naive methylation rule against its minimum number of sites per motif group\n",
+           md(ms, {"group": "scenarios", "task": "task", "coverage": "coverage", "rule": "rule", "min_sites": "min sites", "average_precision": "AP",
+                   "recall_at_p90": "recall % at 90% precision", "recall_at_p95": "recall % at 95% precision", "recall_at_p100": "recall % at 100% precision"}),
            "\n## Rule ablations (difference to the default, percentage points; 95% interval from a paired bootstrap over scenarios)\n",
            md(abl, {"setting": "setting", "scenarios": "scenarios", "n_scenarios": "n", "flags_changed": "flags changed", "bins_changed": "final bins changed",
                     **{k: v for m in ABL_METRICS for k, v in ((f"{m}_delta", m.replace("_", " ")), (f"{m}_ci", "95% CI"))},
@@ -410,7 +447,8 @@ def main():
                     help="scenario groups on which the ablations are run (the default settings run on all)")
     ap.add_argument("--jobs", type=int, default=4, help="EpiRefine runs at once")
     ap.add_argument("--workers", type=int, default=1, help="processes per run")
-    ap.add_argument("--min-sites", type=int, default=10, help="sites a motif group needs on a contig in the naive methylation rule")
+    ap.add_argument("--min-sites", type=int, default=3, help="sites a motif group needs on a contig in the naive methylation rule "
+                    "(3 is about the best value on the training scenarios, see the min-sites table)")
     ap.add_argument("--n-boot", type=int, default=300, help="bootstrap draws for curve statistics")
     ap.add_argument("--seed", type=int, default=1)
     a = ap.parse_args()
