@@ -631,8 +631,8 @@ assigned reliably *in this sample*, with its coverage, motif repertoire and call
 
 The calibration of 0.10 (`--calibration legacy`, the default) is the one described above. A set of
 features, each selectable alone, changes one step each (`epirefine.calibrate.FEATURES`);
-`--calibration coherent` switches on the proposed set (temper-then-mix, prior-averaged,
-conservative-temperature, common-tau, em-priors); `coherent,-name` leaves one out.
+`--calibration coherent` switches on the proposed set (temper-then-mix, prior-averaged, full-test-b,
+common-tau, em-priors); `coherent,-name` leaves one out.
 
 | Feature | What changes |
 |---|---|

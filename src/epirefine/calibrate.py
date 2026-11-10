@@ -63,11 +63,12 @@ FEATURES = {
     "em-priors": "p_unknown has a Beta(2, 2) prior; the contamination rate counts only contigs that pass the "
                  "methylome-difference gate",
 }
-# The proposed set. Not in it, on the evidence of the development sets: unit-temperature (contig posteriors at
-# exactly T = 1 are over-confident: 83% right at P 0.9-0.95 on the training communities), sites-temperature
-# (worse than one temperature where its guard lets it act), prior-matched (same fits as prior-averaged, with a
-# feedback loop between p_unknown and the fit).
-COHERENT = ("temper-then-mix", "prior-averaged", "conservative-temperature", "common-tau", "em-priors")
+# The proposed set (rounds of the proposal in the dev log, 2026-11-10). Not in it, on the evidence of the
+# development sets: unit-temperature (contig posteriors at exactly T = 1 are over-confident: 83% right at
+# P 0.9-0.95 on the training communities), sites-temperature (worse than one temperature where its guard lets it
+# act), prior-matched (same fits as prior-averaged, with a feedback loop between p_unknown and the fit),
+# conservative-temperature (useful without full-test-b; with it the rule only costs inclusions).
+COHERENT = ("temper-then-mix", "prior-averaged", "full-test-b", "common-tau", "em-priors")
 
 
 def parse_features(spec) -> frozenset:
