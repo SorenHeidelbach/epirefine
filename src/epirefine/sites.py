@@ -57,8 +57,12 @@ class EncodedAssembly:
         d = Path(directory)
         d.mkdir(parents=True, exist_ok=True)
         names, offsets, lengths, off = [], [], [], 0
+        seen: set[str] = set()
         with open(d / "assembly.u8", "wb") as fh:
             for name, seq in (contigs.items() if isinstance(contigs, dict) else contigs):
+                if name in seen:  # the name -> index map would point both records at the last one
+                    raise ValueError(f"contig name {name!r} occurs more than once in the assembly; contig names must be unique")
+                seen.add(name)
                 fh.write(_CODE[np.frombuffer(seq.encode("ascii"), np.uint8)].tobytes())
                 names.append(name); offsets.append(off); lengths.append(len(seq)); off += len(seq)
         (d / "assembly.json").write_text(json.dumps({"names": names, "offsets": offsets, "lengths": lengths}))

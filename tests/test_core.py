@@ -102,3 +102,19 @@ def test_score_prefers_matching_host_and_unknown_is_fallback():
     assert P[0].argmax() == 0 and P[0, 0] > 0.9
     P_masked = posterior(S, Su, 0.1, host_mask=np.array([[False, True]]))
     assert P_masked[0].argmax() == 2  # true host removed -> unknown, not the wrong host
+
+
+def test_repeated_contig_name_is_an_error(tmp_path):
+    """A name that occurs twice would give two records one length, one bin and one row of scores."""
+    import pytest
+    from epirefine import io as pio
+    from epirefine.sites import EncodedAssembly
+    fa = tmp_path / "a.fasta"
+    fa.write_text(">c1 first\nACGT\n>c2\nAC\n>c1 again\nGGGGGG\n")
+    with pytest.raises(ValueError, match="c1.*more than once"):
+        pio.fasta_lengths(fa)
+    with pytest.raises(ValueError, match="c1.*more than once"):
+        EncodedAssembly.write(pio.iter_fasta(fa), tmp_path / "asm")
+    fa.write_text(">c1\nACGT\n>c2\nAC\n")
+    assert pio.fasta_lengths(fa) == {"c1": 4, "c2": 2}
+    assert EncodedAssembly.write(pio.iter_fasta(fa), tmp_path / "asm").names == ["c1", "c2"]
