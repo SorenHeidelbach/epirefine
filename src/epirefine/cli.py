@@ -42,6 +42,9 @@ def main(argv=None):
     r.add_argument("--no-motif-noise-filter", action="store_true",
                    help="keep motif groups whose methylation is partial on many contigs of many bins (by default "
                         "they are dropped as caller noise; see motif_noise.tsv)")
+    r.add_argument("--noise-max-off-share", type=float, default=1.0,
+                   help="call a motif group noise only when at most this share of the bins that measure it leave it "
+                        "unmethylated (a real motif is off in most genomes, a caller leak in none; 1 = not used)")
     r.add_argument("--regional-inclusion", action="store_true",
                    help="also include long unbinned contigs scored in 50 kb windows (a bin explaining most of the contig); "
                         "experimental, no measured benefit (D40)")
@@ -103,7 +106,8 @@ def main(argv=None):
             contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, min_jaccard=a.min_jaccard,
             variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
             cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed, shared_sites=a.shared_sites,
-            complement_pairs=a.complement_pairs, strand_sites=a.strand_sites)
+            complement_pairs=a.complement_pairs, strand_sites=a.strand_sites,
+            noise_max_off_share=a.noise_max_off_share)
 
 
 if __name__ == "__main__":

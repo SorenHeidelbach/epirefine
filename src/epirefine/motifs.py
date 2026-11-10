@@ -477,7 +477,7 @@ def redundancy_weights(counts_bin: "pl.DataFrame", motifs: list[Motif], group_of
     return w, tab
 def noisy_groups(parts: list[str], contig_bin: "pl.DataFrame", contigs: list[int], *, min_reads: int = 5,
                  min_sites: int = 20, partial=(0.15, 0.6), min_mid_sites: float = 0.2, min_bin_share: float = 0.2,
-                 min_noise_bins: int = 3) -> "pl.DataFrame":
+                 min_noise_bins: int = 3, max_off_bin_share: float = 1.0) -> "pl.DataFrame":
     """Motif groups that look like caller noise: intermediate read-level calls at the sites themselves,
     in a large share of genomes.
 
@@ -498,8 +498,10 @@ def noisy_groups(parts: list[str], contig_bin: "pl.DataFrame", contigs: list[int
 
     The rule cannot tell a real motif that the caller detects poorly (intermediate where it is methylated, zero
     elsewhere) from a leak (intermediate nearly everywhere). `off_bin_share`, the share of measuring bins whose
-    level is below 0.05, is reported for that purpose and not used in the rule: a dropped group that is off in many
-    bins is worth a look.
+    level is below 0.05, tells them apart: on ZymoFecal the eight dropped 4mC groups have 1-8% of their bins off,
+    while a Dam-linked complement pair with 18% noise-like bins (one strand methylated, summed sites at 0.5) has 63%.
+    With max_off_bin_share < 1 a group is only called noise when at most that share of its bins is off (default 1:
+    not used).
     """
     import polars as pl
     lo, hi = partial
@@ -515,6 +517,7 @@ def noisy_groups(parts: list[str], contig_bin: "pl.DataFrame", contigs: list[int
                                  pl.col("level").median().alias("median_level"),
                                  (pl.col("level") < 0.05).mean().alias("off_bin_share"))
          .with_columns((pl.col("noise_bins") / pl.col("bins")).alias("noise_bin_share"))
-         .with_columns(((pl.col("noise_bin_share") >= min_bin_share) & (pl.col("noise_bins") >= min_noise_bins)).alias("noisy"))
+         .with_columns(((pl.col("noise_bin_share") >= min_bin_share) & (pl.col("noise_bins") >= min_noise_bins)
+                        & (pl.col("off_bin_share") <= max_off_bin_share)).alias("noisy"))
          .sort("group"))
     return g

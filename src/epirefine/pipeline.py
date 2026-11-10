@@ -82,7 +82,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1,
-        shared_sites="sample", complement_pairs="sequence", strand_sites="sum"):
+        shared_sites="sample", complement_pairs="sequence", strand_sites="sum", noise_max_off_share=1.0):
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
@@ -169,7 +169,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         rich = [cid[c] for c in host_contigs if cov_of.get(cid[c], 0.0) >= 10]
         cb_id = pl.DataFrame({"contig": [cid[c] for c in host_contigs], "bin": [bin_idx[cb[c]] for c in host_contigs]},
                              schema={"contig": pl.Int32, "bin": pl.Int32})
-        noise = noisy_groups(parts, cb_id, rich)
+        noise = noisy_groups(parts, cb_id, rich, max_off_bin_share=noise_max_off_share)
         drop = noise.filter("noisy")["group"].to_list()
         _write(noise.join(describe_groups(motifs, group_of).select(pl.col("group").cast(pl.Int32), "mod_type", "motifs"), on="group", how="left"),
                out / "motif_noise.tsv")
