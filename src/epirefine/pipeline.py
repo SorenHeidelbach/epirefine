@@ -38,15 +38,15 @@ def _write(df: pl.DataFrame, path, precision=4):
     df.write_csv(path, separator="\t", float_precision=precision)
 
 
-def _sample_contigs(contigs: dict[str, str], names, sample_bp: float, rng) -> dict[str, str]:
-    """Random contigs up to sample_bp of sequence (all of them for small assemblies)."""
+def _sample_names(lengths: dict[str, int], names, sample_bp: float, rng) -> list[str]:
+    """Random contigs up to sample_bp of sequence (all of them for small assemblies), in sampling order."""
     names = list(names)
-    if sum(len(contigs[c]) for c in names) <= sample_bp:
-        return {c: contigs[c] for c in names}
-    out, acc = {}, 0
+    if sum(lengths[c] for c in names) <= sample_bp:
+        return names
+    out, acc = [], 0
     for i in rng.permutation(len(names)):
         c = names[i]
-        out[c] = contigs[c]; acc += len(contigs[c])
+        out.append(c); acc += lengths[c]
         if acc >= sample_bp:
             break
     return out
@@ -86,23 +86,24 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     rng = np.random.default_rng(seed)
     cache = Path(cache_dir) if cache_dir else out / "cache"
 
-    contigs = pio.read_fasta(assembly)
-    lengths = {c: len(s) for c, s in contigs.items()}
-    cb = {c: b for c, b in pio.read_contig_bin(contig_bin).items() if c in contigs}
+    # the assembly is streamed (lengths, then the motif-grouping sample, then the encoded copy on disk): held
+    # whole as Python strings it took about three times its size, 53 GB for an 18.9 GB soil assembly
+    lengths = pio.fasta_lengths(assembly)
+    cb = {c: b for c, b in pio.read_contig_bin(contig_bin).items() if c in lengths}
     bins = sorted(set(cb.values()))
     bin_idx = {b: i for i, b in enumerate(bins)}
     host_contigs = sorted(cb)
     host_set = set(host_contigs)
     # every contig is scored: binned ones leave-one-out (contamination), unbinned ones against all bins
     # (inclusion)
-    targets = sorted(contigs)
+    targets = sorted(lengths)
     H = len(bins)
-    _log(f"{len(contigs)} contigs, {H} bins, {len(host_contigs)} host contigs, {len(targets)} targets")
+    _log(f"{len(lengths)} contigs, {H} bins, {len(host_contigs)} host contigs, {len(targets)} targets")
 
     # motif groups, from the records of a random sample of the sequence
     motifs = pio.read_motifs(motifs_path)
     relevant = sorted(host_set | set(targets))
-    sample = _sample_contigs(contigs, relevant, group_sample_bp, rng)
+    sample = pio.fasta_subset(assembly, _sample_names(lengths, relevant, group_sample_bp, rng))
     records = build_records(sample, motifs)
     group_of = group_motifs(records, motifs, min_jaccard)
     rank_d = dict(records.group_by("motif").len().iter_rows())
@@ -126,14 +127,14 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         asm = EncodedAssembly(cache / "asm")
         _log(f"reusing site cache {cache} ({len(parts)} parts)")
     else:
-        asm = EncodedAssembly.write(contigs, cache / "asm")
+        asm = EncodedAssembly.write(pio.iter_fasta(assembly), cache / "asm")
         for f in (cache / "sites").glob("*.parquet") if (cache / "sites").exists() else []:
             f.unlink()
-        wanted = None if len(relevant) == len(contigs) else {asm.index[c] for c in relevant}
+        wanted = None if len(relevant) == len(lengths) else {asm.index[c] for c in relevant}
         parts = extract_sites(asm, pileup, motifs, group_of, motif_rank, cache / "sites", wanted=wanted,
                               workers=workers, log=_log)
         man_path.write_text(json.dumps({"inputs": man, "parts": parts}))
-    del contigs, sample
+    del sample
     cid = asm.index
 
     # contig coverage (median reads per motif site, all sites): contigs below min_contig_coverage get

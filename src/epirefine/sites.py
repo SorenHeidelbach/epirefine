@@ -51,12 +51,13 @@ class EncodedAssembly:
         return self.codes[self.offsets[i]:self.offsets[i] + self.lengths[i]]
 
     @staticmethod
-    def write(contigs: dict[str, str], directory) -> "EncodedAssembly":
+    def write(contigs, directory) -> "EncodedAssembly":
+        """contigs: dict name -> sequence, or an iterable of (name, sequence) (streamed, one contig at a time)."""
         d = Path(directory)
         d.mkdir(parents=True, exist_ok=True)
         names, offsets, lengths, off = [], [], [], 0
         with open(d / "assembly.u8", "wb") as fh:
-            for name, seq in contigs.items():
+            for name, seq in (contigs.items() if isinstance(contigs, dict) else contigs):
                 fh.write(_CODE[np.frombuffer(seq.encode("ascii"), np.uint8)].tobytes())
                 names.append(name); offsets.append(off); lengths.append(len(seq)); off += len(seq)
         (d / "assembly.json").write_text(json.dumps({"names": names, "offsets": offsets, "lengths": lengths}))

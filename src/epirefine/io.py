@@ -15,17 +15,36 @@ def _open(path, mode="rt"):
     return gzip.open(path, mode) if path.endswith(".gz") else open(path, mode)
 
 
-def read_fasta(path) -> dict[str, str]:
-    seqs: dict[str, list[str]] = {}
-    name = None
+def iter_fasta(path):
+    """(name, upper-case sequence) per record, one record in memory at a time."""
+    name, parts = None, []
     with _open(path) as fh:
         for line in fh:
             if line.startswith(">"):
-                name = line[1:].split()[0]
-                seqs[name] = []
+                if name is not None:
+                    yield name, "".join(parts).upper()
+                name, parts = line[1:].split()[0], []
             elif name is not None:
-                seqs[name].append(line.strip())
-    return {k: "".join(v).upper() for k, v in seqs.items()}
+                parts.append(line.strip())
+    if name is not None:
+        yield name, "".join(parts).upper()
+
+
+def read_fasta(path) -> dict[str, str]:
+    """Whole assembly in memory; a repeated name keeps its first position and its last sequence."""
+    return dict(iter_fasta(path))
+
+
+def fasta_lengths(path) -> dict[str, int]:
+    """Contig lengths in file order, without holding the sequences."""
+    return {name: len(seq) for name, seq in iter_fasta(path)}
+
+
+def fasta_subset(path, names) -> dict[str, str]:
+    """Sequences of the named contigs, in the order of names."""
+    want = set(names)
+    got = {name: seq for name, seq in iter_fasta(path) if name in want}
+    return {c: got[c] for c in names}
 
 
 def read_contig_bin(path) -> dict[str, str]:
