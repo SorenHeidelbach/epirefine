@@ -15,8 +15,12 @@ Two mixtures, with their weights estimated from the data by EM (MAP with a Beta 
 Decisions:
   * contaminant  if P(foreign | data) >= contamination_threshold;
   * a contaminant or an unbinned contig is included into bin h if P(h | data, not its old bin)
-    >= include_threshold ("high_confidence"); 0.8 / 0.5 mark medium / low confidence, as in
-    Nanomotif's include_contigs, and are reported but not applied.
+    >= include_threshold (default 0.9; include_threshold_unmethylated, 0.95, for a bin without detected
+    methylation), unless the redundancy check drops it afterwards (pipeline.run).
+  * include_contigs.tsv lists the candidates with P >= 0.5 under Nanomotif's confidence labels (CONFIDENCE:
+    high >= 0.95, medium >= 0.8, low >= 0.5). The labels are not the decision rule: at the default threshold
+    an inclusion at 0.9-0.95 is applied and reads "medium_confidence". Applied inclusions are those in
+    new_contig_bin.tsv (status included / moved in contig_decisions.tsv).
 """
 from __future__ import annotations
 
