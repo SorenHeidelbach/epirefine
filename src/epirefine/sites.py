@@ -18,6 +18,7 @@ this is checked and violations raise an error. Gzipped pileups are read by a sin
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 from concurrent.futures import ProcessPoolExecutor
@@ -74,10 +75,149 @@ def _contig_at(fh, offset: int) -> tuple[int, bytes]:
     return start, line.split(b"\t", 1)[0]
 
 
-def split_pileup(path, n_parts: int) -> list[tuple[int, int]]:
-    """Byte ranges covering the file, each starting at the first row of a contig."""
+# --- BGZF (bgzip) pileups: block-compressed, so a worker can start at any block. Positions are virtual offsets
+# (compressed offset of the block << 16 | offset inside the inflated block), as in htslib.
+_BGZF_HEAD = b"\x1f\x8b\x08\x04"
+
+
+def _bgzf_bsize(head: bytes) -> int:
+    """Total size of the block whose first 18 bytes are head; 0 if this is not a BGZF block header."""
+    if len(head) < 18 or head[:4] != _BGZF_HEAD or head[10:16] != b"\x06\x00BC\x02\x00":
+        return 0
+    return int.from_bytes(head[16:18], "little") + 1
+
+
+def is_bgzf(path) -> bool:
+    with open(path, "rb") as fh:
+        return _bgzf_bsize(fh.read(18)) > 0
+
+
+def _bgzf_inflate(fh, coff: int) -> tuple[bytes, int]:
+    """(inflated data of the block at coff, offset of the next block)."""
+    import zlib
+    fh.seek(coff)
+    head = fh.read(18)
+    size = _bgzf_bsize(head)
+    if not size:
+        raise ValueError(f"no BGZF block at offset {coff}")
+    body = fh.read(size - 18)
+    return zlib.decompress(body[:-8], -15), coff + size
+
+
+def _bgzf_next_block(fh, offset: int, size: int) -> int:
+    """Offset of the first block starting at or after offset (size if none)."""
+    if offset <= 0:
+        return 0
+    pos = offset
+    while pos < size:
+        fh.seek(pos)
+        buf = fh.read((1 << 17) + 18)
+        i = buf.find(_BGZF_HEAD)
+        while 0 <= i <= len(buf) - 18:
+            n = _bgzf_bsize(buf[i:i + 18])
+            if n:  # a real header is followed by another header (or the end of the file), twice
+                p, ok = pos + i + n, True
+                for _ in range(2):
+                    if p >= size:
+                        ok = p == size
+                        break
+                    fh.seek(p)
+                    m = _bgzf_bsize(fh.read(18))
+                    if not m:
+                        ok = False
+                        break
+                    p += m
+                if ok:
+                    return pos + i
+            i = buf.find(_BGZF_HEAD, i + 1)
+        if len(buf) < 18:
+            break
+        pos += len(buf) - 17
+    return size
+
+
+def _bgzf_contig_at(fh, offset: int, size: int):
+    """(virtual offset, contig) of the first full line in or after the first block at/after offset, or None.
+    As in _contig_at, the line the position falls in is skipped (none at the start of the file)."""
+    c = _bgzf_next_block(fh, offset, size)
+    skip = c > 0
+    while c < size:
+        data, nxt = _bgzf_inflate(fh, c)
+        u = 0
+        if skip:
+            j = data.find(b"\n")
+            if j < 0:
+                c = nxt
+                continue
+            u, skip = j + 1, False
+        if u < len(data):
+            line, cc = data[u:], nxt
+            while b"\t" not in line and b"\n" not in line and cc < size:
+                more, cc = _bgzf_inflate(fh, cc)
+                line += more
+            return (c << 16) | u, line.split(b"\n", 1)[0].split(b"\t", 1)[0]
+        c = nxt
+    return None
+
+
+def _bgzf_contig_end(fh, voff: int, name: bytes, size: int):
+    """Virtual offset of the first line from voff on that is not a row of contig name (None: none before the end)."""
+    c, p = voff >> 16, voff & 0xFFFF
+    pend, pend_pos = b"", None
+    while c < size:
+        data, nxt = _bgzf_inflate(fh, c)
+        while p < len(data):
+            j = data.find(b"\n", p)
+            pos = pend_pos if pend_pos is not None else (c << 16) | p
+            if j < 0:
+                pend, pend_pos = pend + data[p:], pos
+                break
+            line = pend + data[p:j + 1]
+            pend, pend_pos = b"", None
+            if line.split(b"\t", 1)[0] != name:
+                return pos
+            p = j + 1
+        c, p = nxt, 0
+    return None
+
+
+def _split_bgzf(path, n_parts: int, size: int) -> list[tuple[int, int]]:
+    end = size << 16
+    cuts = [0]
+    with open(path, "rb") as fh:
+        for i in range(1, n_parts):
+            at = _bgzf_contig_at(fh, size * i // n_parts, size)
+            if at is None or not at[1] or at[0] <= cuts[-1]:
+                continue
+            start, name = at
+            # as in the plain file: "the first full line after x is this contig" is true and then false as x
+            # grows; x is a compressed offset here, so the search ends on two neighbouring blocks, and the
+            # first row of the next contig is found by reading on from the last row known to be this contig
+            lo, hi = start >> 16, size
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                r = _bgzf_contig_at(fh, mid, size)
+                if r is not None and r[1] == name:
+                    lo = mid
+                else:
+                    hi = mid
+            r = _bgzf_contig_at(fh, lo, size)
+            pos = _bgzf_contig_end(fh, r[0] if r is not None and r[1] == name and r[0] >= start else start, name, size)
+            if pos is not None and cuts[-1] < pos < end:
+                cuts.append(pos)
+    cuts.append(end)
+    return [(a, b) for a, b in zip(cuts[:-1], cuts[1:]) if b > a]
+
+
+def split_pileup(path, n_parts: int, min_size: int = 64 << 20) -> list[tuple[int, int]]:
+    """Ranges covering the file, each starting at the first row of a contig: byte offsets for a plain file,
+    virtual offsets for a bgzipped one. Other gzip files cannot be split: one range (0, -1)."""
     size = os.path.getsize(path)
-    if str(path).endswith(".gz") or n_parts <= 1 or size < (64 << 20):
+    if str(path).endswith(".gz"):
+        if n_parts <= 1 or size < min_size or not is_bgzf(path):
+            return [(0, -1)]
+        return _split_bgzf(path, n_parts, size)
+    if n_parts <= 1 or size < min_size:
         return [(0, -1)]
     cuts = [0]
     with open(path, "rb") as fh:
@@ -101,8 +241,56 @@ def split_pileup(path, n_parts: int) -> list[tuple[int, int]]:
     return [(a, b) for a, b in zip(cuts[:-1], cuts[1:]) if b > a]
 
 
+class _FileSlice(io.RawIOBase):
+    """Read-only view of bytes [start, end) of a binary file."""
+
+    def __init__(self, fh, start: int, end: int):
+        self.fh, self.pos, self.end = fh, start, end
+        fh.seek(start)
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        n = min(len(b), self.end - self.pos)
+        if n <= 0:
+            return 0
+        data = self.fh.read(n)
+        b[:len(data)] = data
+        self.pos += len(data)
+        return len(data)
+
+
+def _bgzf_blocks(path, start: int, end: int, block: int):
+    """Line-complete chunks of the rows between two virtual offsets (both at line starts)."""
+    import gzip
+    c0, u0, c1, u1 = start >> 16, start & 0xFFFF, end >> 16, end & 0xFFFF
+    with open(path, "rb") as fh:
+        last = _bgzf_inflate(fh, c1)[0][:u1] if u1 else b""
+        tail, drop = b"", u0
+        if c1 > c0:
+            with gzip.GzipFile(fileobj=io.BufferedReader(_FileSlice(fh, c0, c1), 1 << 20)) as gz:
+                while True:
+                    buf = gz.read(block)
+                    if not buf:
+                        break
+                    if drop:
+                        buf, drop = buf[drop:], max(0, drop - len(buf))
+                    buf = tail + buf
+                    cut = buf.rfind(b"\n") + 1
+                    tail = buf[cut:]
+                    if cut:
+                        yield buf[:cut]
+        rest = tail + last[drop:]
+        if rest:
+            yield rest
+
+
 def _blocks(path, start: int, end: int, block: int):
     import gzip
+    if end >= 0 and str(path).endswith(".gz"):
+        yield from _bgzf_blocks(path, start, end, block)
+        return
     fh = gzip.open(path, "rb") if str(path).endswith(".gz") else open(path, "rb")
     with fh:
         if end < 0:
