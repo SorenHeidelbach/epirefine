@@ -118,3 +118,30 @@ def test_repeated_contig_name_is_an_error(tmp_path):
     fa.write_text(">c1\nACGT\n>c2\nAC\n")
     assert pio.fasta_lengths(fa) == {"c1": 4, "c2": 2}
     assert EncodedAssembly.write(pio.iter_fasta(fa), tmp_path / "asm").names == ["c1", "c2"]
+
+
+def test_cache_manifest_is_removed_before_a_rebuild(tmp_path, monkeypatch):
+    """A rebuild that dies in the pileup pass must not leave the old manifest pointing at rewritten parts."""
+    import json
+    import pytest
+    from epirefine import pipeline
+    rng = np.random.default_rng(0)
+    fa = tmp_path / "a.fasta"
+    fa.write_text("".join(f">c{i}\n{''.join(rng.choice(list('ACGT'), 3000))}\n" for i in range(3)))
+    (tmp_path / "cb.tsv").write_text("c0\tb1\nc1\tb2\n")
+    (tmp_path / "motifs.tsv").write_text("motif\tmod_type\tmod_position\nGATC\ta\t1\n")
+    (tmp_path / "p.bed").write_text("")
+    cache = tmp_path / "cache"
+    (cache / "sites").mkdir(parents=True)
+    (cache / "sites" / "r0000_0000.parquet").write_bytes(b"old part")
+    man = cache / "manifest.json"
+    man.write_text(json.dumps({"inputs": {"assembly": "another assembly", "group_of": [0]},
+                               "parts": ["r0000_0000.parquet"]}))
+
+    def killed(*a, **k):
+        raise RuntimeError("killed in the pileup pass")
+    monkeypatch.setattr(pipeline, "extract_sites", killed)
+    with pytest.raises(RuntimeError, match="killed"):
+        pipeline.run(fa, tmp_path / "p.bed", tmp_path / "cb.tsv", tmp_path / "motifs.tsv", tmp_path / "out",
+                     cache_dir=cache, workers=1)
+    assert not man.exists()

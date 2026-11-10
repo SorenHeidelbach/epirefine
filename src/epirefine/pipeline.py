@@ -132,6 +132,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         asm = EncodedAssembly(cache / "asm")
         _log(f"reusing site cache {cache} ({len(parts)} parts)")
     else:
+        # the old manifest goes first: a rebuild that is killed must not leave it describing parts and an
+        # encoded assembly that have been partly rewritten (a later run with the old inputs would reuse them)
+        man_path.unlink(missing_ok=True)
         asm = EncodedAssembly.write(pio.iter_fasta(assembly), cache / "asm")
         for f in (cache / "sites").glob("*.parquet") if (cache / "sites").exists() else []:
             f.unlink()
