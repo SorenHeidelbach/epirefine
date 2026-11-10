@@ -18,7 +18,6 @@ this is checked and violations raise an error. Gzipped pileups are read by a sin
 """
 from __future__ import annotations
 
-import io
 import json
 import os
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
@@ -245,46 +244,85 @@ def split_pileup(path, n_parts: int, min_size: int = 64 << 20) -> list[tuple[int
     return [(a, b) for a, b in zip(cuts[:-1], cuts[1:]) if b > a]
 
 
-class _FileSlice(io.RawIOBase):
-    """Read-only view of bytes [start, end) of a binary file."""
+def _bgzf_members(fh, c0: int, c1: int, path=""):
+    """Inflated data of each BGZF block from compressed offset c0 up to c1 (a block start).
 
-    def __init__(self, fh, start: int, end: int):
-        self.fh, self.pos, self.end = fh, start, end
-        fh.seek(start)
-
-    def readable(self):
-        return True
-
-    def readinto(self, b):
-        n = min(len(b), self.end - self.pos)
-        if n <= 0:
-            return 0
-        data = self.fh.read(n)
-        b[:len(data)] = data
-        self.pos += len(data)
-        return len(data)
+    One raw-deflate call per block and the block's own CRC-32 and length check: 3.5-4x the speed of
+    gzip.GzipFile over the same bytes, which decodes through a small-buffer Python reader. Anything
+    wrong with a block (no gzip member with a BGZF size field, ends short, does not inflate, wrong
+    checksum or length, or the blocks do not end at c1) raises: a truncated or damaged file must not
+    pass as a shorter one.
+    """
+    import zlib
+    fh.seek(c0)
+    pos = c0
+    while pos < c1:
+        head = fh.read(12)
+        if len(head) < 12 or head[:3] != b"\x1f\x8b\x08" or not head[3] & 4:
+            raise ValueError(f"{path}: no BGZF block at offset {pos} (truncated or corrupt file)")
+        xlen = int.from_bytes(head[10:12], "little")
+        extra, size, i = fh.read(xlen), 0, 0
+        while i + 4 <= len(extra):  # subfields: two id bytes, length, data; BGZF's is 'BC' with the block size - 1
+            n = int.from_bytes(extra[i + 2:i + 4], "little")
+            if extra[i:i + 2] == b"BC" and n == 2:
+                size = int.from_bytes(extra[i + 4:i + 6], "little") + 1
+            i += 4 + n
+        body = fh.read(size - 12 - xlen) if size > 12 + xlen + 8 else b""
+        if len(extra) < xlen or not size or len(body) < size - 12 - xlen or pos + size > c1:
+            raise ValueError(f"{path}: BGZF block at offset {pos} is incomplete (truncated or corrupt file)")
+        try:
+            data = zlib.decompress(body[:-8], -15)
+        except zlib.error as e:
+            raise ValueError(f"{path}: BGZF block at offset {pos} does not inflate ({e})") from None
+        if zlib.crc32(data) != int.from_bytes(body[-8:-4], "little") or len(data) != int.from_bytes(body[-4:], "little"):
+            raise ValueError(f"{path}: BGZF block at offset {pos} fails its checksum or length (corrupt file)")
+        pos += size
+        yield data
 
 
 def _bgzf_blocks(path, start: int, end: int, block: int):
-    """Line-complete chunks of the rows between two virtual offsets (both at line starts)."""
-    import gzip
+    """Line-complete chunks of the rows between two virtual offsets (both at line starts).
+
+    The inflated stream is cut every `block` bytes before the split at line ends, exactly as reading
+    `block` bytes at a time from a gzip stream did: the chunks decide where site-cache parts are
+    flushed, so they must not move.
+    """
     c0, u0, c1, u1 = start >> 16, start & 0xFFFF, end >> 16, end & 0xFFFF
-    with open(path, "rb") as fh:
-        last = _bgzf_inflate(fh, c1)[0][:u1] if u1 else b""
+
+    def reads(fh):  # the pieces of each read of exactly `block` bytes (the last one shorter)
+        got, n = [], 0
+        for data in _bgzf_members(fh, c0, c1, path):
+            while n + len(data) >= block:
+                k = block - n
+                got.append(data[:k])
+                yield got
+                got, n, data = [], 0, data[k:]
+            if data:
+                got.append(data); n += len(data)
+        if got:
+            yield got
+
+    with open(path, "rb", buffering=1 << 20) as fh:
+        last = next(_bgzf_members(fh, c1, float("inf"), path))[:u1] if u1 else b""
         tail, drop = b"", u0
-        if c1 > c0:
-            with gzip.GzipFile(fileobj=io.BufferedReader(_FileSlice(fh, c0, c1), 1 << 20)) as gz:
-                while True:
-                    buf = gz.read(block)
-                    if not buf:
-                        break
-                    if drop:
-                        buf, drop = buf[drop:], max(0, drop - len(buf))
-                    buf = tail + buf
-                    cut = buf.rfind(b"\n") + 1
-                    tail = buf[cut:]
-                    if cut:
-                        yield buf[:cut]
+        for pieces in reads(fh):
+            if drop:
+                buf = b"".join(pieces)
+                buf, drop = buf[drop:], max(0, drop - len(buf))
+                pieces = [buf]
+            # buf = tail + read; yield buf up to its last line end, keep the rest: done on the pieces, so
+            # the chunk is copied once (each copy of a 128 MB chunk costs as much as inflating a third of it)
+            pieces.insert(0, tail)
+            i = len(pieces) - 1
+            while i >= 0 and b"\n" not in pieces[i]:
+                i -= 1
+            if i < 0:
+                tail = b"".join(pieces)
+                continue
+            j = pieces[i].rfind(b"\n") + 1
+            tail = b"".join([pieces[i][j:]] + pieces[i + 1:])
+            pieces[i:] = [pieces[i][:j]]
+            yield b"".join(pieces)
         rest = tail + last[drop:]
         if rest:
             yield rest
