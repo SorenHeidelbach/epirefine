@@ -159,7 +159,12 @@ def test_fragment_losses_equal_the_posterior_based_ones():
     la, lb = ff.losses(1.7, None, 1.0, 0.3)
     Pa = posterior(S, Sc, 0.3, 1.7)
     assert la == pytest.approx(-np.log(Pa[np.arange(200), fb]))
-    # host absent: the remaining H - 1 bins share 1 - p
+    # the objective of 0.10: host absent, the other bins keep (1 - p) / H
+    mask = np.ones((200, 6), bool)
+    mask[np.arange(200), fb] = False
+    assert lb == pytest.approx(-np.log(posterior(S, Sc, 0.3, 1.7, host_mask=mask)[:, -1]))
+    # proper objective: the remaining H - 1 bins share 1 - p
+    la, lb = _fit(S, fb, Sc, {"prior-averaged"}).losses(1.7, None, 1.0, 0.3)
     Z = S / 1.7
     Z[np.arange(200), fb] = -np.inf
     lg = np.c_[Z + np.log(0.7 / 5), Sc / 1.7 + np.log(0.3)]
@@ -169,8 +174,9 @@ def test_fragment_losses_equal_the_posterior_based_ones():
 def test_matched_prior_recovers_temperature_one_where_the_legacy_objective_does_not():
     S, fb, Sc = _gaussian_fragments(np.random.default_rng(0))
     ff = _fit(S, fb, Sc, {"temper-then-mix", "prior-averaged", "unit-temperature"})
-    # the calibration of 0.10: posteriors at prior 0.1, tests A and B weighted 1 : 1
-    legacy = min(ff.temps, key=lambda T: sum(x.mean() for x in ff.losses(T, None, 1.0, 0.1)))
+    # the calibration of 0.10: posteriors at prior 0.1, tests A and B weighted 1 : 1 (any feature that does
+    # not choose a proper objective keeps it)
+    legacy = _fit(S, fb, Sc, {"temper-then-mix", "unit-temperature"}).fit(0.1, log=lambda *_: None)["fitted_temperature"]
     assert legacy > 1.4                          # inflated by the prior mismatch alone
     assert ff.fit(0.5, log=lambda *_: None)["fitted_temperature"] == pytest.approx(1.0, abs=0.07)
     matched = _fit(S, fb, Sc, {"temper-then-mix", "prior-matched", "unit-temperature"})

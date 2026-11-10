@@ -258,7 +258,8 @@ class FragmentFit:
 
     def losses(self, T: float, eta, lam, p: float):
         """Log loss per kept fragment in test A (host present: P of the source bin) and, for the decidable
-        ones, in test B (host absent: P of 'unknown'; the H - 1 remaining bins share 1 - p)."""
+        ones, in test B (host absent: P of 'unknown'). With a proper objective the H - 1 remaining bins
+        share 1 - p in test B; with the objective of 0.10 each keeps (1 - p) / H, as there."""
         k = np.flatnonzero(self.kept)
         key = ("u", T, eta, lam)
         if key not in self._cache:
@@ -268,25 +269,37 @@ class FragmentFit:
         lpb, lpu = np.log1p(-p) - np.log(self.H), np.log(p)
         la = -(lpb + own - np.logaddexp(lpb + all_, lpu + zu_a))
         d = self.distinct[k]
-        lpb1 = np.log1p(-p) - np.log(max(self.H - 1, 1))
+        lpb1 = np.log1p(-p) - np.log(max(self.H - 1, 1) if self.proper else self.H)
         lb = -(lpu + zu_b[d] - np.logaddexp(lpb1 + others[d], lpu + zu_b[d]))
         cap = -np.log(1e-12)
         return np.minimum(la, cap), np.minimum(lb, cap)
 
     def objective_terms(self, T, eta, lam, priors):
-        """Per-fragment contributions (A, B) to the objective: mean over priors of (1 - p) loss_A, p loss_B."""
+        """Per-fragment contributions (A, B) to the objective: sum over (prior, weight A, weight B) of
+        weight A * loss_A and weight B * loss_B at that prior."""
         la = lb = 0.0
-        for p in priors:
+        for p, wa, wb in priors:
             a, b = self.losses(T, eta, lam, p)
-            la, lb = la + (1 - p) * a / len(priors), lb + p * b / len(priors)
+            la, lb = la + wa * a, lb + wb * b
         return la, lb
 
     def objective(self, T, eta, lam, priors) -> float:
         la, lb = self.objective_terms(T, eta, lam, priors)
         return float(la.mean() + (lb.mean() if len(lb) else 0.0))
 
+    @property
+    def proper(self) -> bool:
+        """The objective is a proper score (prior = share of test B), not the objective of 0.10."""
+        return bool(self.features & {"prior-averaged", "prior-matched"})
+
     def priors_for(self, p_unknown: float) -> tuple:
-        return PRIOR_GRID if "prior-averaged" in self.features else (float(np.clip(p_unknown, 1e-3, 1 - 1e-3)),)
+        """The objective as (prior p_unknown, weight of test A, weight of test B) triples."""
+        if "prior-averaged" in self.features:
+            return tuple((p, (1 - p) / len(PRIOR_GRID), p / len(PRIOR_GRID)) for p in PRIOR_GRID)
+        p = float(np.clip(p_unknown, 1e-3, 1 - 1e-3))
+        if "prior-matched" in self.features:
+            return ((p, 1 - p, p),)
+        return ((p, 1.0, 1.0),)   # the objective of 0.10: the prior as given, the tests weighted 1 : 1
 
     def fit(self, p_unknown: float, log=print) -> dict:
         """(temperature, eta, lam) minimising the proper log score of the fragments' posteriors.
@@ -296,6 +309,7 @@ class FragmentFit:
         minimised by the true posterior, so the temperature measures how far the likelihood is off and
         does not also absorb a wrong prior. prior-matched uses p = p_unknown; prior-averaged averages the
         objective over PRIOR_GRID (a likelihood that is calibrated is calibrated under every prior).
+        Without either, the objective is the one of 0.10 (prior p_unknown as passed, tests weighted 1 : 1).
         """
         priors = self.priors_for(p_unknown)
         temps = sorted(set(self.temps) | ({1.0} if "unit-temperature" in self.features else set()))
