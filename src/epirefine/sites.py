@@ -340,7 +340,8 @@ class _Worker:
         self.matcher = MotifMatcher(self.motifs)
         self.group = np.array(cfg["group_of"], np.int32)
         self.rank = np.array(cfg["motif_rank"], np.int64)
-        self.gsize = np.array(group_sizes(cfg["group_of"], cfg["motif_rank"]), np.int64)
+        # order of the groups for shared positions: summed record counts, or the given ranks (motifs.specificity_ranks)
+        self.gsize = np.array(cfg.get("group_rank") or group_sizes(cfg["group_of"], cfg["motif_rank"]), np.int64)
         self.modc = np.array([MOD_CODE.get(m.mod_type, 3) for m in self.motifs], np.int64)
         self.wanted = cfg["wanted"]  # contig ids to keep (None = all)
         self.sep = int(max(len(m.seq) for m in self.motifs))
@@ -365,7 +366,7 @@ class _Worker:
                            "site": (cidx.astype(np.int64) << 50) | (rec["occ_motif"].astype(np.int64) << 36) | occ})
         # same rules as motifs.assign_sites: most specific group, then its most general motif
         return (df.sort(["key", "gsize", "group", "rank", "motif"], descending=[False, False, False, True, False])
-                .unique(subset="key", keep="first")
+                .unique(subset="key", keep="first", maintain_order=True)
                 .select("key", "group", "site"))
 
     def process(self, pile: pl.DataFrame, seen: set) -> pl.DataFrame | None:
@@ -444,14 +445,15 @@ def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, bloc
 
 def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: list[int], motif_rank,
                   out_dir, wanted: set[int] | None = None, workers: int | None = None,
-                  block: int = 128 << 20, flush_rows: int = 20_000_000, log=print) -> list[str]:
+                  block: int = 128 << 20, flush_rows: int = 20_000_000, log=print, group_rank=None) -> list[str]:
     """Run the pileup pass. Returns the Parquet part files (each holds whole contigs)."""
     out = Path(out_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     workers = workers or min(16, os.cpu_count() or 1)
     ranges = split_pileup(pileup, workers * 4)
     cfg = {"asm_dir": asm.directory, "motifs": [(m.seq, m.mod_pos, m.mod_type) for m in motifs],
-           "group_of": list(group_of), "motif_rank": list(motif_rank), "wanted": wanted}
+           "group_of": list(group_of), "motif_rank": list(motif_rank), "wanted": wanted,
+           "group_rank": list(group_rank) if group_rank is not None else None}
     log(f"  pileup pass: {len(ranges)} byte ranges on {min(workers, len(ranges))} workers")
     env_before = os.environ.get("POLARS_MAX_THREADS")
     os.environ["POLARS_MAX_THREADS"] = "1"

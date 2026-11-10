@@ -23,7 +23,8 @@ from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
 from .model import FittedModel, posterior
-from .motifs import build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights
+from .motifs import (build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights,
+                     specificity_ranks)
 from .redundancy import inclusion_redundancy
 from .refine import bin_evidence_table, refine, regional_pattern, write_outputs
 from .sites import EncodedAssembly, extract_sites, unit_tables
@@ -80,7 +81,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
-        variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
+        variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1,
+        shared_sites="sample"):
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
@@ -109,12 +111,19 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     rank_d = dict(records.group_by("motif").len().iter_rows())
     motif_rank = [int(rank_d.get(i, 0)) for i in range(len(motifs))]
     del records
+    if shared_sites not in ("sample", "motif"):
+        raise ValueError(f"shared_sites must be 'sample' or 'motif', not {shared_sites!r}")
     # a cache written with another numbering of the same groups is still valid: keep its labels
     man_path = cache / "manifest.json"
     cached = json.loads(man_path.read_text()) if man_path.exists() else None
     if cached and _same_partition(cached["inputs"].get("group_of", []), group_of):
         group_of = cached["inputs"]["group_of"]
     n_groups = max(group_of) + 1
+    # which group a position matched by several groups goes to: "sample" orders the groups by their record counts
+    # in the sample (seed-dependent for motifs of similar frequency); "motif" by the motifs' expected frequency
+    group_rank = None
+    if shared_sites == "motif":
+        motif_rank, group_rank = specificity_ranks(motifs, group_of)
     group_modtype = [next(motifs[i].mod_type for i in range(len(motifs)) if group_of[i] == g) for g in range(n_groups)]
     group_label = [",".join(motifs[i].key for i in range(len(motifs)) if group_of[i] == g) for g in range(n_groups)]
     _log(f"{len(motifs)} motifs -> {n_groups} groups (overlap from {sum(map(len, sample.values())) / 1e6:.0f} Mb)")
@@ -122,6 +131,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # pass 1: pileup -> site cache (reused when inputs are unchanged)
     man = _manifest(assembly=assembly, pileup=pileup, motifs=[m.key for m in motifs], group_of=group_of,
                     motif_rank=motif_rank, relevant=len(relevant), shared_sites="most_specific_group")
+    if group_rank is not None:  # (keys are added only for non-default rules, so existing caches stay valid)
+        man.update(shared_sites="motif_frequency", group_rank=group_rank)
     if cached and cached.get("inputs") == man:
         parts = [str(cache / "sites" / Path(f).name) for f in cached["parts"]]  # wherever the cache now lives
         asm = EncodedAssembly(cache / "asm")
@@ -132,7 +143,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
             f.unlink()
         wanted = None if len(relevant) == len(lengths) else {asm.index[c] for c in relevant}
         parts = extract_sites(asm, pileup, motifs, group_of, motif_rank, cache / "sites", wanted=wanted,
-                              workers=workers, log=_log)
+                              workers=workers, log=_log, group_rank=group_rank)
         man_path.write_text(json.dumps({"inputs": man, "parts": parts}))
     del sample
     cid = asm.index

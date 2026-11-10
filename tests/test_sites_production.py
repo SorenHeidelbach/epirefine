@@ -3,7 +3,8 @@ implementation (motifs.assign_sites) and against hand-worked pileups."""
 import numpy as np
 import polars as pl
 
-from epirefine.motifs import Motif, assign_sites, build_records, group_motifs, revcomp
+from epirefine.motifs import (Motif, assign_sites, build_records, expected_frequency, group_motifs, revcomp,
+                              specificity_ranks)
 from epirefine.sites import MOD_CODE, EncodedAssembly, _Worker, extract_sites
 
 MOTIFS = [Motif("GATC", 1, "a"), Motif("RGATCY", 2, "a"), Motif("CCWGG", 1, "m"), Motif("CCWGG", 1, "21839"),
@@ -59,6 +60,47 @@ def test_worker_records_match_assign_sites(tmp_path):
     # the same records in two batches of contigs (ids are per batch) give the same sites
     two = pl.concat([_decode(w.records([0, 1]), asm.names[:2]), _decode(w.records([2]), asm.names[2:])])
     assert _partition(two) == _partition(ref)
+
+
+def test_worker_records_match_assign_sites_with_motif_ranks(tmp_path):
+    contigs = _assembly(seed=1)
+    recs = build_records(contigs, MOTIFS)
+    group_of = group_motifs(recs, MOTIFS)
+    motif_rank, group_rank = specificity_ranks(MOTIFS, group_of)
+    ref = assign_sites(recs, group_of, dict(enumerate(motif_rank)), group_rank)
+    asm, w = _worker(tmp_path, contigs, MOTIFS, group_of, motif_rank, group_rank=group_rank)
+    got = _decode(w.records(list(range(len(asm.names)))), asm.names)
+    assert _partition(got) == _partition(ref)
+
+
+def test_specificity_from_the_motif_not_the_sample():
+    assert expected_frequency(Motif("GATC", 1, "a")) == 1 / 256
+    assert expected_frequency(Motif("RGATCY", 2, "a")) == 1 / 1024
+    assert expected_frequency(Motif("GAANNNNNNTGC", 2, "a")) == 4.0 ** -6
+    motifs = [Motif("TCGA", 3, "a"), Motif("GANTC", 1, "a"), Motif("GATC", 1, "a"), Motif("RGATCY", 2, "a"),
+              Motif("GAGNNNNNGTCA", 1, "a"), Motif("TGACNNNNNCTC", 2, "a"), Motif("GACBNNNNBGTCB", 1, "a")]
+    group_of = [0, 1, 2, 3, 4, 4, 5]
+    motif_rank, group_rank = specificity_ranks(motifs, group_of)
+    # nested: RGATCY is more specific than GATC; equal frequency: the key decides (GANTC < TCGA), always
+    assert group_rank[3] < group_rank[2] and group_rank[1] < group_rank[0]
+    # a complement pair is as frequent as one of its motifs, not twice: the pair (7 fixed bases) stays more
+    # specific than a lone motif whose frequency is 1.69 times that of one motif of the pair
+    assert group_rank[4] < group_rank[5]
+    # the order does not depend on the row order of the motif table
+    perm = [6, 3, 0, 5, 2, 1, 4]
+    m2, g2 = [motifs[i] for i in perm], [group_of[i] for i in perm]
+    mr2, gr2 = specificity_ranks(m2, g2)
+    assert [mr2[perm.index(i)] for i in range(7)] == motif_rank
+    assert [gr2[g] for g in range(6)] == group_rank
+    # TCGANTC: the shared A (pos 3, +) goes to GANTC in every sequence, whatever the counts in it
+    rng = np.random.default_rng(3)
+    for _ in range(6):
+        seq = "".join(rng.choice(list("ACGT"), 30000)) + "TTTCGAATCTT"
+        recs = build_records({"c": seq}, motifs[:2])
+        sites = assign_sites(recs, [0, 1], *[dict(enumerate(r)) if i == 0 else r
+                                              for i, r in enumerate(specificity_ranks(motifs[:2], [0, 1]))])
+        shared = sites.filter((pl.col("pos") == 30000 + 5) & (pl.col("strand") == "+"))
+        assert shared["group"].to_list() == [1]
 
 
 def _pileup_line(contig, pos, mod, strand, n, k):

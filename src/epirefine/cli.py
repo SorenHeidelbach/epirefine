@@ -72,6 +72,10 @@ def main(argv=None):
     r.add_argument("--min-jaccard", type=float, default=0.9,
                    help="merge motifs whose site sets overlap this much (Jaccard); positions shared by motifs "
                         "of different groups go to the most specific group")
+    r.add_argument("--shared-sites", choices=["sample", "motif"], default="sample",
+                   help="which group gets a position that motifs of several groups match: the group with the fewest "
+                        "occurrences in the sampled sequence (sample), or the one whose motif is least frequent in "
+                        "random sequence (motif; independent of the sample and the seed)")
     r.add_argument("--group-sample-mb", type=float, default=50,
                    help="Mb of sequence sampled to measure motif overlap for grouping")
     r.add_argument("--workers", type=int, help="processes for the pileup and table passes (default: CPUs, max 16)")
@@ -90,7 +94,7 @@ def main(argv=None):
             frags_per_bin=a.frags_per_bin, frag_budget=a.frag_budget, tau=a.tau, temperature=a.temperature,
             contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, min_jaccard=a.min_jaccard,
             variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
-            cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed)
+            cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed, shared_sites=a.shared_sites)
 
 
 if __name__ == "__main__":

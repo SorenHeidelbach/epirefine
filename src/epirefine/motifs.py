@@ -279,7 +279,47 @@ def group_sizes(group_of: list[int], motif_rank) -> list[int]:
     return out
 
 
-def assign_sites(records: pl.DataFrame, group_of: list[int], motif_rank: dict[int, int] | None = None) -> pl.DataFrame:
+def expected_frequency(m: Motif) -> float:
+    """Probability that a position of a random sequence (uniform bases) starts an occurrence of the motif:
+    the product over its positions of (allowed bases / 4). A property of the motif alone."""
+    p = 1.0
+    for c in m.seq:
+        p *= len(IUPAC[c].strip("[]")) / 4
+    return p
+
+
+def specificity_ranks(motifs: list[Motif], group_of: list[int]) -> tuple[list[int], list[int]]:
+    """(motif_rank, group_rank) for assign_sites, computed from the motifs themselves.
+
+    A position matched by several groups goes to the most specific one. Measured by record counts in a sample of
+    the assembly, "most specific" is a coin flip for motifs of similar frequency that are not nested (TCGA and
+    GANTC share the A of TCGANTC, 1/16 of each motif's sites; their counts differ by 0.2-3% between samples, so
+    the 6% changed sides with the seed), and a motif absent from the sample won every position. Here the order
+    is the expected frequency of the motif in random sequence, ties broken by the motif key, so it depends on
+    neither the sample, the seed nor the row order of the motif table. A nested motif always has a lower expected
+    frequency than the motif that contains it, so nested motifs are ordered as before.
+
+    motif_rank: position of each motif in ascending (expected frequency, key) order; larger = more general.
+    group_rank: position of each group in ascending order of (its most general member's expected frequency,
+    its smallest key); smaller = more specific. A group's members describe the same sites (near-identical site
+    sets, or a motif and its reverse complement), so the group is as frequent as its most general member, not
+    the sum of its members.
+    """
+    order = sorted(range(len(motifs)), key=lambda i: (expected_frequency(motifs[i]), motifs[i].key))
+    motif_rank = [0] * len(motifs)
+    for r, i in enumerate(order):
+        motif_rank[i] = r
+    n_groups = max(group_of) + 1
+    members = [[i for i in range(len(motifs)) if group_of[i] == g] for g in range(n_groups)]
+    gkey = [(max(expected_frequency(motifs[i]) for i in mem), min(motifs[i].key for i in mem)) for mem in members]
+    group_rank = [0] * n_groups
+    for r, g in enumerate(sorted(range(n_groups), key=lambda g: gkey[g])):
+        group_rank[g] = r
+    return motif_rank, group_rank
+
+
+def assign_sites(records: pl.DataFrame, group_of: list[int], motif_rank: dict[int, int] | None = None,
+                 group_rank: list[int] | None = None) -> pl.DataFrame:
     """Deduplicate records across motifs and give each a (group, site) id.
 
     A record matching motifs of *different* groups (e.g. the A in TCGANTC, shared by TCGA and GANTC;
@@ -289,7 +329,8 @@ def assign_sites(records: pl.DataFrame, group_of: list[int], motif_rank: dict[in
     both stay informative; dropping such records lost half of all positions on ZymoFecal. Within a
     group, a record shared by several motifs is claimed by the motif with the most records (most
     general). `motif_rank` (motif -> record count in the whole assembly or a sample of it) keeps both
-    choices consistent when records come in batches.
+    choices consistent when records come in batches. With `group_rank` (specificity_ranks) the order of
+    the groups is taken from it instead of from summed record counts.
     """
     keys = ["contig", "pos", "strand", "mod_type"]
     if motif_rank is None:
@@ -298,7 +339,7 @@ def assign_sites(records: pl.DataFrame, group_of: list[int], motif_rank: dict[in
         sizes = pl.DataFrame({"motif": list(motif_rank), "motif_n": list(motif_rank.values())},
                              schema={"motif": pl.Int32, "motif_n": pl.Int64})
     rank = dict(sizes.iter_rows())
-    gsize = group_sizes(group_of, [rank.get(i, 0) for i in range(len(group_of))])
+    gsize = list(group_rank) if group_rank is not None else group_sizes(group_of, [rank.get(i, 0) for i in range(len(group_of))])
     rec = (
         records.join(sizes, on="motif", how="left").with_columns(pl.col("motif_n").fill_null(0))
         .with_columns(pl.col("motif").replace_strict(dict(enumerate(group_of)), return_dtype=pl.Int32).alias("group"))
