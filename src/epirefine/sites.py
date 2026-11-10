@@ -363,14 +363,34 @@ def _blocks(path, start: int, end: int, block: int):
                 yield buf
 
 
+_PARSE_SCHEMA: dict | None = None
+
+
+def _parse_schema() -> dict:
+    """Types of the six columns read, keyed by the names read_csv gives projected headerless columns.
+
+    Contig, mod code and strand are text whatever a block holds: inferred per block, contig names made
+    of digits became integers (no contig matched: no sites, no error) and a block with only numeric
+    mod codes (21839) failed in the code lookup. The names are taken from a probe, not assumed: the
+    overrides written for 'column_2', 'column_10' and 'column_12' never applied, because this polars
+    numbers projected columns from 0.
+    """
+    global _PARSE_SCHEMA
+    if _PARSE_SCHEMA is None:
+        import io
+        probe = pl.read_csv(io.BytesIO(b"c\t1\t2\ta\t0\t+\t1\t2\t0\t1\t1.0\t1\n"), separator="\t", has_header=False,
+                            columns=_PARSE_COLS)
+        _PARSE_SCHEMA = dict(zip(probe.columns, (pl.Utf8, pl.Int64, pl.Utf8, pl.Utf8, pl.Int64, pl.Int64)))
+    return _PARSE_SCHEMA
+
+
 def _parse(block: bytes) -> pl.DataFrame:
     import io
     first = block[: block.find(b"\n")]
     if b" " in first:  # older modkit: columns 10+ space separated
         block = block.replace(b" ", b"\t")
     df = pl.read_csv(io.BytesIO(block), separator="\t", has_header=False, columns=_PARSE_COLS,
-                     comment_prefix="#", truncate_ragged_lines=True,
-                     schema_overrides={"column_2": pl.Int64, "column_10": pl.Int32, "column_12": pl.Int32})
+                     comment_prefix="#", truncate_ragged_lines=True, schema_overrides=_parse_schema())
     df.columns = ["contig", "pos", "mod_type", "strand", "n_valid", "n_mod"]
     return df
 

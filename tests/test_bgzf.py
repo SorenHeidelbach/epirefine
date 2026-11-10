@@ -125,3 +125,30 @@ def test_contig_spanning_many_blocks_gives_the_same_sites(tmp_path):
     assert out[1 << 30][0].height > 20 and out[1 << 30][2:] == ("c0", "c3")
     for block in (4096, 700):
         assert out[block][0].equals(out[1 << 30][0]) and out[block][1:] == out[1 << 30][1:]
+
+
+def _numeric_case(tmp_path, names, code, motif_type):
+    import polars as pl
+    from epirefine.sites import EncodedAssembly, _run_range
+    rng = random.Random(7)
+    contigs = {c: "".join(rng.choice("ACGT") for _ in range(1500)) for c in names}
+    asm = EncodedAssembly.write(contigs, tmp_path / "asm")
+    rows = [f"{name}\t{p}\t{p + 1}\t{code}\t0\t{'+' if base == 'A' else '-'}\t{p}\t{p + 1}\t0,0,0\t9\t5.0\t3\n"
+            for name, seq in contigs.items() for p, base in enumerate(seq) if base in "AT"]
+    (tmp_path / "p.bed").write_text("".join(rows))
+    cfg = {"asm_dir": asm.directory, "motifs": [("GATC", 1, motif_type)], "group_of": [0], "motif_rank": [1], "wanted": None}
+    r = _run_range(cfg, str(tmp_path / "p.bed"), 0, -1, str(tmp_path / "r"), 1 << 20, 10 ** 9)
+    return pl.concat([pl.read_parquet(f) for f in r["parts"]]) if r["parts"] else None, r
+
+
+def test_numeric_contig_names_give_sites(tmp_path):
+    """Contig names made of digits were read as integers and matched no contig of the assembly."""
+    sites, r = _numeric_case(tmp_path, ["12", "007", "c3"], "a", "a")
+    assert r["contigs"] == ["007", "12", "c3"] and sites is not None
+    assert sites["contig"].unique().sort().to_list() == [0, 1, 2] and sites["n"].is_in([9, 18]).all()
+
+
+def test_block_with_only_numeric_mod_codes(tmp_path):
+    """A block whose mod-code column holds only numbers (21839 = 4mC) was read as integers and crashed."""
+    sites, r = _numeric_case(tmp_path, ["c1", "c2"], "21839", "21839")
+    assert r["contigs"] == ["c1", "c2"]
