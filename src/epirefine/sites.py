@@ -447,7 +447,11 @@ class _Worker:
 def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, block: int, flush_rows: int):
     w = _Worker(cfg)
     seen: set = set()
-    parts, buf, n_buf, carry = [], [], 0, None
+    parts, buf, n_buf = [], [], 0
+    # rows of the last contig seen, which may continue in the next block: kept as the pieces each block
+    # added and joined once when the contig ends. Joined, compared and filtered again at every block, a
+    # contig spanning B blocks was copied B(B+1)/2 times (91 block copies instead of 13 for 10 Mbp).
+    carry, carry_name = [], None
     first_contig = last_contig = None
 
     def flush():
@@ -462,22 +466,26 @@ def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, bloc
         df = _parse(blk)
         if not df.height:
             continue
-        if carry is not None:
-            df = pl.concat([carry, df])
         last = df["contig"][-1]
         if first_contig is None:
             first_contig = df["contig"][0]
         tail = df["contig"] == last
-        carry, df = df.filter(tail), df.filter(~tail)  # the last contig may continue in the next block
+        rest, cur = (df.clear(), df) if tail.all() else (df.filter(~tail), df.filter(tail))
+        if carry and carry_name == last:  # the carried contig goes on (its rows stay ahead of this block's)
+            carry.append(cur)
+            df = rest
+        else:                             # it ended: its rows and this block's other contigs are complete
+            df = pl.concat(carry + [rest]) if carry else rest
+            carry, carry_name = [cur], last
         if df.height:
             s = w.process(df, seen)
             if s is not None:
                 buf.append(s); n_buf += s.height
         if n_buf >= flush_rows:
             flush()
-    if carry is not None and carry.height:
-        last_contig = carry["contig"][0]
-        s = w.process(carry, seen)
+    if carry:
+        last_contig = carry_name
+        s = w.process(pl.concat(carry), seen)
         if s is not None:
             buf.append(s)
     flush()

@@ -99,3 +99,29 @@ def test_damaged_bgzf_fails_loudly(tmp_path):
                      (good[:first + 30], first + 30)):          # cut inside a block
         with pytest.raises(ValueError, match="BGZF block"):
             read(raw, end)
+
+
+def test_contig_spanning_many_blocks_gives_the_same_sites(tmp_path):
+    """The rows of a contig that continues over many blocks are joined once; sites equal those of one big block."""
+    import polars as pl
+    from epirefine.sites import EncodedAssembly, _run_range
+    rng = random.Random(5)
+    contigs = {f"c{i}": "".join(rng.choice("ACGT") for _ in range(n)) for i, n in enumerate((3000, 40, 2500, 900))}
+    asm = EncodedAssembly.write(contigs, tmp_path / "asm")
+    rows = []
+    for name, seq in contigs.items():
+        for p, base in enumerate(seq):
+            if base in "AT":
+                n = rng.randrange(1, 30)
+                rows.append(f"{name}\t{p}\t{p + 1}\ta\t0\t{'+' if base == 'A' else '-'}\t{p}\t{p + 1}\t0,0,0\t{n}\t5.0\t{rng.randrange(n + 1)}\n")
+    pile = tmp_path / "p.bed"
+    pile.write_text("".join(rows))
+    cfg = {"asm_dir": asm.directory, "motifs": [("GATC", 1, "a"), ("CCWGG", 1, "m")], "group_of": [0, 1],
+           "motif_rank": [1, 1], "wanted": None}
+    out = {}
+    for block in (1 << 30, 4096, 700):
+        r = _run_range(cfg, str(pile), 0, -1, str(tmp_path / f"b{block}"), block, 10 ** 9)
+        out[block] = (pl.concat([pl.read_parquet(f) for f in r["parts"]]), r["contigs"], r["first"], r["last"])
+    assert out[1 << 30][0].height > 20 and out[1 << 30][2:] == ("c0", "c3")
+    for block in (4096, 700):
+        assert out[block][0].equals(out[1 << 30][0]) and out[block][1:] == out[1 << 30][1:]
