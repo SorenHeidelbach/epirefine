@@ -103,6 +103,9 @@ def main(argv=None):
                    help="unbinned genomes are community draws or genomes with none of the listed motifs (weights estimated)")
     r.add_argument("--inclusion-support", choices=["methylated_groups", "none"], default="none",
                    help="an inclusion must also reach the threshold on the motif groups its bin methylates alone")
+    r.add_argument("--tau-support", choices=["leave_bin_out", "all"], default="all",
+                   help="a motif group gets between-contig variation (finite tau) only if the calibration fragments support "
+                        "it without the bin that gains most, or on all fragments (0.10.x)")
     r.add_argument("--redundancy-order", choices=["sequential", "independent"], default="independent",
                    help="compare each inclusion candidate with the bin plus the inclusions already accepted, or with "
                         "the given bin only (0.10.x)")
@@ -122,7 +125,7 @@ def main(argv=None):
             regional_withdraw=a.regional_withdraw, regional_tempered=a.regional_tempered,
             gate_leave_out=a.gate_leave_out, gate_unweighted=a.gate_unweighted, eps_gated=a.eps_gated,
             redundancy_order=a.redundancy_order, unlisted_genome=a.unlisted_genome,
-            inclusion_support=a.inclusion_support)
+            inclusion_support=a.inclusion_support, tau_support=a.tau_support)
 
 
 if __name__ == "__main__":

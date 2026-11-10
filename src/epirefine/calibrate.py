@@ -125,7 +125,7 @@ def _reliability(P: np.ndarray, truth: np.ndarray, test: str) -> list[dict]:
 def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFrame, L_frag,
               chunks_of, p_unknown, H_frag=None, taus=DEFAULT_TAUS, temps=DEFAULT_TEMPS,
               lookalike_dist=0.15, decidable_bf=3.0, etas=DEFAULT_ETAS, lams=DEFAULT_LAMS,
-              allow_sharpening=False, n_sites_frag=None, leave_out=None, log=print, **model_kw):
+              allow_sharpening=False, n_sites_frag=None, leave_out=None, log=print, tau_support="all", **model_kw):
     """chunks_of[i]: host chunks fragment i overlaps (to check its label); leave_out[i]: chunks removed
     from its bin's profile when scoring it (default chunks_of; the pipeline passes the whole source
     contig)."""
@@ -145,13 +145,16 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         keep = has_rest & np.array([bool((model.w[ch] >= 0.5).all()) for ch in chunks_of])
         return sc, A_own, keep
 
-    tau_rows, best, warm, group_ll = [], None, {}, []
+    tau_rows, best, warm, group_ll, group_ll_bin = [], None, {}, [], []
     for tau in taus:
         model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau, **warm, **model_kw)
         warm = {"init_w": model.w, "init_pi": model.raw_pi}  # not the model: at most two are held at once
         sc, A_own, keep = own_and_scores(model)
         ll = float(sc.S[keep, fbin[keep]].sum())
         group_ll.append(A_own[keep].sum(0))
+        by_bin = np.zeros((H, A_own.shape[1]))
+        np.add.at(by_bin, fbin[keep], A_own[keep])
+        group_ll_bin.append(by_bin)
         tau_rows.append({"tau": float(tau), "label": f"{tau:g}", "loo_loglik": ll, "n_fragments": int(keep.sum())})
         log(f"  tau={tau:>8g}  LOO log-lik={ll:.1f}")
         if best is None or ll > best[0]:
@@ -161,7 +164,17 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     # intermediate, variable methylation need a finite tau; groups at 0 or 1 an infinite one)
     group_ll = np.array(group_ll)  # [n_taus, M]
     base = next((k for k, t in enumerate(taus) if grid.is_point(t)), len(taus) - 1)
-    tau_g = np.array([taus[k] for k in group_ll.argmax(0)], dtype=float)
+    pick = group_ll.argmax(0)
+    if tau_support == "leave_bin_out":
+        # Between-unit variation is a property of a motif group, shared by all bins. A finite tau that wins only
+        # through the fragments of one bin describes that bin (two methylomes in it: a contaminant's fragments
+        # scored against the host's profile), not the group, and it switches the group off as evidence in every
+        # bin. So each candidate's gain over "no variation" is counted without the bin that gains most.
+        gain = np.array(group_ll_bin) - group_ll_bin[base][None]       # [n_taus, H, M]
+        pick = (gain.sum(1) - gain.max(1)).argmax(0)
+    elif tau_support != "all":
+        raise ValueError(f"unknown tau_support {tau_support!r}")
+    tau_g = np.array([taus[k] for k in pick], dtype=float)
     if len(np.unique(tau_g)) > 1:
         model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau_g, **warm, **model_kw)
         sc, A_own, keep_g = own_and_scores(model)
@@ -173,7 +186,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             best = (ll, tau_g, sc, A_own, model, keep_g)
         del model
     tau_groups = pl.DataFrame({"group": np.arange(len(tau_g)), "tau": tau_g,
-                               "loo_loglik_gain_vs_no_variation": group_ll.max(0) - group_ll[base]})
+                               "loo_loglik_gain_vs_no_variation": group_ll[pick, np.arange(len(pick))] - group_ll[base]})
     _, tau, sc_best, A_own_best, best_model, keep = best
     if (~keep).any():
         log(f"  {int((~keep).sum())} fragments excluded: from chunks flagged foreign to their bin")

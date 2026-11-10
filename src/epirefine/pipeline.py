@@ -86,7 +86,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1,
         robust_fit="alternating", max_flagged_share=1.0, regional_leave_out="chunk", regional_withdraw="vs_foreign",
         regional_tempered=False, gate_leave_out="none", gate_unweighted=False, eps_gated=False,
-        redundancy_order="independent", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2):
+        redundancy_order="independent", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all"):
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
@@ -258,7 +258,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                         p_cal, H_frag=tabs["H_frag"], allow_sharpening=allow_sharpening,
                         leave_out=contig_chunks(frags["contig"].to_numpy(), chunk_contig),
                         taus=DEFAULT_TAUS if variation == "beta" else DEFAULT_SIGMAS, n_sites_frag=tabs["frag_sites"],
-                        log=_log, **model_kw)
+                        log=_log, tau_support=tau_support, **model_kw)
         names = dict(enumerate(bins))
         cal["lookalikes"] = cal["lookalikes"].select(
             pl.col("bin_idx").replace_strict(names, return_dtype=pl.Utf8).alias("bin"),
@@ -561,7 +561,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     if (two_share >= two_state_warning).any():
         tb = np.flatnonzero(two_share >= two_state_warning)
         _log(f"WARNING: {len(tb)} bins show two methylation states in a motif group among their chunks (the smaller state "
-             f"holds >= {two_state_warning:g} of the evidence; bin_evidence.tsv, two_state_share): they may hold two genomes. "
+             f"holds >= {two_state_warning:g} of the evidence; bin_evidence.tsv, two_state_share): two genomes or strains in the bin, or part of one genome in another state. "
              + ", ".join(f"{bins[b]} ({two_share[b]:.2f})" for b in tb[:10]))
     # don't include contigs whose sequence the target bin already holds (strain variants, haplotigs):
     # methylation can't see redundancy (D21)
