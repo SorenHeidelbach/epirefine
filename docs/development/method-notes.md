@@ -627,6 +627,27 @@ A reliability table, the τ and T fits, and accuracy against assignability (§8.
 Together these give a **sample-specific detection limit**: how short a plasmid can be and still be
 assigned reliably *in this sample*, with its coverage, motif repertoire and caller behaviour.
 
+### 7.6 Calibration designs (`--calibration`)
+
+The calibration of 0.10 (`--calibration legacy`, the default) is the one described above. A set of
+features, each selectable alone, changes one step each (`epirefine.calibrate.FEATURES`);
+`--calibration coherent` switches on the proposed set, `coherent,-name` leaves one out.
+
+| Feature | What changes |
+|---|---|
+| `temper-then-mix` | "Unknown" is a mixture of $H + 1$ explanations: a community draw (weight $\lambda$) and a relative of each bin (weight $(1-\lambda)/H$). Each is tempered on its own and the tempered terms are mixed, $Z_u = \log\big(\lambda e^{S_c/T} + \tfrac{1-\lambda}{H}\sum_h e^{R_h/T}\big)$, as the bins are. The legacy order (mix, then divide by $T$) also tempers the weights $1/H$ and gives "unknown" $\log(H)(1 - 1/T)$ of log odds over a bin that fits perfectly. No effect when $\lambda = 1$ or $T = 1$. |
+| `prior-averaged` | $(T, \eta, \lambda)$ minimise a proper score. A share $p$ of unbinned contigs has no bin (test B), $1 - p$ has one (test A), and the posterior is computed with that same prior: $J(\theta; p) = (1-p)\,\overline{\mathrm{LL}}_A + p\,\overline{\mathrm{LL}}_B$, averaged over $p = 0.1, 0.3, 0.5, 0.7, 0.9$. The legacy objective scores posteriors at prior 0.1 with the tests weighted 1 : 1, and then inflates $T$ to make up for the prior (1.62 on exact synthetic likelihoods whose true $T$ is 1). In test B the $H - 1$ remaining bins share $1 - p$. |
+| `prior-matched` | The same objective at one prior, the estimated $p_\text{unknown}$: fit, estimate $p_\text{unknown}$, refit, until the fit stops changing. Excludes `prior-averaged`. |
+| `unit-temperature` | Adds $T = 1$ to the grid, so "never sharpen" clips at 1 instead of at the grid's first value above 1 (1.082). |
+| `sites-temperature` | $T$ may rise with a unit's number of sites: the best $T \ge 1$ per fragment length, made non-decreasing (pool adjacent violators), interpolated in log sites, constant outside the calibrated range; used only when it beats one temperature by more than 2 SE. |
+| `common-tau` | $\tau$ values (and the per-group choice) are compared on the fragments every $\tau$ fit keeps; each fit otherwise drops the fragments its own robust weights call foreign, which favours large $\tau$. |
+| `em-priors` | $p_\text{unknown}$ gets a Beta(2, 2) prior (a flat prior runs to 0 or 1 with a handful of unbinned contigs); the contamination rate counts only contigs that pass the methylome-difference gate (the gate inside the E-step). |
+
+Written in every mode: `calibration/false_flag_rate.tsv`, the share of member fragments (scored without
+their contig) that the deployed rule would flag, per fragment length, with and without the fragments the
+robust profiles exclude; and `calibration/reliability_deployed.tsv`, the reliability of the fragments'
+posteriors at the priors and temperature actually used for decisions.
+
 ---
 
 ## 8. Uncertainty, assignability and diagnostics
