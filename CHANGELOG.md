@@ -3,6 +3,18 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.10.2 (2026-11-10): no machine paths in the repository
+
+No change to results.
+- `benchmarks/benchmark_suite.py` and `benchmarks/monoculture_sets.py` take the data root from `--data-root` or
+  `EPIREFINE_DATA` and the dev log from `--devlog` or `EPIREFINE_DEVLOG`, and stop with a clear message when neither
+  is given; no tracked file names a location on the development server any more.
+- `benchmarks/suite_monocultures.json` holds paths relative to the data root (`root` key); absolute entries still work.
+- `CLAUDE.md`, `.gitignore` and the developer notes describe locations by environment variable.
+- Two tests for the suite loader.
+
+**Benchmark effect:** none (no package code changed).
+
 ## 0.10.1 (2026-11-02): user documentation
 
 No change to results.
