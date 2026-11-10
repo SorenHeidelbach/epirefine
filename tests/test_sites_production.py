@@ -229,3 +229,8 @@ def test_auto_splits_strands_only_where_they_can_differ(tmp_path):
     assert run("auto") == [(1, 3, 10, 0), (1, 6, 10, 10), (0, 7, 10, 10), (0, 17, 20, 20), (2, 29, 6, 6), (2, 30, 4, 0)]
     assert run("split") == [(1, 3, 10, 0), (1, 6, 10, 10), (0, 7, 10, 10), (0, 17, 9, 9), (0, 18, 11, 11),
                             (2, 29, 6, 6), (2, 30, 4, 0)]
+    # auto marks the single-strand halves of two-strand occurrences (for the per-occurrence contig coverage); the
+    # lone - strand record of the GATC occurrence whose + strand went to ATCGAT is not a half. sum writes no column.
+    auto = pl.concat([pl.read_parquet(p) for p in sorted((tmp_path / "auto").glob("*.parquet"))]).sort("pos")
+    assert auto["half"].to_list() == [1, 1, 0, 0, 1, 1]
+    assert "half" not in pl.read_parquet(sorted((tmp_path / "sum").glob("*.parquet"))[0]).columns

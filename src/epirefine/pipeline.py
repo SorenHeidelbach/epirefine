@@ -138,7 +138,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     if complement_pairs != "sequence":
         man.update(complement_pairs=complement_pairs)
     if strand_sites != "sum":
-        man.update(strand_sites=strand_sites)
+        man.update(strand_sites=strand_sites + ("+half" if strand_sites == "auto" else ""))
     if cached and cached.get("inputs") == man:
         parts = [str(cache / "sites" / Path(f).name) for f in cached["parts"]]  # wherever the cache now lives
         asm = EncodedAssembly(cache / "asm")
@@ -158,7 +158,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # contig coverage (median reads per motif site, all sites): contigs below min_contig_coverage get
     # no decision at all (status low_coverage) and don't feed the calibration fragments. Against Hi-C
     # on ZymoFecal, flags on contigs below 5x were confirmed for 12.5% (81% at >= 10x).
-    cov_of = dict(pl.scan_parquet(parts).group_by("contig").agg(pl.col("n").median()).collect().iter_rows())
+    # With --strand-sites auto some occurrences are stored as two single-strand sites (column half); their reads
+    # are doubled here, so that the coverage of a contig does not depend on how many of its sites were cut.
+    n_site = pl.col("n") * (1 + pl.col("half")) if "half" in pl.scan_parquet(parts).collect_schema().names() else pl.col("n")
+    cov_of = dict(pl.scan_parquet(parts).group_by("contig").agg(n_site.median()).collect().iter_rows())
     # motif groups whose methylation is partial on many contigs of many genomes are caller noise:
     # they are dropped from every pass below (caller fit, likelihood tables, evidence)
     drop = []

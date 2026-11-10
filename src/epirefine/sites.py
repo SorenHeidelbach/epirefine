@@ -364,7 +364,7 @@ class _Worker:
             codes[o:o + len(s)] = s
         rec = self.matcher.find(codes)
         if not len(rec["pos"]):
-            return pl.DataFrame(schema={"key": pl.Int64, "group": pl.Int32, "site": pl.Int64})
+            return pl.DataFrame(schema={"key": pl.Int64, "group": pl.Int32, "site": pl.Int64, "half": pl.Boolean})
         cidx = np.searchsorted(offsets, rec["pos"], side="right") - 1
         pos = rec["pos"] - offsets[cidx]
         occ = rec["occ"] - 2 * offsets[cidx]
@@ -385,8 +385,13 @@ class _Worker:
               .unique(subset="key", keep="first", maintain_order=True))
         if self.strand_sites == "auto":
             uneven = pl.col("n_groups").min().over("site") != pl.col("n_groups").max().over("site")
-            df = df.with_columns(pl.when(pl.col("pair") | uneven).then(pl.col("rec_site")).otherwise(pl.col("site")).alias("site"))
-        return df.select("key", "group", "site")
+            # half: a single-strand site cut out of an occurrence that has a record on each strand
+            df = (df.with_columns((pl.col("pair") | uneven).alias("cut"), (pl.len().over("site") > 1).alias("two"))
+                  .with_columns(pl.when("cut").then(pl.col("rec_site")).otherwise(pl.col("site")).alias("site"),
+                                (pl.col("cut") & pl.col("two")).alias("half")))
+        else:
+            df = df.with_columns(pl.lit(False).alias("half"))
+        return df.select("key", "group", "site", "half")
 
     def process(self, pile: pl.DataFrame, seen: set) -> pl.DataFrame | None:
         names = pile["contig"].unique(maintain_order=True).to_list()
@@ -416,10 +421,16 @@ class _Worker:
         if not hit.height:
             return None
         agg = hit.group_by("site").agg(pl.col("group").first(), (pl.col("key") // 8).min().alias("pk"),
-                                       pl.col("n_valid").sum().alias("n"), pl.col("n_mod").sum().alias("k"))
+                                       pl.col("n_valid").sum().alias("n"), pl.col("n_mod").sum().alias("k"),
+                                       pl.col("half").first())
         cid = np.array(cids, np.int32)[(agg["site"].to_numpy() >> 50) & 0xFFF]
-        return pl.DataFrame({"contig": cid, "group": agg["group"], "pos": agg["pk"].to_numpy() & ((1 << 33) - 1),
-                             "n": agg["n"], "k": agg["k"]}).cast(SITE_SCHEMA)
+        out = pl.DataFrame({"contig": cid, "group": agg["group"], "pos": agg["pk"].to_numpy() & ((1 << 33) - 1),
+                            "n": agg["n"], "k": agg["k"]}).cast(SITE_SCHEMA)
+        if self.strand_sites == "auto":
+            # one more column in this mode only: the site holds one strand of a two-strand occurrence, so that
+            # contig coverage (median reads per site) can still be counted per occurrence
+            out = out.with_columns(agg["half"].cast(pl.Int8).alias("half"))
+        return out
 
 
 def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, block: int, flush_rows: int):
