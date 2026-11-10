@@ -483,6 +483,43 @@ def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: l
 # second pass: site cache -> per-unit likelihood tables
 
 
+def _fragment_rows(cid: np.ndarray, pos: np.ndarray, fr: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """(unit, row) for every site row inside a calibration fragment (contig, start <= pos < end).
+
+    A site can lie in several fragments (of different lengths): one pair per (site, fragment), rows
+    ascending and the fragments of a row in the order of `fr`, which is the order of the join it
+    replaces. A part is sorted by (contig, pos), so the rows of a fragment are one interval found by
+    binary search. Joining sites to fragments on the contig and filtering on position afterwards
+    paired every site of a contig with every fragment of it first: 330-360 million rows (14-16 GB)
+    for a part of complete genomes with 18 fragments each, of which under 4 million survived.
+    """
+    fc, fs, fe, fu = (fr[c].to_numpy() for c in ("contig", "start", "end", "unit"))
+    if len(cid) > 1 and not (cid[1:] >= cid[:-1]).all():
+        lo = hi = None  # not sorted by contig: fall back to the join
+    else:
+        lo, hi = np.searchsorted(cid, fc, "left"), np.searchsorted(cid, fc, "right")
+        for a, b in set(zip(lo.tolist(), hi.tolist())):
+            if b - a > 1 and not (pos[a + 1:b] >= pos[a:b - 1]).all():
+                lo = None
+                break
+    if lo is None:
+        f = (pl.DataFrame({"row": np.arange(len(cid)), "contig": cid, "pos": pos})
+             .join(fr.select("unit", "contig", "start", "end"), on="contig", how="inner")
+             .filter((pl.col("pos") >= pl.col("start")) & (pl.col("pos") < pl.col("end"))))
+        return f["unit"].to_numpy(), f["row"].to_numpy()
+    rows, units = [], []
+    for j in np.flatnonzero(hi > lo):
+        p = pos[lo[j]:hi[j]]
+        a, b = lo[j] + np.searchsorted(p, fs[j], "left"), lo[j] + np.searchsorted(p, fe[j], "left")
+        if b > a:
+            rows.append(np.arange(a, b)); units.append(np.full(b - a, fu[j], fu.dtype))
+    if not rows:
+        return np.zeros(0, fu.dtype), np.zeros(0, np.int64)
+    rows, units = np.concatenate(rows), np.concatenate(units)
+    order = np.argsort(rows, kind="stable")
+    return units[order], rows[order]
+
+
 def _unit_part(part: str, cfg: dict) -> dict:
     from .assignability import expected_tables
     from .detection import DetectionParams
@@ -518,12 +555,9 @@ def _unit_part(part: str, cfg: dict) -> dict:
         out["targets"] = tables(to[rows], rows, False)
     fr = cfg["frags"]
     if fr is not None and fr.height:
-        # a site can lie in several fragments (of different lengths): one row per (site, fragment)
-        f = (pl.DataFrame({"row": np.arange(df.height), "contig": cid, "pos": pos})
-             .join(fr, on="contig", how="inner")
-             .filter((pl.col("pos") >= pl.col("start")) & (pl.col("pos") < pl.col("end"))))
-        if f.height:
-            out["frags"] = tables(f["unit"].to_numpy(), f["row"].to_numpy(), True)
+        units, rows = _fragment_rows(cid, pos, fr)
+        if len(rows):
+            out["frags"] = tables(units, rows, True)
     return out
 
 

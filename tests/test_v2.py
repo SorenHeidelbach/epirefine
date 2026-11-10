@@ -271,3 +271,30 @@ def test_inclusion_into_unmethylated_bin_needs_higher_posterior():
     r = refine(S, np.array([-40., -40.]), given, given >= 0, temperature=1.0, p_unknown=0.01,
                unmethylated_bins=np.array([False, True, False]), include_threshold_unmethylated=0.95)
     assert r.include_bin.tolist() == [-1, 0]
+
+
+def test_fragment_rows_match_the_join():
+    """The range lookup returns the (unit, row) pairs of the join on contig filtered on position, in its order."""
+    from epirefine.sites import _fragment_rows
+    rng = np.random.default_rng(3)
+    cid = np.sort(rng.integers(0, 6, 4000)).astype(np.int32)
+    pos = np.concatenate([np.sort(rng.integers(0, 30_000, int((cid == c).sum()))) for c in range(6)]).astype(np.int64)
+    fr = pl.DataFrame({"unit": np.arange(40), "contig": rng.integers(0, 8, 40).astype(np.int32),
+                       "start": rng.integers(0, 6, 40) * 5000}).with_columns((pl.col("start") + 5000).alias("end"))
+    fr = pl.concat([fr, fr.head(5).with_columns(pl.col("unit") + 40, pl.lit(0, pl.Int64).alias("start"),
+                                                  pl.lit(20_000, pl.Int64).alias("end"))])
+
+    def join(cid, pos):
+        f = (pl.DataFrame({"row": np.arange(len(cid)), "contig": cid, "pos": pos}).join(fr, on="contig", how="inner")
+             .filter((pl.col("pos") >= pl.col("start")) & (pl.col("pos") < pl.col("end"))))
+        return f["unit"].to_numpy(), f["row"].to_numpy()
+    u, r = _fragment_rows(cid, pos, fr)
+    ju, jr = join(cid, pos)
+    assert len(r) > 500 and np.array_equal(u, ju) and np.array_equal(r, jr)
+    # a part that is not sorted takes the join itself
+    p = rng.permutation(len(cid))
+    u, r = _fragment_rows(cid[p], pos[p], fr)
+    ju, jr = join(cid[p], pos[p])
+    assert sorted(zip(u.tolist(), r.tolist())) == sorted(zip(ju.tolist(), jr.tolist()))
+    u, r = _fragment_rows(cid, pos, fr.filter(pl.col("contig") > 6))
+    assert len(u) == 0 and len(r) == 0
