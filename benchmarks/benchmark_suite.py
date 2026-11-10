@@ -89,6 +89,7 @@ def run_scenario(sc: dict, out_root: Path, workers: int = 16) -> dict:
            "--contig-bin", sc["contig_bin"], "--motifs", sc["motifs"], "--out", str(out), "--workers", str(workers)]
     if sc.get("cache"):
         cmd += ["--cache-dir", sc["cache"]]
+    cmd += [str(x) for x in sc.get("args", [])]  # extra epirefine options of a suite variant
     t0 = time.time()
     p = subprocess.run(cmd, capture_output=True, text=True)
     wall = time.time() - t0
@@ -124,6 +125,8 @@ def main():
     ap.add_argument("--note", default="", help="what changed, stored with the history row")
     ap.add_argument("--jobs", type=int, default=1,
                     help="scenarios run at once (faster; timings then aren't comparable with jobs=1 records)")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="processes per scenario (default: 16 divided by --jobs)")
     a = ap.parse_args()
     if not a.devlog:
         sys.exit("development log not set: pass --devlog <dir> or set the EPIREFINE_DEVLOG environment variable")
@@ -134,7 +137,7 @@ def main():
     tag = f"{ver}_{sha}{'-dirty' if dirty else ''}"
     out_root = (Path(a.out_root) if a.out_root else data_root(a.data_root) / "runs/epirefine/dev/bench_runs") / tag
     rows = []
-    workers = max(1, 16 // a.jobs)
+    workers = a.workers or max(1, 16 // a.jobs)
 
     def one(sc):
         print(f"[{datetime.now():%H:%M:%S}] {sc['name']} ...", flush=True)
