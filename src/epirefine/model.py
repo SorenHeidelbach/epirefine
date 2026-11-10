@@ -26,10 +26,36 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
-from scipy.special import expit, logsumexp
+from scipy.special import expit
 
 from .detection import DetectionParams, bb_logpmf
 from .grid import Grid
+
+
+def logsumexp(a: np.ndarray, axis: int = -1, keepdims: bool = False) -> np.ndarray:
+    """log sum exp(a) along one axis: the arithmetic of scipy.special.logsumexp (1.15 and later) without
+    its array-API layer, which cost 86 us per call and was 60% of calibration and scoring, called once per
+    fragment and per contig.
+
+    As scipy does: the largest elements (m of them when tied) are taken out of the sum, s = the sum of
+    exp(a - max) over the rest divided by m, result = log1p(s) + log(m) + max; rows whose result is not
+    finite (all -inf, an inf, a nan) fall back to log(sum(exp(a))). Same operations on the same operands,
+    so the same bits (test against scipy).
+    """
+    a = np.asarray(a)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        a_max = a.max(axis=axis, keepdims=True)
+        top = a == a_max
+        m = top.sum(axis=axis, keepdims=True, dtype=a.dtype)
+        e = np.exp(a - a_max)
+        e[top] = 0.0
+        s = e.sum(axis=axis, keepdims=True)
+        s = np.where(s == 0, s, s / m)
+        out = np.log1p(s) + np.log(m) + a_max
+        finite = np.isfinite(out)
+        if not finite.all():
+            out = np.where(finite, out, np.log(np.exp(a).sum(axis=axis, keepdims=True)))
+    return out if keepdims else out.squeeze(axis)
 
 
 def site_terms(keys: pl.DataFrame, det: dict[int, DetectionParams], grid: Grid, block: int = 65_536) -> np.ndarray:

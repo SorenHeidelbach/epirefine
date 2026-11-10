@@ -399,3 +399,24 @@ def test_batched_summary_does_not_depend_on_the_batch():
     for batch in (1, 4, 50, 2000):
         got = _batched_summary(G, lambda sl: L[sl], len(L), batch=batch)
         assert all(np.array_equal(a, b) for a, b in zip(got, ref))
+
+
+def test_lean_logsumexp_has_the_bits_of_scipy():
+    import scipy
+    from scipy.special import logsumexp as ref
+    from epirefine.model import logsumexp as lse
+    rng = np.random.default_rng(0)
+    same = np.array_equal if tuple(int(v) for v in scipy.__version__.split(".")[:2]) >= (1, 15) else np.allclose
+    for shape, axis, dt in (((300, 40, 64), -1, np.float64), ((300, 50), 1, np.float64), ((64,), -1, np.float64),
+                            ((100, 7, 64), -1, np.float32), ((1, 495), 1, np.float64)):
+        a = (-rng.gamma(2, 30, shape)).astype(dt)
+        a.reshape(-1)[::17] = -np.inf
+        if a.ndim > 1 and len(a) > 2:
+            a[0] = -np.inf          # nothing in the row
+            a[1] = a[1].max()       # every element tied for the maximum
+            a[2, ..., :2] = 0.0     # two tied maxima
+        for kd in (False, True):
+            x, y = ref(a, axis=axis, keepdims=kd), lse(a, axis=axis, keepdims=kd)
+            assert np.shape(x) == np.shape(y) and x.dtype == y.dtype and same(x, y, equal_nan=True)
+    odd = np.array([[np.inf, 1.0], [np.nan, 1.0], [-np.inf, -np.inf]])
+    assert np.array_equal(ref(odd, axis=1), lse(odd, axis=1), equal_nan=True)
