@@ -17,6 +17,7 @@ import numpy as np
 import polars as pl
 
 from . import io as pio
+from . import runinfo
 from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate, contig_chunks, fragment_chunks,
                         fragments_per_bin, select_fragments)
 from .detection import detection_table, fit_detection_by_bin
@@ -81,8 +82,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
+    provenance = runinfo.provenance(dict(locals()))  # first statement: locals() are the options as given
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
+    runinfo.write_params(out / "params.json", provenance)  # a run that does not finish leaves its settings
     rng = np.random.default_rng(seed)
     cache = Path(cache_dir) if cache_dir else out / "cache"
 
@@ -242,7 +245,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         return int(remap[chunk_offset[contig_id] + c])
 
     p_cal = 0.1 if p_unknown is None else p_unknown  # prior used before p_unknown is estimated (refinement)
-    params = {"chunk_size": chunk_size, "grid_size": grid_size, "p_unknown": p_unknown, "min_cov": min_cov,
+    params = {**provenance, "chunk_size": chunk_size, "grid_size": grid_size, "p_unknown": p_unknown, "min_cov": min_cov,
               "contam_eps": contam_eps}
     model_kw = {"contam_eps": contam_eps}
     if do_calibrate:
@@ -506,6 +509,6 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         "bin": np.repeat(bins + ["_population_prior_"], n_groups), "group": np.tile(np.arange(n_groups), nb),
         "motifs": np.tile(group_label, nb), "phi_mean": mean.ravel(), "phi_lo95": lo.ravel(), "phi_hi95": hi.ravel(),
         "p_phi_gt_0.5": pp.ravel()}), out / "host_profiles.tsv")
-    (out / "params.json").write_text(json.dumps(params, indent=2, default=lambda o: o.tolist() if hasattr(o, "tolist") else float(o)))
+    runinfo.write_params(out / "params.json", {**params, "finished": True})
     _log(f"done -> {out}")
     return out

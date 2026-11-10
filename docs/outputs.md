@@ -105,5 +105,20 @@ outputs can read EpiRefine's.
   fitted temperature, overall and by length (`temperature_fit.tsv`, `temperature_by_length.tsv`), the variation
   parameter (`tau_fit.tsv`, `tau_groups.tsv`), the pieces themselves (`fragments.tsv`), how well each bin can be told
   apart (`assignability.tsv`) and bins whose methylation looks alike (`lookalikes.tsv`).
-- **`params.json`**: the fitted and chosen parameters: temperature, variation, share of unbinned contigs from
-  genomes without a bin (`p_unknown`), share of contaminants (`contamination_rate`) and the settings used.
+- **`params.json`**: what the run was made with and what it fitted. Written when the run starts (`finished` is
+  `false`) and completed at the end, so an interrupted run still shows its settings.
+  - Provenance: `version`, `command_line`, `start_time` (UTC), `python`, `inputs` (path, size in bytes and
+    modification time of the assembly, pileup, contig-bin table and motif table), `out`, `cache_dir`, `workers`,
+    `seed`.
+  - Every option as given, under the name of the command-line option with underscores (`contamination_threshold`,
+    `include_threshold`, `include_threshold_unmethylated`, `min_methylome_difference`, `max_redundancy`,
+    `min_evidence`, `min_contig_coverage`, `min_contig_length`, `min_cov`, `chunk_size`, `grid_size`, `contam_eps`,
+    `min_jaccard`, `variation`, `frag_lengths`, `frags_per_bin`, `frag_budget`, `allow_sharpening`, and the switches
+    `motif_noise_filter`, `group_weights`, `regional_model`, `regional_inclusion`, `do_calibrate`,
+    `write_motif_fit`; `group_sample_bp` is `--group-sample-mb` in bp). `p_unknown_given`, `tau_given` and
+    `temperature_given` hold `--p-unknown`, `--tau` and `--temperature` (`null` when not given).
+  - Fitted values: `temperature` (used) and `fitted_temperature`, `tau` (variation), `unknown_eta`, `unknown_lam`,
+    `n_fragments`, `p_unknown` (share of unbinned contigs from genomes without a bin) and `contamination_rate`
+    (share of contaminants among binned contigs).
+  - The file is strict JSON: an infinite value is written as the string `"inf"` (a `tau` of `"inf"` means no
+    variation between a contig and its bin), a missing one as `null`.
