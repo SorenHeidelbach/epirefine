@@ -347,3 +347,26 @@ def test_summed_scores_same_bits_whatever_the_memory_budget():
         assert np.array_equal(S, S0) and np.array_equal(R, R0), budget
         assert np.array_equal(md.summed_scores(Lp, prof, max_bytes=budget), S0), budget
     assert np.allclose(S0, A.sum(-1), rtol=1e-12, atol=0)
+
+
+def test_scores_keep_lp_rows_of_chosen_units_only():
+    """score(lp_rows=...) gives the same scores, and leave-one-out rescoring of a kept unit the same bits."""
+    import pytest
+    rng = np.random.default_rng(4)
+    model = _model([[0.95, 0.01, 0.01], [0.01, 0.95, 0.01], [0.01, 0.01, 0.95]], rng=rng)
+    model.set_unknown_params(0.05, 0.9)
+    L = np.stack([_sim_L(p, 40, rng=rng) for p in ([0.95, 0.01, 0.01], [0.01, 0.95, 0.01], [0.5, 0.5, 0.5],
+                                                 [0.01, 0.01, 0.95], [0.95, 0.95, 0.01])])
+    full, part = model.score(L), model.score(L, lp_rows=[1, 3])
+    assert part.Lp.shape[0] == 2 and np.array_equal(part.Lp, full.Lp[[1, 3]])
+    for f in ("S", "Su", "Au", "Su_comm", "R"):
+        assert np.array_equal(getattr(full, f), getattr(part, f))
+    for i, b in ((1, 1), (3, 2)):
+        a = model.loo_rescore(full, i, b, np.array([6 * b]))
+        assert np.array_equal(a, model.loo_rescore(part, i, b, np.array([6 * b])))
+    assert np.array_equal(full.S, part.S) and np.array_equal(full.R, part.R) and np.array_equal(full.Su, part.Su)
+    assert np.array_equal(model.host_terms(full, np.array([3, 1]), np.array([0, 2])),
+                          model.host_terms(part, np.array([3, 1]), np.array([0, 2])))
+    for i in (0, 2, 4):
+        with pytest.raises(KeyError):
+            part.lp(i)

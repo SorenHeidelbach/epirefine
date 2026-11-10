@@ -291,7 +291,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
 
     # score every contig against every bin; binned contigs leave-one-out, so their own bin's profile
     # is built without them
-    sc = model.score(L_t)
+    # (their Lp rows are the only ones the leave-one-out scores read: the rest is not kept)
+    sc = model.score(L_t, lp_rows=[i for i, c in enumerate(targets) if c in host_set])
     sole_contig = set()
     bin_chunks = np.bincount(chunk_bin, minlength=H)
     own_chunks: dict[int, list[int]] = {}

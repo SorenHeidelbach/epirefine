@@ -289,9 +289,19 @@ class Scores:
     S: np.ndarray        # [U, H]   log P(unit | bin)
     Su: np.ndarray       # [U]      log P(unit | unbinned genome)
     Au: np.ndarray       # [U, M]   per-group terms under a community draw
-    Lp: np.ndarray       # [U, M, G]
+    Lp: np.ndarray       # [U, M, G], or [len(lp_rows), M, G] when only some units' rows were kept
     Su_comm: np.ndarray  # [U]      community part of the unbinned-genome score
     R: np.ndarray        # [U, H]   score as an unbinned relative of each bin
+    lp_rows: np.ndarray | None = None  # ascending unit indices whose Lp rows are held (None: all units)
+
+    def lp(self, rows):
+        """Lp of unit(s) `rows` (unit indices), wherever their rows sit in the kept table."""
+        if self.lp_rows is None:
+            return self.Lp[rows]
+        j = np.searchsorted(self.lp_rows, rows)
+        if np.any(j >= len(self.lp_rows)) or np.any(self.lp_rows[np.minimum(j, len(self.lp_rows) - 1)] != rows):
+            raise KeyError("Lp was not kept for these units (see FittedModel.score, lp_rows)")
+        return self.Lp[j]
 
 
 class FittedModel:
@@ -360,13 +370,21 @@ class FittedModel:
     def set_unknown_params(self, eta: float | None, lam: float):
         self.eta, self.lam = eta, lam
 
-    def score(self, L_units) -> Scores:
+    def score(self, L_units, lp_rows=None) -> Scores:
+        """Scores of every unit. lp_rows: ascending unit indices whose Lp rows the result keeps (for
+        loo_rescore and host_terms); None keeps all. The pipeline keeps the binned contigs only: Lp of
+        all targets is a second copy of their likelihood tables (18.8 GB for 80,526 contigs x 913
+        groups), read afterwards for the leave-one-out scores of binned contigs and nothing else.
+        """
         Lp = self.marginal(L_units)
         Au = group_scores(Lp, self.log_pi[None])[:, 0, :]
         S, R = summed_scores(Lp, self.log_prof, rel=(self.eta if self.eta else 0.05, Au))
         Su_comm = Au.sum(1)
         Su = unknown_score(R, Su_comm, self.eta, self.lam)
-        return Scores(S, Su, Au, Lp, Su_comm, R)
+        if lp_rows is not None:
+            lp_rows = np.asarray(lp_rows, dtype=np.int64)
+            Lp = Lp[lp_rows]
+        return Scores(S, Su, Au, Lp, Su_comm, R, lp_rows)
 
     def host_terms(self, sc: Scores, rows: np.ndarray, hosts: np.ndarray | None = None,
                    log_prof: np.ndarray | None = None, batch: int = 1000) -> np.ndarray:
@@ -375,7 +393,7 @@ class FittedModel:
         for s in range(0, len(rows), batch):
             r = rows[s:s + batch]
             prof = self.log_prof[hosts[s:s + batch]] if log_prof is None else log_prof[s:s + batch]
-            A[s:s + batch] = logsumexp(sc.Lp[r].astype(np.float64) + prof, -1)
+            A[s:s + batch] = logsumexp(sc.lp(r).astype(np.float64) + prof, -1)
         return A
 
     def loo_profile(self, bin_idx: int, chunk_ids: np.ndarray) -> np.ndarray:
@@ -388,7 +406,7 @@ class FittedModel:
 
         Returns the per-group terms A[m] of that leave-out score.
         """
-        A = logsumexp(sc.Lp[i].astype(np.float64) + self.loo_profile(bin_idx, chunk_ids)[0], -1)
+        A = logsumexp(sc.lp(i).astype(np.float64) + self.loo_profile(bin_idx, chunk_ids)[0], -1)
         sc.S[i, bin_idx] = A.sum()
         eta = self.eta if self.eta else 0.05
         sc.R[i, bin_idx] = np.logaddexp(np.log1p(-eta) + A, np.log(eta) + sc.Au[i]).sum()
