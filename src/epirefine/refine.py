@@ -32,17 +32,20 @@ CONFIDENCE = ((0.95, "high_confidence"), (0.8, "medium_confidence"), (0.5, "low_
 
 
 def em_weight(l_in: np.ndarray, l_out: np.ndarray, a: float = 1.0, b: float = 1.0, iters: int = 500,
-              tol: float = 1e-8) -> tuple[float, np.ndarray]:
+              tol: float = 1e-8, can_be_out: np.ndarray | None = None) -> tuple[float, np.ndarray]:
     """MAP weight w of the mixture (1 - w) P_in + w P_out from per-item log-likelihoods.
 
     Beta(a, b) prior on w. Returns w and each item's responsibility P(out | data).
+    can_be_out[i] = False: item i cannot be "out" whatever its likelihoods (it counts as "in" in the
+    estimate of w); the returned responsibilities are still the likelihood-based ones for every item.
     """
     if len(l_in) == 0:
         return (a - 1) / max(a + b - 2, 1e-12) if a + b > 2 else 0.5, np.zeros(0)
     d = l_out - l_in
+    ok = np.ones(len(d)) if can_be_out is None else np.asarray(can_be_out, float)
     w = 0.5
     for _ in range(iters):
-        r = expit(np.log(w) - np.log1p(-w) + d)
+        r = expit(np.log(w) - np.log1p(-w) + d) * ok
         new = (r.sum() + a - 1) / (len(r) + a + b - 2)
         new = float(np.clip(new, 1e-6, 1 - 1e-6))
         if abs(new - w) < tol:
@@ -69,7 +72,8 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
            eps_prior=(1.0, 19.0), p_unknown_prior=(1.0, 1.0), p_unknown: float | None = None,
            methylome_difference: np.ndarray | None = None, min_difference: float = 0.4,
            decidable: np.ndarray | None = None, unmethylated_bins: np.ndarray | None = None,
-           include_threshold_unmethylated: float = 0.95) -> Refinement:
+           include_threshold_unmethylated: float = 0.95, Zu: np.ndarray | None = None,
+           eps_after_gate: bool = False) -> Refinement:
     """given[i] = bin index of contig i, -1 if unbinned; testable[i] = binned and scored leave-one-out.
     decidable[i] = False: no decision about contig i at all (e.g. coverage too low): it is neither
     flagged nor included and doesn't enter the estimates of p_unknown and the contamination rate.
@@ -85,10 +89,19 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     least min_difference in some group: a foreign genome has a different set of MTases (a motif
     methylated in one, not the other), whereas small consistent shifts over many sites are
     within-genome variation that the likelihood alone reads as overwhelming evidence (dev log D20).
+
+    Zu[i]: the unknown hypothesis' tempered log-score (model.unknown_logit: every explanation tempered, then
+    mixed); when given, Su is not used.
+
+    eps_after_gate: the contamination rate counts only contigs that can be flagged, i.e. that clear
+    min_difference. Without it eps is estimated before the gate withdraws its flags, so contigs the gate
+    clears (73% of the likelihood-only flags on human_gut, D20) still raise the prior odds of "foreign"
+    for every other contig, and the reported rate is a discordance rate, not a contamination rate.
     """
     N, H = S.shape
     T = np.asarray(temperature, float)  # scalar or one per contig
-    Z, Zu = S / (T[:, None] if T.ndim == 1 else T), Su / T
+    Z = S / (T[:, None] if T.ndim == 1 else T)
+    Zu = Su / T if Zu is None else np.asarray(Zu, float)
     dec = np.ones(N, bool) if decidable is None else np.asarray(decidable, bool)
     testable = testable & dec
     unb = (given < 0) & dec
@@ -111,7 +124,10 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
 
     p_foreign = np.full(N, np.nan)
     t = testable & (given >= 0)
-    eps, r = em_weight(Z[t, own[t]], l_alt[t], *eps_prior)
+    gate_ok = None
+    if eps_after_gate and methylome_difference is not None:
+        gate_ok = methylome_difference[t] >= min_difference
+    eps, r = em_weight(Z[t, own[t]], l_alt[t], *eps_prior, can_be_out=gate_ok)
     p_foreign[t] = r
     contaminant = np.zeros(N, bool)
     contaminant[t] = r >= contamination_threshold

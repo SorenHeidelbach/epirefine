@@ -226,17 +226,63 @@ def unknown_score(R: np.ndarray, Su_comm: np.ndarray, eta: float, lam: float,
     return np.logaddexp(np.log(lam) + Su_comm, np.log1p(-lam) + rel)
 
 
+def unknown_logit(R: np.ndarray | None, Su_comm: np.ndarray, eta: float | None, lam: float, temperature,
+                  exclude: np.ndarray | None = None, temper_then_mix: bool = True) -> np.ndarray:
+    """Tempered log-score of the unbinned-genome hypothesis, to be added to its log prior.
+
+    "Unbinned genome" is a mixture of H + 1 elementary explanations: a community draw (prior weight lam) and
+    a relative of bin h (weight (1 - lam) / H each). The temperature T is a power on the likelihood of the
+    data under one explanation (the data carry 1 / T of their nominal information); the mixture weights are
+    prior probabilities and are not data. So every explanation is tempered on its own and the tempered terms
+    are mixed (temper_then_mix, the coherent order):
+
+        Zu = log( lam exp(Su_comm / T) + (1 - lam) / H * sum_h exp(R_h / T) )
+
+    exactly as the bins are (exp(S_h / T), then prior (1 - p_u) / H). temper_then_mix=False is the earlier
+    order, unknown_score(...) / T: the mixture is summed first and then tempered, which also raises the
+    weights 1 / H to the power 1 / T. A contig that fits one bin (and so that bin's relative) and nothing
+    else then gains log(H) (1 - 1 / T) of log odds for "unknown" over its bin from the order of operations
+    alone: 5 nats at H = 490, T = 5.
+
+    temperature: scalar or one value per unit. lam = 1 (or eta = None) is the community-only model, where
+    both orders agree.
+    """
+    T = np.asarray(temperature, float)
+    if eta is None or lam >= 1 or R is None:
+        return Su_comm / T
+    if not temper_then_mix:
+        return unknown_score(R, Su_comm, eta, lam, exclude) / T
+    R = np.array(R, dtype=float, copy=True)
+    H = R.shape[1]
+    n = np.full(len(R), H, dtype=float)
+    if exclude is not None:
+        ex = exclude >= 0
+        R[np.flatnonzero(ex), exclude[ex]] = -np.inf
+        n[ex] = H - 1
+    rel = logsumexp(R / (T[:, None] if T.ndim else T), axis=1) - np.log(np.maximum(n, 1))
+    return np.logaddexp(np.log(lam) + Su_comm / T, np.log1p(-lam) + rel)
+
+
 def score_units(Lp: np.ndarray, log_prof: np.ndarray) -> np.ndarray:
     """S[u, h] = log P(unit | host h) without own-MTase terms."""
     return summed_scores(Lp, log_prof)
 
 
-def posterior(S_hosts: np.ndarray, S_unknown: np.ndarray, p_unknown: float, temperature: float = 1.0,
-              host_mask: np.ndarray | None = None) -> np.ndarray:
-    """Posterior over [bins..., unknown]. host_mask[u, h] = False removes bin h as a candidate for unit u."""
+def posterior(S_hosts: np.ndarray, S_unknown: np.ndarray | None, p_unknown: float, temperature=1.0,
+              host_mask: np.ndarray | None = None, Zu: np.ndarray | None = None) -> np.ndarray:
+    """Posterior over [bins..., unknown]. host_mask[u, h] = False removes bin h as a candidate for unit u.
+
+    temperature: scalar or one value per unit. Zu: the unknown hypothesis' tempered log-score
+    (unknown_logit); when given it is used as it is and S_unknown is ignored, otherwise the unknown's
+    logit is S_unknown / temperature.
+    """
     U, H = S_hosts.shape
+    T = np.asarray(temperature, float)
     prior = np.r_[np.full(H, np.log((1 - p_unknown) / H)), np.log(p_unknown)]
-    logits = np.concatenate([S_hosts, S_unknown[:, None]], 1) / temperature + prior[None, :]
+    if Zu is None:
+        logits = np.concatenate([S_hosts, S_unknown[:, None]], 1) / (T[:, None] if T.ndim else T) + prior[None, :]
+    else:
+        logits = np.concatenate([S_hosts / (T[:, None] if T.ndim else T), Zu[:, None]], 1) + prior[None, :]
     if host_mask is not None:
         logits[:, :H] = np.where(host_mask, logits[:, :H], -np.inf)
     return np.exp(logits - logsumexp(logits, axis=1, keepdims=True))
@@ -359,3 +405,11 @@ class FittedModel:
         sc.R[i, bin_idx] = np.logaddexp(np.log1p(-eta) + A, np.log(eta) + sc.Au[i]).sum()
         sc.Su[i] = unknown_score(sc.R[i:i + 1], sc.Su_comm[i:i + 1], self.eta, self.lam)[0]
         return A
+
+    def relatives(self, sc: Scores, eta: float, loo: dict | None = None) -> np.ndarray:
+        """R[u, h] for another eta than the one `sc` was scored with (the unknown model can be refitted once
+        p_unknown is known). loo: {unit: (bin, A[m])} from loo_rescore, so the leave-out terms are kept."""
+        _, R = summed_scores(sc.Lp, self.log_prof, rel=(eta, sc.Au))
+        for i, (b, A) in (loo or {}).items():
+            R[i, b] = np.logaddexp(np.log1p(-eta) + A, np.log(eta) + sc.Au[i]).sum()
+        return R

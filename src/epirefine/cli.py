@@ -61,6 +61,10 @@ def main(argv=None):
     r.add_argument("--allow-sharpening", action="store_true",
                    help="use a fitted temperature < 1 (default: clip at 1, never sharpen posteriors)")
     r.add_argument("--no-calibrate", action="store_true")
+    r.add_argument("--calibration", default="legacy",
+                   help="calibration design: 'legacy' (as in 0.10), 'coherent', or a comma-separated list of features "
+                        "(unit-temperature, temper-then-mix, prior-averaged, prior-matched, sites-temperature, common-tau, "
+                        "em-priors; '-name' removes one from 'coherent'). See docs/development/method-notes.md")
     r.add_argument("--frag-lengths", type=lambda s: tuple(int(x) for x in s.split(",")), default=DEFAULT_LENGTHS)
     r.add_argument("--frags-per-bin", type=int, default=30, help="cap on calibration fragments per bin and length")
     r.add_argument("--frag-budget", type=int, default=6000,
@@ -88,7 +92,7 @@ def main(argv=None):
             include_threshold=a.include_threshold, min_methylome_difference=a.min_methylome_difference,
             max_redundancy=a.max_redundancy, min_evidence=a.min_evidence, min_contig_coverage=a.min_contig_coverage, min_contig_length=a.min_contig_length, motif_noise_filter=not a.no_motif_noise_filter, group_weights=not a.no_group_weights, regional_model=not a.no_regional_model, regional_inclusion=a.regional_inclusion, include_threshold_unmethylated=a.include_threshold_unmethylated, do_calibrate=not a.no_calibrate, frag_lengths=a.frag_lengths,
             frags_per_bin=a.frags_per_bin, frag_budget=a.frag_budget, tau=a.tau, temperature=a.temperature,
-            contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, min_jaccard=a.min_jaccard,
+            contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, calibration=a.calibration, min_jaccard=a.min_jaccard,
             variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
             cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed)
 
