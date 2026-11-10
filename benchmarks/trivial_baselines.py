@@ -5,13 +5,15 @@ binning, and the run's site cache for sequence and read counts) and give every c
 compared as precision-recall curves and at EpiRefine's own precision (benchmarks/evidence_metrics.py).
 
 Contamination (a score per binned contig; higher = more likely foreign to its bin):
-  coverage      robust z of log coverage against the bin (median, MAD); coverage is the mean read count at the
-                contig's motif sites in the site cache
+  coverage      robust z of log coverage against the bin (median, MAD, plus the contig's own counting noise
+                1 / reads, so that a short contig with a handful of reads is not an outlier by chance);
+                coverage is the mean read count at the contig's motif sites in the site cache
   tetra         distance of the contig's tetranucleotide frequencies (136 strand-symmetric 4-mers) to the bin's
                 length-weighted centroid without the contig, as a robust z among bin contigs of similar length
                 (short contigs have noisy frequencies, so distances are compared within length classes)
   gc            the same for |GC - bin GC|
-  cov_tetra     coverage and tetra combined, sqrt(z_cov^2 + max(z_tetra, 0)^2)
+  cov_tetra     coverage or tetra: sqrt(z_cov^2 + max(z_tetra, 0)^2)
+  cov_and_tetra coverage and tetra: min(z_cov, z_tetra), an outlier in both (as RefineM's strictest setting asks)
   naive_meth    "the contig lacks a motif the rest of its bin has methylated": over motif groups with at least
                 `min_sites` sites on the contig and a pooled methylated read fraction >= 0.5 in the rest of the
                 bin, 1 - the contig's lowest methylated fraction (so the rule "fraction < x" is score > 1 - x)
@@ -92,12 +94,13 @@ def load_features(cache: str | Path) -> dict:
             **site_tables(parts, len(asm.names))}
 
 
-def _robust_z(x: np.ndarray, ref: np.ndarray, floor: float) -> np.ndarray:
+def _robust_z(x: np.ndarray, ref: np.ndarray, floor: float, extra_var=0.0) -> np.ndarray:
+    """(x - median(ref)) / spread; spread = MAD-based sd of ref (at least floor), plus a per-item variance."""
     ref = ref[np.isfinite(ref)]
     if not len(ref):
         return np.full(len(x), np.nan)
     med = np.median(ref)
-    return (x - med) / max(1.4826 * np.median(np.abs(ref - med)), floor)
+    return (x - med) / np.sqrt(max(1.4826 * np.median(np.abs(ref - med)), floor) ** 2 + extra_var)
 
 
 def _z_by_length(x, length, members, targets, floor, min_ref=8):
@@ -119,7 +122,8 @@ def contamination_scores(f: dict, given_bin: dict, min_sites: int = 10) -> pl.Da
     b_of = np.array([bins.index(given_bin[c]) if c in given_bin else -1 for c in names])
     logcov = np.log(np.where(f["cov_mean"] > 0, f["cov_mean"], np.nan))
     frac = np.divide(f["K"], f["N"], out=np.full(f["K"].shape, np.nan), where=f["N"] > 0)
-    cols = {k: np.zeros(len(names)) for k in ("coverage", "tetra", "gc", "cov_tetra", "naive_meth", "naive_meth2")}
+    noise = 1 / np.maximum(f["N"].sum(1), 1)          # variance of the log of a Poisson mean: 1 / reads
+    cols = {k: np.zeros(len(names)) for k in ("coverage", "tetra", "gc", "cov_tetra", "cov_and_tetra", "naive_meth", "naive_meth2")}
     for b in range(len(bins)):
         m = np.nonzero(b_of == b)[0]
         if len(m) < 2:
@@ -132,12 +136,13 @@ def contamination_scores(f: dict, given_bin: dict, min_sites: int = 10) -> pl.Da
         dg = np.full(len(names), np.nan)
         gc_rest = ((L[m] * f["gc"][m]).sum() - L[m] * f["gc"][m]) / (W - L[m])
         dg[m] = np.abs(f["gc"][m] - gc_rest)
-        z_cov = np.abs(np.nan_to_num(_robust_z(logcov[m], logcov[m], 0.05)))
+        z_cov = np.abs(np.nan_to_num(_robust_z(logcov[m], logcov[m], 0.05, noise[m])))
         z_tet = np.nan_to_num(_z_by_length(d, L, m, m, 0.05))
         cols["coverage"][m] = z_cov
         cols["tetra"][m] = z_tet
         cols["gc"][m] = np.nan_to_num(_z_by_length(dg, L, m, m, 0.002))
         cols["cov_tetra"][m] = np.sqrt(z_cov ** 2 + np.maximum(z_tet, 0) ** 2)
+        cols["cov_and_tetra"][m] = np.minimum(z_cov, np.maximum(z_tet, 0))
         Kb, Nb = f["K"][m].sum(0), f["N"][m].sum(0)
         rest = np.divide(Kb - f["K"][m], Nb - f["N"][m], out=np.full(f["K"][m].shape, np.nan), where=(Nb - f["N"][m]) > 0)
         enough = f["S"][m] >= min_sites
@@ -157,6 +162,7 @@ def inclusion_scores(f: dict, given_bin: dict, min_sites: int = 10) -> pl.DataFr
     u = np.nonzero(b_of < 0)[0]
     logcov = np.log(np.where(f["cov_mean"] > 0, f["cov_mean"], np.nan))
     frac = np.divide(f["K"], f["N"], out=np.full(f["K"].shape, np.nan), where=f["N"] > 0)
+    noise = 1 / np.maximum(f["N"].sum(1), 1)
     D = np.full((len(u), len(bins)), np.inf)          # coverage + tetranucleotide distance to each bin
     M = np.full((len(u), len(bins)), np.inf)          # worst-group methylation difference to each bin
     same = np.zeros((len(u), len(bins)), bool)        # same methylated / unmethylated set as the bin
@@ -171,7 +177,7 @@ def inclusion_scores(f: dict, given_bin: dict, min_sites: int = 10) -> pl.DataFr
         d[m] = np.log(np.linalg.norm(f["tnf"][m] - (tot - w * f["tnf"][m]) / (W - w), axis=1) + 1e-6)
         d[u] = np.log(np.linalg.norm(f["tnf"][u] - tot / W, axis=1) + 1e-6)
         z_tet = np.maximum(_z_by_length(d, L, m, u, 0.05), 0)
-        z_cov = _robust_z(logcov[u], logcov[m], 0.05)
+        z_cov = _robust_z(logcov[u], logcov[m], 0.05, noise[u])
         D[:, b] = np.nan_to_num(np.sqrt(z_cov ** 2 + z_tet ** 2), nan=np.inf)
         Nb = f["N"][m].sum(0)
         level = np.divide(f["K"][m].sum(0), Nb, out=np.full(len(Nb), np.nan), where=Nb > 0)

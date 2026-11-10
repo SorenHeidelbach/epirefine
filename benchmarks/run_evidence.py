@@ -69,7 +69,7 @@ NEEDS_SWITCH = [
     "look-alike distance 0.15 and decidable BF 3 in calibration (rules 26, 27)",
     "prior p_unknown 0.1 during calibration (rule 24)"]
 UNDECIDED = ("low_coverage", "too_short", "no_methylation_evidence")
-BASELINES = ("coverage", "tetra", "gc", "cov_tetra", "naive_meth", "naive_meth2")
+BASELINES = ("coverage", "tetra", "gc", "cov_tetra", "cov_and_tetra", "naive_meth", "naive_meth2")
 STRATA = (("all", 0.0), (">= 5x", 5.0), (">= 10x", 10.0))
 
 
@@ -144,7 +144,7 @@ def baselines(a, out: Path, scen: list[dict]) -> None:
         t = pl.read_csv(sc["truth"], separator="\t").with_columns(pl.col("given_bin").fill_null(""))
         given = {c: b for c, b in zip(t["contig"], t["given_bin"]) if b}
         f = tb.load_features(sc["cache"])
-        pl.DataFrame({"contig": f["names"], "coverage": f["cov_median"]}).write_csv(f"{pre}.features.tsv", separator="\t")
+        pl.DataFrame({"contig": f["names"], "site_coverage": f["cov_median"]}).write_csv(f"{pre}.features.tsv", separator="\t")
         tb.contamination_scores(f, given, a.min_sites).write_csv(f"{pre}.contamination.tsv", separator="\t", float_precision=4)
         tb.inclusion_scores(f, given, a.min_sites).write_csv(f"{pre}.inclusion.tsv", separator="\t", float_precision=4)
         print(f"  baselines: {sc['name']}", flush=True)
@@ -165,7 +165,7 @@ def calls(sc: dict, d: Path, out: Path) -> pl.DataFrame | None:
                      pl.col("best_alternative").alias("alt_bin"), num("p_best_alternative").alias("p_alt"))
     cov = pl.read_csv(out / "baselines" / f"{sc['name']}.features.tsv", separator="\t")
     return (t.join(dec, on="contig", how="left").join(cov, on="contig", how="left")
-            .with_columns(pl.col("decided").fill_null(False), pl.col("coverage").fill_null(0.0),
+            .with_columns(pl.col("decided").fill_null(False), pl.col("site_coverage").fill_null(0.0),
                           pl.col("contig").str.split("__").list.first().alias("isolate"),
                           pl.lit(sc["name"]).alias("scenario"), pl.lit(sc["base"]).alias("base"), pl.lit(sc["group"]).alias("group")))
 
@@ -189,7 +189,7 @@ def _weights(isolate: np.ndarray, n_boot: int, seed: int = 0) -> np.ndarray:
     return rng.multinomial(len(names), np.full(len(names), 1 / len(names)), size=n_boot)[:, inv]
 
 
-def _curve_row(score, correct, positive, isolate, target_precision, n_boot) -> dict:
+def _curve_row(score, correct, positive, isolate, target_precision, n_boot, target_recall=None) -> dict:
     """Average precision and recall at the required precisions of one score, with isolate-bootstrap intervals."""
     row = {"average_precision": em.average_precision(score, correct, positive)}
     levels = {"recall_at_epirefine_precision": target_precision, "recall_at_p95": 0.95, "recall_at_p90": 0.90}
@@ -197,10 +197,12 @@ def _curve_row(score, correct, positive, isolate, target_precision, n_boot) -> d
         row[k], thr = em.recall_at_precision(score, correct, p, positive)
         if k == "recall_at_epirefine_precision":
             row["threshold"] = thr
+    if target_recall is not None:
+        row["precision_at_epirefine_recall"] = em.precision_at_recall(score, correct, target_recall, positive)
     W = _weights(isolate, n_boot)
     ap = [em.average_precision(score, correct, positive, w) for w in W]
     rr = [em.recall_at_precision(score, correct, target_precision, positive, w)[0] for w in W]
-    row["average_precision_ci"] = "{:.3f}-{:.3f}".format(*np.percentile(ap, [2.5, 97.5]))
+    row["average_precision_ci"] = "{:.3f}-{:.3f}".format(*np.nanpercentile(ap, [2.5, 97.5]))
     row["recall_at_epirefine_precision_ci"] = "{:.1f}-{:.1f}".format(*(100 * np.percentile(rr, [2.5, 97.5])))
     return row
 
@@ -217,8 +219,7 @@ def contamination_tables(D: pl.DataFrame, out: Path, n_boot: int) -> tuple[pl.Da
         epi = np.where(flagged, 1 + g["p_foreign"].to_numpy(), np.where(g["decided"].to_numpy(), np.minimum(g["p_foreign"].to_numpy(), 0.999), 0.0))
         scores = {"EpiRefine": epi, **{b: g[b].fill_null(0.0).to_numpy() for b in BASELINES}}
         pos = (g["tp"] + g["fn"]).to_numpy() > 0
-        iso, cov, length = g["isolate"].to_numpy(), g["coverage"].to_numpy(), g["length"].to_numpy()
-        thr_all = {}
+        iso, cov, length = g["isolate"].to_numpy(), g["site_coverage"].to_numpy(), g["length"].to_numpy()
         for stratum, lo in STRATA:
             m = cov >= lo
             c = _sum(g.filter(pl.Series(m)))
@@ -232,12 +233,11 @@ def contamination_tables(D: pl.DataFrame, out: Path, n_boot: int) -> tuple[pl.Da
                     row.update(flags=c["tp"] + c["fp"], precision=r["contam_precision"], precision_ci=_ci(g.filter(pl.Series(m)), "isolate", "contam_precision", 2000),
                                recall_all=r["contam_recall"], recall_all_ci=_ci(g.filter(pl.Series(m)), "isolate", "contam_recall", 2000),
                                recall_decided=em.rates(_sum(dd))["contam_recall"], undecided_contaminants=int((pos & m & ~g["decided"].to_numpy()).sum()))
-                row.update(_curve_row(s[m], pos[m], None, iso[m], target, n_boot))
+                row.update(_curve_row(s[m], pos[m], None, iso[m], target, n_boot, r["contam_recall"]))
                 rows.append(row)
-                if stratum == "all":
-                    thr_all[tool] = row["threshold"]
+        thr_all = {b: em.recall_at_precision(scores[b], pos, 0.90)[1] for b in BASELINES}
         # per length class: share of planted contaminants found, EpiRefine's calls vs each baseline at the
-        # threshold that gives it EpiRefine's pooled precision (chosen with the truth: generous to the baseline)
+        # threshold that gives it 90% pooled precision (chosen with the truth: generous to the baseline)
         cls = em.length_class(length)
         for _, _, name in em.LENGTH_CLASSES:
             m = (cls == name) & pos
@@ -247,13 +247,14 @@ def contamination_tables(D: pl.DataFrame, out: Path, n_boot: int) -> tuple[pl.Da
                    "EpiRefine": float(flagged[m].mean())}
             row.update({b: float((scores[b][m] >= thr_all[b]).mean()) for b in BASELINES})
             lens.append(row)
-        # which contaminants does methylation add? composition/coverage outlier (cov_tetra at 90% precision) x EpiRefine flag
-        _, t90 = em.recall_at_precision(scores["cov_tetra"], pos, 0.90)
-        outlier = scores["cov_tetra"] >= t90
-        cells.append({"group": group, "contaminants": int(pos.sum()),
-                      "both": int((pos & outlier & flagged).sum()), "epirefine_only": int((pos & ~outlier & flagged).sum()),
-                      "cov_tetra_only": int((pos & outlier & ~flagged).sum()), "neither": int((pos & ~outlier & ~flagged).sum()),
-                      "cov_tetra_false_flags": int((~pos & outlier).sum()), "epirefine_false_flags": int((~pos & flagged).sum())})
+        # which contaminants does methylation add? outlier in composition (tetra) or in coverage-or-composition
+        # (cov_tetra), each at the loose threshold that still keeps half of its flags right, against EpiRefine's flags
+        for b in ("tetra", "cov_tetra"):
+            outlier = scores[b] >= em.recall_at_precision(scores[b], pos, 0.50)[1]
+            cells.append({"group": group, "baseline": b, "contaminants": int(pos.sum()),
+                          "both": int((pos & outlier & flagged).sum()), "epirefine_only": int((pos & ~outlier & flagged).sum()),
+                          "baseline_only": int((pos & outlier & ~flagged).sum()), "neither": int((pos & ~outlier & ~flagged).sum()),
+                          "baseline_false_flags": int((~pos & outlier).sum()), "epirefine_false_flags": int((~pos & flagged).sum())})
     return pl.DataFrame(rows, infer_schema_length=None), pl.DataFrame(lens), pl.DataFrame(cells)
 
 
@@ -293,13 +294,13 @@ def inclusion_table(D: pl.DataFrame, out: Path, n_boot: int) -> pl.DataFrame:
 ABL_METRICS = ("contam_recall", "contam_precision", "inclusion_recall", "placement_precision")
 
 
-def ablation_table(out: Path, scen: list[dict], D: pl.DataFrame, n_boot: int) -> pl.DataFrame:
+def ablation_table(out: Path, scen: list[dict], D: pl.DataFrame, n_boot: int, groups_used: list[str]) -> pl.DataFrame:
     """Each setting against the default on the same scenarios: pooled metrics (all planted errors in the
     denominator), differences with intervals from a paired bootstrap over scenarios, and calls changed."""
     rows = []
     key = ["scenario", "contig"]
     for name in ABLATIONS:
-        parts = [calls(sc, out / "runs" / slug(name) / sc["name"], out) for sc in scen]
+        parts = [calls(sc, out / "runs" / slug(name) / sc["name"], out) for sc in scen if sc["group"] in groups_used]
         parts = [p for p in parts if p is not None]
         if not parts:
             continue
@@ -355,16 +356,16 @@ def report(a, out: Path, scen: list[dict]) -> None:
         assert (c["tp"] + c["fp"], c["included_ok"], c["stay_wrong"]) == (r["flagged"], r["included_correct"], r["placed_wrongly"]), sc["name"]
     con, lens, cells = contamination_tables(D, out, a.n_boot)
     inc = inclusion_table(D, out, a.n_boot)
-    abl = ablation_table(out, scen, D, 2000)
+    abl = ablation_table(out, scen, D, 2000, a.ablation_groups)
     for name, t in (("contamination", con), ("contamination_by_length", lens), ("contamination_cells", cells), ("inclusion", inc), ("ablations", abl)):
         t.write_csv(tables / f"{name}.tsv", separator="\t", float_precision=4)
     planted = [pl.read_csv(Path(sc["truth"]).parent / "planting.tsv", separator="\t").with_columns(pl.lit(sc["name"]).alias("scenario"))
                for sc in scen if sc["group"] != "standard"]
     if planted:
-        P = pl.concat(planted).join(D.select("scenario", "contig", "group", "decided", "tp", "coverage"), on=["scenario", "contig"])
+        P = pl.concat(planted).join(D.select("scenario", "contig", "group", "decided", "tp", "site_coverage"), on=["scenario", "contig"])
         rel = (P.group_by("group", "relation", maintain_order=True)
                .agg(pl.len().alias("contaminants"), pl.col("decided").sum().alias("decided"), pl.col("tp").sum().alias("flagged"),
-                    pl.col("thin").median().alias("median_thin"), pl.col("coverage").median().alias("median_coverage")).sort("group", "relation"))
+                    pl.col("thin").median().alias("median_thin"), pl.col("site_coverage").median().alias("median_coverage")).sort("group", "relation"))
         rel.write_csv(tables / "planting_summary.tsv", separator="\t", float_precision=3)
     inert = abl.group_by("setting", maintain_order=True).agg((pl.col("flags_changed") + pl.col("bins_changed")).sum().alias("calls_changed")) if abl.height else None
     txt = ["# Evidence tables (development data only)\n", "## Contamination: EpiRefine and trivial baselines\n",
@@ -374,11 +375,12 @@ def report(a, out: Path, scen: list[dict]) -> None:
                     "precision": "precision %", "precision_ci": "95% CI", "recall_all": "recall % (all planted)", "recall_all_ci": "95% CI",
                     "recall_decided": "recall % (decided only)", "average_precision": "AP", "average_precision_ci": "AP 95% CI",
                     "recall_at_epirefine_precision": "recall % at EpiRefine precision", "recall_at_epirefine_precision_ci": "95% CI",
-                    "recall_at_p95": "recall % at 95% precision", "recall_at_p90": "recall % at 90% precision"}),
-           "\n## Contaminants found, by contaminant length (%)\n",
+                    "recall_at_p95": "recall % at 95% precision", "recall_at_p90": "recall % at 90% precision",
+                    "precision_at_epirefine_recall": "precision % at EpiRefine recall"}),
+           "\n## Contaminants found, by contaminant length (%; baselines at the threshold giving them 90% pooled precision)\n",
            md(lens, {"group": "scenarios", "length": "length", "contaminants": "contaminants", "undecided": "undecided by EpiRefine",
                      "EpiRefine": "EpiRefine", **{b: b for b in BASELINES}}),
-           "\n## What methylation adds over coverage + composition (cov_tetra at its 90%-precision threshold)\n",
+           "\n## What methylation adds: planted contaminants by EpiRefine flag x composition / coverage outlier (baseline at 50% precision)\n",
            md(cells, {c: c for c in cells.columns}),
            "\n## Inclusion of unbinned contigs\n",
            md(inc, {"group": "scenarios", "tool": "tool", "missing": "to put back", "no_bin_contigs": "no-bin contigs", "placed": "placed",
@@ -388,7 +390,7 @@ def report(a, out: Path, scen: list[dict]) -> None:
            "\n## Rule ablations (difference to the default, percentage points; 95% interval from a paired bootstrap over scenarios)\n",
            md(abl, {"setting": "setting", "scenarios": "scenarios", "n_scenarios": "n", "flags_changed": "flags changed", "bins_changed": "final bins changed",
                     **{k: v for m in ABL_METRICS for k, v in ((f"{m}_delta", m.replace("_", " ")), (f"{m}_ci", "95% CI"))},
-                    "false_flags": "false flags", "wrong_placements": "wrong placements", "no_bin_placed": "no-bin placed"}) if abl.height else "(no ablation runs)",
+                    "false_flags": "false flags", "wrong_placements": "wrong placements", "no_bin_placed": "no-bin contigs binned"}) if abl.height else "(no ablation runs)",
            "\n## Settings that changed no call in any scenario\n",
            "\n".join(f"- {r['setting']}" for r in inert.iter_rows(named=True) if r["calls_changed"] == 0) if inert is not None else "",
            "\n## Rules that cannot be switched from the command line (need a switch)\n", "\n".join(f"- {x}" for x in NEEDS_SWITCH), ""]
@@ -404,7 +406,7 @@ def main():
     ap.add_argument("--only", nargs="+", help="base scenarios to use (default: all that are not optional)")
     ap.add_argument("--taxonomy", help="genome, genus, family, order (TSV) for the 'related' variant")
     ap.add_argument("--stage", nargs="+", default=["build", "run", "baselines", "report"], choices=["build", "run", "baselines", "report"])
-    ap.add_argument("--ablation-groups", nargs="+", default=["standard", "nearest", "short", "cov5"],
+    ap.add_argument("--ablation-groups", nargs="+", default=["standard", "nearest", "cov5"],
                     help="scenario groups on which the ablations are run (the default settings run on all)")
     ap.add_argument("--jobs", type=int, default=4, help="EpiRefine runs at once")
     ap.add_argument("--workers", type=int, default=1, help="processes per run")

@@ -113,3 +113,10 @@ def recall_at_precision(score, correct, min_precision: float, positive=None, wei
         return 0.0, float("inf")
     i = int(np.argmax(np.where(ok, r, -1)))
     return float(r[i]), float(s[i])
+
+
+def precision_at_recall(score, correct, min_recall: float, positive=None, weight=None) -> float:
+    """Precision at the strictest threshold that reaches min_recall (nan when no threshold does)."""
+    _, p, r = pr_curve(score, correct, positive, weight)
+    ok = np.nonzero(r >= min_recall - 1e-12)[0]
+    return float(p[ok[0]]) if len(ok) else float("nan")

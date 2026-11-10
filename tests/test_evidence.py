@@ -50,6 +50,7 @@ def test_precision_recall_curve_and_matched_precision():
     assert em.average_precision(score, label) == pytest.approx(1 * .25 + 2 / 3 * .25 + .75 * .25)
     assert em.recall_at_precision(score, label, 1.0) == (0.25, 0.9)
     assert em.recall_at_precision(score, label, 0.7)[0] == 0.75
+    assert em.precision_at_recall(score, label, 0.5) == pytest.approx(2 / 3) and np.isnan(em.precision_at_recall(score, label, 0.9))
     assert em.recall_at_precision(np.array([1.0]), np.array([0]), 0.5, positive=np.array([1])) == (0.0, float("inf"))
     # a weight of 2 is the same as listing the item twice
     w = np.array([2, 1, 1, 1, 1])
@@ -158,7 +159,7 @@ def test_baselines_find_the_obvious_outlier(tmp_path):
     f = tb.load_features(tmp_path)
     assert f["cov_median"][0] == pytest.approx(21, abs=4) and f["S"][0, 0] == 60
     c = tb.contamination_scores(f, given)
-    for b in ("coverage", "tetra", "gc", "cov_tetra", "naive_meth", "naive_meth2"):
+    for b in ("coverage", "tetra", "gc", "cov_tetra", "cov_and_tetra", "naive_meth", "naive_meth2"):
         assert c.sort(b, descending=True)["contig"][0] == "y12", b
     assert c.filter(pl.col("contig") == "y12")["naive_meth"][0] > 0.9
     assert c.filter(pl.col("contig") != "y12")["naive_meth"].max() < 0.3
