@@ -4,7 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# run outputs and benchmark data (data lives under /home/ubuntu/data, see the dev log's DATA.md)
+# run outputs and benchmark data (data lives outside the repository, under $EPIREFINE_DATA; see the dev log's DATA.md)
 bench/
 bench_components/
 sim/
