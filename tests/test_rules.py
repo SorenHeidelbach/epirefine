@@ -5,7 +5,7 @@ import polars as pl
 
 from epirefine.detection import DetectionParams
 from epirefine.grid import Grid
-from epirefine.model import FittedModel, unit_loglik
+from epirefine.model import FittedModel, unbinned_state_frequencies, unit_loglik
 from epirefine.redundancy import inclusion_redundancy
 from epirefine.refine import flagged_share_per_bin, refine, regional_pattern, withdraw_as_mixed
 
@@ -106,3 +106,16 @@ def test_two_state_share_sees_a_second_methylome():
     share, group = FittedModel(L, cb, H, mt, grid, float("inf")).two_state_share()
     assert 0.2 < share[0] < 0.4 and group[0] in (0, 1, 2, 3)   # 30% of the bin's chunks are the other genome
     assert (share[1:] < 0.05).all()
+
+
+def test_unbinned_state_frequencies():
+    rng = np.random.default_rng(0)
+    n, M = 400, 3
+    truth = np.array([0.0, 0.3, 0.02])                       # share of unbinned contigs methylated per group
+    state = rng.random((n, M)) < truth
+    on = np.where(state, 0.0, -30.0); off = np.where(state, -30.0, 0.0)
+    on[:100, 2] = off[:100, 2] = 0.0                         # contigs without sites in group 2 do not count
+    c = unbinned_state_frequencies(off, on, q=np.array([0.2, 0.2, 0.2]), strength=5.0)
+    assert c[0] < 0.01 and abs(c[1] - state[:, 1].mean()) < 0.01 and abs(c[2] - state[100:, 2].mean()) < 0.01
+    few = unbinned_state_frequencies(off[:2], on[:2], q=np.array([0.2, 0.2, 0.2]), strength=5.0)
+    assert (np.abs(few - 0.2) < 0.15).all()                  # two contigs barely move the bins' frequency

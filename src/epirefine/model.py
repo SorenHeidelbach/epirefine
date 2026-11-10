@@ -226,6 +226,39 @@ def unknown_score(R: np.ndarray, Su_comm: np.ndarray, eta: float, lam: float,
     return np.logaddexp(np.log(lam) + Su_comm, np.log1p(-lam) + rel)
 
 
+def unbinned_state_frequencies(off: np.ndarray, on: np.ndarray, q: np.ndarray, strength: float = 5.0,
+                               iters: int = 500, tol: float = 1e-7) -> np.ndarray:
+    """c[m]: how often motif group m is methylated among the given units (the unbinned contigs).
+
+    off, on [n, M]: log-likelihood of each unit's sites in each group if the group is unmethylated / methylated
+    (FittedModel.state_terms). Per group, c maximises sum_i log((1 - c) exp(off) + c exp(on)) over the units
+    that have sites in it (EM, groups independent), with `strength` pseudo-units at the bins' frequency q, so
+    that with few unbinned contigs the estimate stays at q (the community draw).
+
+    Why: an unbinned genome was scored as a community draw, each group's state drawn at the frequency seen
+    among the BINS. The motif list comes from the bins, so a genome without a bin lacks most listed motifs by
+    construction, and a draw at the bins' frequencies makes that improbable (the product over groups of
+    1 - q): the bin that is itself unmethylated, or methylated only at a motif many genomes share, then looks
+    like the one good explanation of every such contig. The unbinned contigs are the population an unbinned
+    contig comes from, so their own state frequencies are used instead: absence of a motif that is rare among
+    them says little, presence of one that is rare among them says more than before, and a motif that many of
+    them carry (Dam) says as little as it should.
+    """
+    off, on = off.astype(np.float64), on.astype(np.float64)
+    has = np.abs(on - off) > 1e-9
+    n = has.sum(0)
+    d = np.where(has, on - off, 0.0)
+    c = q.copy()
+    for _ in range(iters):
+        rho = expit(np.log(c) - np.log1p(-c) + d)
+        new = np.clip(((rho * has).sum(0) + strength * q) / (n + strength), 1e-9, 1 - 1e-9)
+        done = np.abs(new - c).max() < tol
+        c = new
+        if done:
+            break
+    return c
+
+
 def score_units(Lp: np.ndarray, log_prof: np.ndarray) -> np.ndarray:
     """S[u, h] = log P(unit | host h) without own-MTase terms."""
     return summed_scores(Lp, log_prof)
@@ -423,6 +456,24 @@ class FittedModel:
         Su_comm = Au.sum(1)
         Su = unknown_score(R, Su_comm, self.eta, self.lam)
         return Scores(S, Su, Au, Lp, Su_comm, R)
+
+    def state_terms(self, sc: Scores, batch: int = 2000):
+        """Per unit and motif group: log P(sites | the group is unmethylated) and log P(sites | methylated), the
+        level drawn from the part of the population prior below / at or above 0.5, and that prior's methylated
+        mass q[m]. A community draw is log((1 - q) exp(off) + q exp(on)) summed over groups (= Su_comm).
+        """
+        up = self.grid.x[None, :] >= 0.5
+        q = np.exp(logsumexp(np.where(up, self.log_pi, -np.inf), axis=-1))
+        q = np.clip(q, 1e-9, 1 - 1e-9)
+        l_on = np.where(up, self.log_pi, -np.inf) - np.log(q)[:, None]
+        l_off = np.where(~up, self.log_pi, -np.inf) - np.log1p(-q)[:, None]
+        U, M, _ = sc.Lp.shape
+        off, on = np.empty((U, M), np.float32), np.empty((U, M), np.float32)
+        for s in range(0, U, batch):
+            Lp = sc.Lp[s:s + batch].astype(np.float64)
+            off[s:s + batch] = logsumexp(Lp + l_off[None], -1)
+            on[s:s + batch] = logsumexp(Lp + l_on[None], -1)
+        return off, on, q
 
     def unlisted_score(self, sc: Scores, batch: int = 2000) -> np.ndarray:
         """log P(unit | a genome with none of the listed motifs): every group's level drawn from the part of

@@ -24,7 +24,7 @@ from .grid import Grid
 from .assignability import contig_evidence
 from scipy.special import logsumexp
 
-from .model import FittedModel, posterior, summed_scores
+from .model import FittedModel, posterior, summed_scores, unbinned_state_frequencies, unknown_score
 from .motifs import build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights
 from .redundancy import inclusion_redundancy
 from .refine import (bin_evidence_table, flagged_share_per_bin, refine, regional_pattern, withdraw_as_mixed,
@@ -86,7 +86,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1,
         robust_fit="alternating", max_flagged_share=1.0, regional_leave_out="chunk", regional_withdraw="vs_foreign",
         regional_tempered=False, gate_leave_out="none", gate_unweighted=False, eps_gated=False,
-        redundancy_order="independent", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all"):
+        redundancy_order="independent", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all",
+        unknown_prior="bins", unknown_prior_strength=5.0):
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
@@ -306,6 +307,24 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # score every contig against every bin; binned contigs leave-one-out, so their own bin's profile
     # is built without them
     sc = model.score(L_t)
+    if unknown_prior == "unbinned":
+        # the unbinned-genome model draws each motif group's state at the frequency seen among the unbinned
+        # contigs that get a decision, not among the bins (model.unbinned_state_frequencies)
+        ub = np.array([c not in host_set and cov_of.get(cid[c], 0.0) >= min_contig_coverage
+                       and lengths[c] >= min_contig_length for c in targets])
+        off, on, q_bins = model.state_terms(sc)
+        c_unb = unbinned_state_frequencies(off[ub], on[ub], q_bins, unknown_prior_strength)
+        sc.Su_comm = np.logaddexp(np.log1p(-c_unb)[None] + off, np.log(c_unb)[None] + on).sum(1)
+        sc.Su = unknown_score(sc.R, sc.Su_comm, model.eta, model.lam)
+        _write(pl.DataFrame({"group": np.arange(n_groups), "motifs": group_label, "methylated_among_bins": q_bins,
+                             "methylated_among_unbinned": c_unb,
+                             "unbinned_contigs_with_sites": (np.abs(on[ub] - off[ub]) > 1e-9).sum(0)}),
+               out / "unbinned_prior.tsv")
+        _log(f"unbinned-genome prior from {int(ub.sum())} unbinned contigs: methylated share per group "
+             f"median {np.median(c_unb):.3f} (among bins {np.median(q_bins):.3f})")
+        del off, on
+    elif unknown_prior != "bins":
+        raise ValueError(f"unknown unknown_prior {unknown_prior!r}")
     # each contig's methylated fraction per group with its 95% interval (for the effect-size gate below). Group
     # weights were multiplied into the tables; gate_unweighted takes them out again, so that a group sharing its
     # weight with variants of the same methyltransferase keeps the interval its own sites give it
