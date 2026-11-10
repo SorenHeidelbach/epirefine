@@ -202,3 +202,17 @@ def test_false_flag_rate_of_member_fragments():
     assert more["2000", "all"]["false_flag_rate"] >= rows["2000", "all"]["false_flag_rate"]
     rel = ff.deployed_reliability(fit, 0.5, 0.05)
     assert {r["test"] for r in rel} == {"A_any_candidate", "A_map", "B_unknown"}
+
+
+def test_conservative_temperature_takes_the_flattest_one_the_fragments_cannot_reject():
+    # 150 weakly informative fragments whose true temperature is 1.2: neighbouring values are indistinguishable
+    S, fb, Sc = _gaussian_fragments(np.random.default_rng(7), H=6, d=2, n=150)
+    kw = dict(temps=(1.0, 1.1, 1.2, 1.3, 1.4, 1.6, 4.0), allow_sharpening=False, contig=np.arange(150) // 3)
+    plain = _fit(1.2 * S, fb, 1.2 * Sc, {"prior-averaged"}, **kw).fit(0.5, log=lambda *_: None)
+    cons = _fit(1.2 * S, fb, 1.2 * Sc, {"prior-averaged", "conservative-temperature"}, **kw).fit(0.5, log=lambda *_: None)
+    assert plain["temperature"] == 1.3
+    assert cons["temperature"] == 1.6       # not 4.0: that one the fragments do reject
+    # many informative fragments: nothing above the best is within 2 SE
+    S, fb, Sc = _gaussian_fragments(np.random.default_rng(6), n=20000)
+    kw = dict(temps=(1.0, 1.5, 2.0), allow_sharpening=False, contig=np.arange(20000))
+    assert _fit(S, fb, Sc, {"prior-averaged", "conservative-temperature"}, **kw).fit(0.5, log=lambda *_: None)["temperature"] == 1.0

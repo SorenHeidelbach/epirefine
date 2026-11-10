@@ -53,6 +53,9 @@ FEATURES = {
                      "until p_unknown and the fit agree",
     "sites-temperature": "the temperature may rise with a contig's number of sites (monotone, fitted per fragment "
                          "length, kept only when it beats one temperature by 2 SE)",
+    "conservative-temperature": "among temperatures >= 1, the largest one that is not worse than the best by more "
+                                "than 2 SE (bootstrap over source contigs): where the fragments cannot tell two "
+                                "temperatures apart, the flatter one is used",
     "common-tau": "tau values are compared on the fragments every tau fit keeps",
     "em-priors": "p_unknown has a Beta(2, 2) prior; the contamination rate counts only contigs that pass the "
                  "methylome-difference gate",
@@ -220,6 +223,7 @@ class FragmentFit:
     length: np.ndarray       # [n] fragment length
     n_sites: np.ndarray      # [n] motif sites in the fragment
     difference: np.ndarray   # [n] methylome difference to the own bin (the gate statistic of contig decisions)
+    contig: np.ndarray | None = None  # [n] source contig (fragments of one contig are not independent)
     features: frozenset = frozenset()
     temps: tuple = DEFAULT_TEMPS
     etas: tuple = DEFAULT_ETAS
@@ -311,6 +315,22 @@ class FragmentFit:
                 f"{gain:.4f} +- {se:.4f} -> {'relatives' if keep_flexible else 'community only (not significant)'}")
             if not keep_flexible:
                 fit = alt
+        if "conservative-temperature" in self.features:
+            # The fragments are cut from binned contigs and are easier to place than real unbinned contigs
+            # (D7): they can show overconfidence but cannot justify confidence. So where they cannot tell
+            # two temperatures apart, the flatter one is taken: the largest T whose objective is within 2 SE
+            # of the best (paired differences, bootstrap over source contigs; 2 SE as in the parsimony rule).
+            best = (fit["temperature"], fit["eta"], fit["lam"])
+            chosen = fit
+            for T in (t for t in ok_T if t > fit["temperature"]):
+                gain, se = self._paired_gain((T, fit["eta"], fit["lam"]), best, priors, by_contig=True)
+                if -gain > 2 * se:   # T is worse than the best by more than 2 SE
+                    break
+                chosen = next(r for r in rows if r["temperature"] == T and r["eta"] == fit["eta"] and r["lam"] == fit["lam"])
+            if chosen is not fit:
+                log(f"  temperature: best {fit['temperature']:g}; {chosen['temperature']:g} is within 2 SE of it "
+                    f"(log loss {chosen['log_loss']:.4f} vs {fit['log_loss']:.4f}) -> {chosen['temperature']:g}")
+            fit = chosen
         out = {"temperature": float(fit["temperature"]), "eta": float(fit["eta"]), "lam": float(fit["lam"]),
                "fitted_temperature": float(fitted["temperature"]), "temperature_fit": rows, "curve": None,
                "priors": priors}
@@ -319,13 +339,24 @@ class FragmentFit:
             out["curve"] = self._curve(out, priors, ok_T, log)
         return out
 
-    def _paired_gain(self, a, b, priors, n_boot: int = 200):
-        """Objective(b) - objective(a) with a paired-bootstrap standard error over fragments."""
+    def _paired_gain(self, a, b, priors, n_boot: int = 200, by_contig: bool = False):
+        """Objective(b) - objective(a) with a paired-bootstrap standard error over fragments, or over
+        source contigs (by_contig: fragments of one contig share its departures from the bin, so resampling
+        them one by one understates the error)."""
         la1, lb1 = self.objective_terms(*a, priors)
         la0, lb0 = self.objective_terms(*b, priors)
         dA, dB = la0 - la1, lb0 - lb1
         gain = dA.mean() + (dB.mean() if len(dB) else 0.0)
         rng = np.random.default_rng(0)
+        if by_contig and self.contig is not None:
+            k = np.flatnonzero(self.kept)
+            _, inv = np.unique(self.contig[k], return_inverse=True)
+            n = inv.max() + 1
+            sA = np.bincount(inv, dA, n)
+            sB = np.bincount(inv[self.distinct[k]], dB, n) if len(dB) else np.zeros(n)
+            draws = rng.integers(0, n, (n_boot, n))
+            boots = sA[draws].sum(1) / len(dA) + (sB[draws].sum(1) / len(dB) if len(dB) else 0.0)
+            return float(gain), float(np.std(boots))
         boots = [dA[rng.integers(0, len(dA), len(dA))].mean()
                  + (dB[rng.integers(0, len(dB), len(dB))].mean() if len(dB) else 0.0) for _ in range(n_boot)]
         return float(gain), float(np.std(boots))
@@ -630,7 +661,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
                      R={eta: relatives(eta, rest) for eta in etas} if H > 1 else {},
                      kept=keep[rest], distinct=distinct_rest, length=frags["length"].to_numpy()[rest],
                      n_sites=(n_sites_frag[rest] if n_sites_frag is not None else np.zeros(len(rest))),
-                     difference=difference, features=features, temps=tuple(temps), etas=tuple(etas), lams=tuple(lams),
+                     difference=difference, contig=frags["contig"].to_numpy()[rest], features=features, temps=tuple(temps), etas=tuple(etas), lams=tuple(lams),
                      allow_sharpening=allow_sharpening)
 
     def fragment_losses(T, Su_a, Su_b):
@@ -650,7 +681,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         return la.mean() + lb.mean(), la.mean(), lb.mean()
 
     flen = frags_k["length"].to_numpy()
-    if not features - {"common-tau", "em-priors"}:
+    if not features - {"common-tau", "em-priors"}:  # no feature that touches the temperature / unknown-model fit
         # the calibration of 0.10: prior p_unknown as passed (0.1), tests A and B weighted 1 : 1, the unknown's
         # mixture summed before tempering
         temp_rows, Su_by = [], {}
