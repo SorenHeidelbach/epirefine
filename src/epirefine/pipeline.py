@@ -575,6 +575,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         pl.Series("two_state_group", [group_label[g] if g >= 0 else "" for g in two_group]),
         pl.Series("warning", [";".join(w for w, on in (("merged_bin_suspected_flags_not_applied", merged_bins[b]),
                                                        ("two_methylation_states", two_share[b] >= two_state_warning),
+                                                       ("large_flagged_share", flagged_share[b] >= two_state_warning and not merged_bins[b]),
                                                        ("profile_not_converged", unconverged[b])) if on)
                               for b in range(H)]))
     if (two_share >= two_state_warning).any():
