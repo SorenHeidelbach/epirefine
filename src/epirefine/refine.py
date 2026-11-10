@@ -72,7 +72,7 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
            methylome_difference: np.ndarray | None = None, min_difference: float = 0.4,
            decidable: np.ndarray | None = None, unmethylated_bins: np.ndarray | None = None,
            include_threshold_unmethylated: float = 0.95, eps_gated: bool = False,
-           S_unlisted: np.ndarray | None = None) -> Refinement:
+           S_unlisted: np.ndarray | None = None, empty_bins: np.ndarray | None = None) -> Refinement:
     """given[i] = bin index of contig i, -1 if unbinned; testable[i] = binned and scored leave-one-out.
     decidable[i] = False: no decision about contig i at all (e.g. coverage too low): it is neither
     flagged nor included and doesn't enter the estimates of p_unknown and the contamination rate.
@@ -158,6 +158,11 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
         to_bin = best_alt < H
         thr[to_bin] = np.where(np.asarray(unmethylated_bins)[best_alt[to_bin]], include_threshold_unmethylated, include_threshold)
     include_bin = np.where(candidate & (best_alt < H) & (p_best_alt >= thr), best_alt, -1)
+    if empty_bins is not None and np.any(empty_bins):
+        # a bin without a single motif site has no profile (it equals the population prior, i.e. the community
+        # draw): its posterior is its prior share, which passes the threshold when p_unknown is near 0. Nothing
+        # is included into it (review 01, finding 7).
+        include_bin[(include_bin >= 0) & np.asarray(empty_bins)[np.maximum(include_bin, 0)]] = -1
     return Refinement(float(p_unknown), float(eps), p_foreign, best_alt, p_best_alt, contaminant, candidate,
                       include_bin, Zu * T, unlisted_share)
 

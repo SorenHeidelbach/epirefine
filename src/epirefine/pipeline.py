@@ -396,7 +396,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     ref = refine(sc.S, sc.Su, given, testable, temperature, contamination_threshold, include_threshold,
                  methylome_difference=diff, min_difference=min_methylome_difference,
                  p_unknown=p_unknown, decidable=~low_cov & ~short, unmethylated_bins=unmeth_bins, include_threshold_unmethylated=include_threshold_unmethylated,
-                 eps_gated=eps_gated, S_unlisted=model.unlisted_score(sc) if unlisted_genome else None)
+                 eps_gated=eps_gated, empty_bins=bin_chunks == 0, S_unlisted=model.unlisted_score(sc) if unlisted_genome else None)
     if unlisted_genome:
         sc.Su = ref.Su
         params["unlisted_share"] = ref.unlisted_share

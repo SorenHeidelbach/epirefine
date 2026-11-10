@@ -119,3 +119,14 @@ def test_unbinned_state_frequencies():
     assert c[0] < 0.01 and abs(c[1] - state[:, 1].mean()) < 0.01 and abs(c[2] - state[100:, 2].mean()) < 0.01
     few = unbinned_state_frequencies(off[:2], on[:2], q=np.array([0.2, 0.2, 0.2]), strength=5.0)
     assert (np.abs(few - 0.2) < 0.15).all()                  # two contigs barely move the bins' frequency
+
+
+def test_no_inclusion_into_a_bin_without_sites():
+    # bin 1 has no site: every contig scores under it like a community draw; with p_unknown near 0 its prior
+    # share alone passes the inclusion threshold
+    N, H = 5, 2
+    S = np.zeros((N, H)); S[:, 0] = -50.0; S[:, 1] = -10.0
+    Su = np.full(N, -10.0)
+    kw = dict(given=np.full(N, -1), testable=np.zeros(N, bool), temperature=1.0, p_unknown=0.001)
+    assert (refine(S, Su, **kw).include_bin == 1).all()
+    assert (refine(S, Su, empty_bins=np.array([False, True]), **kw).include_bin == -1).all()
