@@ -524,6 +524,12 @@ def _fragment_rows(cid: np.ndarray, pos: np.ndarray, fr: pl.DataFrame) -> tuple[
     return units[order], rows[order]
 
 
+# (group, n) -> expected per-site log-likelihood rows (assignability.expected_tables), kept for the life of
+# a worker process: they depend only on the caller model and the grid, and filling them is a Python loop
+# of 0.5 ms per combination that every part repeated for the 110,000-285,000 combinations it holds
+_EXPECTED: dict = {}
+
+
 def _unit_part(part: str, cfg: dict) -> dict:
     from .assignability import expected_tables
     from .detection import DetectionParams
@@ -545,7 +551,12 @@ def _unit_part(part: str, cfg: dict) -> dict:
         gs = sub.group_by("unit", "group").len()
         res["n_sites_group"] = (ids[gs["unit"].to_numpy()], gs["group"].to_numpy(), gs["len"].to_numpy())
         if with_h:  # expected-evidence tables: calibration fragments only
-            res["H"] = expected_tables(sub.select("unit", "group", "n"), len(ids), M, det, grid, dtype=np.float32)
+            key = (cfg["grid_size"], tuple(sorted(cfg["det"].items())))
+            if key not in _EXPECTED:
+                _EXPECTED.clear()  # another model: one table per process
+                _EXPECTED[key] = {}
+            res["H"] = expected_tables(sub.select("unit", "group", "n"), len(ids), M, det, grid, dtype=np.float32,
+                                       table=_EXPECTED[key])
         return res
 
     out = {}
