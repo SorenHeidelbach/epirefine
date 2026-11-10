@@ -21,7 +21,7 @@ from __future__ import annotations
 import io
 import json
 import os
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from multiprocessing import get_context
 from pathlib import Path
 
@@ -588,21 +588,30 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
     os.environ.update({k: "1" for k in env})
     try:
         with ProcessPoolExecutor(workers, mp_context=get_context("spawn")) as ex:
-            for i, r in enumerate(ex.map(_unit_part, parts, [cfg] * len(parts))):
-                if "chunks" in r:
-                    c = r["chunks"]
-                    res["L_chunks"][c["ids"]] = c["L"]; res["chunk_sites"][c["ids"]] = c["n_sites"]
-                if "targets" in r:
-                    t = r["targets"]
-                    res["L_t"][t["ids"]] = t["L"]; res["n_sites_t"][t["ids"]] = t["n_sites"]
-                    u, g, n = t["n_sites_group"]
-                    res["n_sites_group_t"][u, g] = n
-                if "frags" in r:
-                    f = r["frags"]
-                    res["L_frag"][f["ids"]] += f["L"]; res["frag_sites"][f["ids"]] += f["n_sites"]
-                    res["H_frag"][0][f["ids"]] += f["H"][0]; res["H_frag"][1][f["ids"]] += f["H"][1]
-                if (i + 1) % max(1, len(parts) // 5) == 0:
-                    log(f"  unit tables: {i + 1}/{len(parts)} parts")
+            # results are taken as they complete: in submission order, the tables of parts that finished
+            # behind a slow one waited unpickled in this process. Parts hold whole contigs, so each
+            # chunk, target and fragment is written by exactly one part and the order does not matter.
+            pending, i = {ex.submit(_unit_part, p, cfg) for p in parts}, 0
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                while done:
+                    r = done.pop().result()
+                    if "chunks" in r:
+                        c = r["chunks"]
+                        res["L_chunks"][c["ids"]] = c["L"]; res["chunk_sites"][c["ids"]] = c["n_sites"]
+                    if "targets" in r:
+                        t = r["targets"]
+                        res["L_t"][t["ids"]] = t["L"]; res["n_sites_t"][t["ids"]] = t["n_sites"]
+                        u, g, n = t["n_sites_group"]
+                        res["n_sites_group_t"][u, g] = n
+                    if "frags" in r:
+                        f = r["frags"]
+                        res["L_frag"][f["ids"]] += f["L"]; res["frag_sites"][f["ids"]] += f["n_sites"]
+                        res["H_frag"][0][f["ids"]] += f["H"][0]; res["H_frag"][1][f["ids"]] += f["H"][1]
+                    i += 1
+                    if i % max(1, len(parts) // 5) == 0:
+                        log(f"  unit tables: {i}/{len(parts)} parts")
+                    del r
     finally:
         for k, v in env.items():
             if v is None:

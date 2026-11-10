@@ -334,12 +334,17 @@ class FittedModel:
                 break
         self.raw_pi = raw
 
-    def _outlier_responsibility(self, eps: float, batch: int = 200) -> np.ndarray:
+    def _outlier_responsibility(self, eps: float, batch: int | None = None) -> np.ndarray:
         """P(chunk is foreign to its bin): leave-chunk-out bin profile vs a random community host.
 
         Chunk batches run on threads (numpy releases the GIL); the community term does not depend
-        on the weights and is computed once per model.
+        on the weights and is computed once per model. A batch is at most 200 chunks and at most
+        30,000 (chunk, group) cells: every thread holds about nine float64 [batch, M, G] arrays, 13.5 GB
+        on 16 threads for 913 groups at 200 chunks. Each chunk's value is computed from its own rows
+        only, so the batch size does not change it.
         """
+        if batch is None:
+            batch = min(200, max(1, 30_000 // self.Lp_chunks.shape[1]))
         if getattr(self, "_s_out", None) is None:
             self._s_out = np.empty(len(self.chunk_bin))
 

@@ -383,3 +383,19 @@ def test_expected_tables_chunks_are_bit_identical():
     for chunk_rows in (1, 2, 17, 100, 1000):
         part = expected_tables(sites, 41, 3, DET, G, dtype=np.float32, table=table, chunk_rows=chunk_rows)
         assert np.array_equal(part[0], whole[0]) and np.array_equal(part[1], whole[1]), chunk_rows
+
+
+def test_outlier_responsibility_does_not_depend_on_the_batch():
+    model = _model([[0.95, 0.01, 0.01], [0.01, 0.95, 0.01]], contaminant=(1, [0.95, 0.01, 0.01]))
+    ref = model._outlier_responsibility(0.05, batch=200)
+    for batch in (1, 3, 5, None):  # (the cached community term _s_out is kept: it is from the first robust round)
+        assert np.array_equal(model._outlier_responsibility(0.05, batch=batch), ref)
+
+
+def test_batched_summary_does_not_depend_on_the_batch():
+    from epirefine.pipeline import _batched_summary
+    L = -np.random.default_rng(2).gamma(2.0, 10.0, (57, 5, G.size))
+    ref = G.summarize(L)
+    for batch in (1, 4, 50, 2000):
+        got = _batched_summary(G, lambda sl: L[sl], len(L), batch=batch)
+        assert all(np.array_equal(a, b) for a, b in zip(got, ref))

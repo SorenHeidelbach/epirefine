@@ -71,7 +71,12 @@ def _same_partition(a, b) -> bool:
 
 
 def _batched_summary(grid, logp_fn, n, batch=2000):
-    """grid.summarize over units in batches; logp_fn(slice) -> log densities [b, M, G]."""
+    """grid.summarize over units in batches; logp_fn(slice) -> log densities [b, M, G].
+
+    A batch is at most `batch` units and at most 200,000 (unit, group) cells (about five float64
+    [b, M, G] arrays are alive at once: 4.7 GB for 913 groups at 2000 units)."""
+    if n:
+        batch = min(batch, max(1, 200_000 // logp_fn(slice(0, 1)).shape[1]))
     parts = [grid.summarize(logp_fn(slice(s, s + batch))) for s in range(0, n, batch)]
     return [np.concatenate([p[i] for p in parts]) for i in range(4)]
 
