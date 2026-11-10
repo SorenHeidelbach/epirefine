@@ -370,3 +370,16 @@ def test_scores_keep_lp_rows_of_chosen_units_only():
     for i in (0, 2, 4):
         with pytest.raises(KeyError):
             part.lp(i)
+
+
+def test_expected_tables_chunks_are_bit_identical():
+    """Reducing T[r] * w in blocks of whole (unit, group) cells gives the bits of the single reduction."""
+    rng = np.random.default_rng(8)
+    n = 6000
+    sites = pl.DataFrame({"unit": rng.integers(0, 40, n), "group": rng.integers(0, 3, n), "n": rng.integers(1, 80, n)})
+    table: dict = {}
+    whole = expected_tables(sites, 41, 3, DET, G, dtype=np.float32, table=table, chunk_rows=10 ** 9)
+    assert np.abs(whole[0]).sum() > 0 and not whole[0][40].any()
+    for chunk_rows in (1, 2, 17, 100, 1000):
+        part = expected_tables(sites, 41, 3, DET, G, dtype=np.float32, table=table, chunk_rows=chunk_rows)
+        assert np.array_equal(part[0], whole[0]) and np.array_equal(part[1], whole[1]), chunk_rows

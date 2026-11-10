@@ -24,7 +24,8 @@ from .model import FittedModel, score_units
 
 
 def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int, DetectionParams],
-                    grid: Grid, n_cap: int = 500, dtype=np.float64, table: dict | None = None):
+                    grid: Grid, n_cap: int = 500, dtype=np.float64, table: dict | None = None,
+                    chunk_rows: int = 200_000):
     """sites: integer columns unit, group, n (optional count w). Returns H1, H0 with shape [U, M, G].
 
     table: a dict reused across calls (the per-(group, n) expectations depend only on the caller
@@ -55,8 +56,16 @@ def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[
     flat, w = s["flat"].to_numpy(), s["w"].to_numpy().astype(float)
     r = np.array([kid[k] for k in zip(s["group"].to_list(), s["n"].to_list())])
     starts = np.flatnonzero(np.r_[True, flat[1:] != flat[:-1]])
+    # reduced in blocks of whole (unit, group) cells of about chunk_rows rows: T[r] * w in one piece is
+    # 8 G bytes per distinct (unit, group, n) row, 3.4 GB for the 6.6 million rows of one part of contigs
+    bounds = np.r_[starts, len(flat)]
     for T, out in ((T1, H1), (T0, H0)):
-        out.reshape(-1, grid.size)[flat[starts]] = np.add.reduceat(T[r] * w[:, None], starts, axis=0)
+        flat_out, i = out.reshape(-1, grid.size), 0
+        while i < len(starts):
+            j = max(i + 1, int(np.searchsorted(bounds, bounds[i] + chunk_rows, "right")) - 1)
+            a, b = bounds[i], bounds[j]
+            flat_out[flat[starts[i:j]]] = np.add.reduceat(T[r[a:b]] * w[a:b, None], starts[i:j] - a, axis=0)
+            i = j
     return H1, H0
 
 
