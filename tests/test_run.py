@@ -4,6 +4,7 @@ import polars as pl
 import pytest
 
 from conftest import run_community
+from epirefine.io import InputError
 
 
 def _strict_json(path):
@@ -39,6 +40,13 @@ def test_params_json_is_valid_json_with_provenance(community, finished):
     for name in ("assembly", "pileup", "contig_bin", "motifs"):
         st = community[name].stat()
         assert p["inputs"][name] == {"path": str(community[name].resolve()), "size": st.st_size, "mtime": int(st.st_mtime)}
+
+
+def test_params_json_has_the_settings_of_a_run_that_did_not_finish(community, tmp_path):
+    with pytest.raises(InputError):
+        run_community(community, tmp_path / "out", min_contig_coverage=1000.0)
+    p = _strict_json(tmp_path / "out" / "params.json")
+    assert p["finished"] is False and p["min_contig_coverage"] == 1000.0 and "version" in p
 
 
 def test_json_safe_writes_no_bare_nan_or_infinity(tmp_path):

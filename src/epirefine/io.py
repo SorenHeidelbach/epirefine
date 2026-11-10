@@ -7,7 +7,11 @@ from pathlib import Path
 
 import polars as pl
 
-from .motifs import Motif
+from .motifs import IUPAC, Motif
+
+
+class InputError(ValueError):
+    """A problem with the input files or options that the user can fix; the message names it."""
 
 
 def _open(path, mode="rt"):
@@ -47,36 +51,73 @@ def fasta_subset(path, names) -> dict[str, str]:
     return {c: got[c] for c in names}
 
 
-def read_contig_bin(path) -> dict[str, str]:
-    """Two columns, contig and bin, no header (Nanomotif/DAS Tool style). A header line is tolerated."""
-    out = {}
+def read_contig_bin(path, log=None) -> dict[str, str]:
+    """Two tab-separated columns, contig and bin, no header (Nanomotif/DAS Tool style). A header line is
+    tolerated, as are Windows line ends and empty lines. Rows that are not contig<TAB>bin are counted and
+    reported through log; a table without any such row (comma- or space-separated, say) is an error."""
+    out, bad, n = {}, [], 0
     with _open(path) as fh:
         for line in fh:
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) < 2 or parts[0] in ("contig", "contig_id", "seq_name"):
+            line = line.rstrip("\r\n")
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            if parts[0] in ("contig", "contig_id", "seq_name"):
+                continue
+            n += 1
+            if len(parts) < 2 or not parts[0] or not parts[1]:
+                bad.append(line)
                 continue
             out[parts[0]] = parts[1]
+    if not out:
+        raise InputError(f"contig-bin table {path} has no row with two tab-separated columns (contig<TAB>bin, no "
+                         f"header)" + (f"; first row: {bad[0][:80]!r}" if bad else ": it is empty"))
+    if bad and log is not None:
+        log(f"WARNING: contig-bin table: {len(bad)} of {n} rows are not contig<TAB>bin and are skipped "
+            f"(first: {bad[0][:80]!r})")
     return out
 
 
-def read_motifs(path) -> list[Motif]:
+MOD_TYPES = ("a", "m", "h", "21839")  # modkit codes: 6mA, 5mC, 5hmC, 4mC
+
+
+def read_motifs(path, log=None) -> list[Motif]:
     """Read the motif set from Nanomotif's bin-motifs.tsv (or any TSV with motif, mod_type, mod_position).
 
     Only the *union* of motifs is used. Which bins carry which motif is re-estimated from the
     methylation data, so Nanomotif's per-bin presence calls are not trusted as ground truth.
     If `motif_complement`/`mod_position_complement` columns exist, the complement motif is added too.
+
+    mod_type must be a modkit code (a, m, h, 21839); any other value stops the run, because the pileup pass
+    would match such a motif against 5hmC rows. Entries that cannot be a motif (letters outside the IUPAC
+    nucleotide codes, a position outside the motif or not on the base of the modification, e.g. 1-based
+    positions) are skipped, counted and reported through log.
     """
-    df = pl.read_csv(path, separator="\t", infer_schema_length=0)
+    try:
+        df = pl.read_csv(path, separator="\t", infer_schema_length=0)
+    except pl.exceptions.NoDataError:
+        raise InputError(f"motif table {path}: no valid motif (the file is empty)") from None
     need = {"motif", "mod_type", "mod_position"}
     if not need <= set(df.columns):
-        raise ValueError(f"{path}: needs columns {sorted(need)}, found {df.columns}")
-    seen, motifs = set(), []
+        raise InputError(f"{path}: needs columns {sorted(need)}, found {df.columns}")
+    seen, motifs, invalid, unknown = set(), [], [], {}
+    n = [0]
 
     def add(seq, mod_type, pos):
         if seq is None or pos is None or seq in ("", "NA", "nan") or pos in ("", "NA", "nan"):
             return
-        m = Motif(seq.upper(), int(float(pos)), mod_type)
-        if m.key not in seen and m.is_valid():
+        n[0] += 1
+        if mod_type not in MOD_TYPES:
+            unknown[mod_type] = unknown.get(mod_type, 0) + 1
+            return
+        try:
+            m = Motif(seq.upper(), int(float(pos)), mod_type)
+        except ValueError:
+            invalid.append(f"{seq}_{mod_type}-{pos}")
+            return
+        if not set(m.seq) <= set(IUPAC) or not m.is_valid():
+            invalid.append(m.key)
+        elif m.key not in seen:
             seen.add(m.key)
             motifs.append(m)
 
@@ -85,6 +126,18 @@ def read_motifs(path) -> list[Motif]:
         add(row["motif"], row["mod_type"], row["mod_position"])
         if has_comp:
             add(row["motif_complement"], row["mod_type"], row["mod_position_complement"])
+    if unknown:
+        raise InputError(
+            f"motif table {path}: unknown mod_type " + ", ".join(f"{k!r} ({v} entries)" for k, v in unknown.items())
+            + f". Accepted are the modkit codes {', '.join(MOD_TYPES)} (6mA, 5mC, 5hmC, 4mC), as Nanomotif writes them.")
+    if invalid and log is not None:
+        log(f"WARNING: motif table: {len(invalid)} of {n[0]} motif entries are invalid and skipped (letters outside "
+            f"the IUPAC codes, or mod_position, 0-based, not on the modified base): {', '.join(invalid[:5])}"
+            + (", ..." if len(invalid) > 5 else ""))
+    if not motifs:
+        raise InputError(f"motif table {path}: no valid motif among {n[0]} entries"
+                         + (f" (invalid: {', '.join(invalid[:5])}; mod_position is 0-based and must point at the "
+                            f"modified base)" if invalid else ""))
     return motifs
 
 

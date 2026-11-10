@@ -14,7 +14,7 @@ truth and checked against Hi-C on a fecal sample; most users only set the inputs
 | `--assembly` | yes | Assembly FASTA (plain or gzipped). |
 | `--contig-bin` | yes | The bins to refine: `contig<TAB>bin`, no header. Contigs not listed are unbinned. |
 | `--pileup` | yes | `modkit pileup` bedMethyl (`.bed` or `.bed.gz`). Both the older space-separated and the all-tab formats work. The rows of each contig must be together, as modkit writes them. |
-| `--motifs` | yes | Nanomotif `bin-motifs.tsv` (or any TSV with `motif`, `mod_type`, `mod_position`). Only the list of motifs is used, plus their complements when given. |
+| `--motifs` | yes | Nanomotif `bin-motifs.tsv` (or any TSV with `motif`, `mod_type`, `mod_position`). Only the list of motifs is used, plus their complements when given. `mod_type` must be a modkit code (`a` = 6mA, `m` = 5mC, `21839` = 4mC, `h` = 5hmC), `mod_position` is 0-based; other mod types stop the run, invalid motifs are skipped and counted in the log. |
 | `--out` | yes | Output folder. |
 | `--motif-fit` | no | Also write `motif_fit.tsv`: each contig's methylated fraction per motif group next to its bin's. |
 | `--seed` | no (1) | Random seed; the same seed gives identical outputs. |

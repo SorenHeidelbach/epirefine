@@ -127,8 +127,21 @@ Yes. The same inputs and `--seed` (default 1) give identical outputs.
 
 Check the log first: each step reports what it read and fitted. Common causes:
 
-- **Few or no contigs have sites** (`n_sites` is 0): contig names in the pileup, the assembly and
-  `contig_bin.tsv` must match exactly, and the pileup must be made against the same assembly.
+- **Few contigs have sites** (`n_sites` is 0): contig names in the pileup, the assembly and
+  `contig_bin.tsv` must match exactly, and the pileup must be made against the same assembly. The inputs are
+  checked before the run starts its work: a missing or unreadable file, a contig-bin table that is not
+  `contig<TAB>bin` or shares no contig with the assembly, a motif table with an unknown `mod_type`, and a pileup
+  that is not a headerless bedMethyl table stop the run with a message naming the problem. Rows of the contig-bin
+  table whose contig is not in the assembly, and invalid motifs, are dropped with a `WARNING` line in the log that
+  gives their number.
+- **"no pileup row lies at a motif site of an assembly contig"**: the pileup's contig names differ from the
+  assembly's (the message shows one of each), or the pileup was made with other modification codes than
+  `a`, `m`, `h`, `21839`.
+- **"unknown mod_type"**: the motif table must use the modkit codes `a` (6mA), `m` (5mC), `21839` (4mC) or `h`
+  (5hmC), as Nanomotif writes them; `mod_position` is 0-based.
+- **"no calibration fragments"**: no binned contig has both enough coverage (`--min-contig-coverage`, 5) and the
+  length of the shortest calibration piece (`--frag-lengths`, 2 kb). Lower one of them, or run with
+  `--no-calibrate`.
 - **"pileup rows of contig … are not contiguous"**: the rows of each contig must be together, as `modkit pileup`
   writes them. Sort a re-ordered pileup by contig (`sort -k1,1 -k2,2n pileup.bed > sorted.bed`).
 

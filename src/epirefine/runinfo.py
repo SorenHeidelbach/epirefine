@@ -1,6 +1,7 @@
-"""Run bookkeeping: params.json, the record of what a run was made with.
+"""Run bookkeeping: the checks made on the inputs before any heavy work, and params.json, the record of what
+a run was made with.
 
-Nothing here touches the model; a run gives the same decisions with or without it.
+Nothing here touches the model; a run with valid inputs gives the same decisions with or without it.
 """
 from __future__ import annotations
 
@@ -13,10 +14,107 @@ from pathlib import Path
 
 import numpy as np
 
+from .io import InputError, _open
+
 
 def package_version() -> str:
     from . import __version__
     return __version__
+
+
+# ---------------------------------------------------------------------------------------------------------
+# checks before any heavy work
+
+INPUT_NAMES = {"assembly": "assembly", "pileup": "pileup", "contig_bin": "contig-bin table", "motifs_path": "motif table"}
+
+
+def check_inputs(args: dict) -> None:
+    """The four input files of pipeline.run (args: its arguments by name) are there and readable."""
+    for k, what in INPUT_NAMES.items():
+        check_file(args[k], what)
+
+
+def check_file(path, what: str) -> None:
+    """The input exists, is a readable non-empty file, and its compression matches its name (readers decide
+    by the .gz suffix)."""
+    p = Path(path)
+    if not p.exists():
+        raise InputError(f"{what} not found: {p}")
+    if not p.is_file():
+        raise InputError(f"{what} is not a file: {p}")
+    try:
+        with open(p, "rb") as fh:
+            head = fh.read(2)
+    except OSError as e:
+        raise InputError(f"{what} cannot be read: {p} ({e.strerror or e})") from None
+    if not head:
+        raise InputError(f"{what} is empty: {p}")
+    gz = head == b"\x1f\x8b"
+    if gz and not str(p).endswith(".gz"):
+        raise InputError(f"{what} is gzip-compressed but not named .gz: {p} (rename it; files are read by suffix)")
+    if not gz and str(p).endswith(".gz"):
+        raise InputError(f"{what} is named .gz but is not gzip-compressed: {p}")
+
+
+def check_pileup_head(path) -> str:
+    """First data row of the pileup must look like modkit bedMethyl; returns its contig name."""
+    with _open(path) as fh:
+        line = next((ln for ln in fh if ln.strip() and not ln.startswith("#")), None)
+    if line is None:
+        raise InputError(f"pileup has no rows: {path}")
+    f = line.rstrip("\r\n").replace(" ", "\t").split("\t")
+    if len(f) < 12:
+        raise InputError(f"pileup does not look like a modkit bedMethyl table: {path}: the first row has {len(f)} "
+                         f"columns, at least 12 are needed (contig, start, end, modification code, score, strand, "
+                         f"..., N_valid, fraction, N_mod): {line.strip()[:120]!r}")
+    try:
+        int(f[1]); int(f[9]); int(f[11])
+    except ValueError:
+        raise InputError(f"pileup does not look like a modkit bedMethyl table: {path}: columns 2, 10 and 12 of the "
+                         f"first row must be whole numbers (was it written with a header line, modkit --header? "
+                         f"remove it): {line.strip()[:120]!r}") from None
+    return f[0]
+
+
+def match_contig_bin(cb: dict[str, str], lengths: dict[str, int], path, log=print) -> dict[str, str]:
+    """Rows of the contig-bin table whose contig is in the assembly; stops when none is, says how many were
+    dropped otherwise (they would vanish from the refined bins without a trace)."""
+    kept = {c: b for c, b in cb.items() if c in lengths}
+    missing = [c for c in cb if c not in lengths]
+    if not kept:
+        raise InputError(
+            f"no bin left: none of the {len(cb)} contigs in {path} is in the assembly (contig-bin names e.g. "
+            f"{', '.join(map(repr, missing[:3]))}; assembly names e.g. {', '.join(map(repr, list(lengths)[:3]))}). "
+            f"The table needs contig<TAB>bin with the contig names of the assembly (the first word of each "
+            f"FASTA header) in column 1.")
+    if missing:
+        share = len(kept) / len(cb)
+        log(f"WARNING: contig-bin table: {len(missing)} of {len(cb)} contigs are not in the assembly and are dropped "
+            f"(e.g. {', '.join(missing[:3])}); {len(kept)} contigs in {len(set(kept.values()))} of "
+            f"{len(set(cb.values()))} bins remain"
+            + ("; fewer than half match: check that the table belongs to this assembly" if share < 0.5 else ""))
+    return kept
+
+
+def check_calibration_contigs(lengths_ok: list[int], n_binned: int, min_contig_coverage: float, frag_lengths) -> None:
+    """Calibration cuts pseudo-contigs from binned contigs with enough coverage (their lengths: lengths_ok):
+    there must be one at least as long as the shortest piece."""
+    shortest, n_covered = min(frag_lengths), len(lengths_ok)
+    if not any(L >= shortest for L in lengths_ok):
+        raise InputError(
+            f"no calibration fragments: calibration needs at least one binned contig with median coverage >= "
+            f"{min_contig_coverage:g} reads per motif site (--min-contig-coverage) and length >= {shortest} bp (the "
+            f"shortest of --frag-lengths). Of {n_binned} binned contigs, {n_covered} have that coverage and "
+            f"{sum(L >= shortest for L in lengths_ok)} of those that length. Lower --min-contig-coverage or "
+            f"--frag-lengths, or run with --no-calibrate (uncalibrated probabilities).")
+
+
+def no_sites_error(pileup, pileup_first: str | None, lengths: dict[str, int]) -> InputError:
+    return InputError(
+        f"no pileup row lies at a motif site of an assembly contig: {pileup}. Either the pileup's contig names do "
+        f"not match the assembly's (pileup: {pileup_first!r}{'' if pileup_first in lengths else ', not in the assembly'}"
+        f"; assembly e.g. {', '.join(map(repr, list(lengths)[:3]))}), or its modification codes are not among "
+        f"a, m, h, 21839, or the motifs do not occur. The pileup must come from reads mapped to this assembly.")
 
 
 # ---------------------------------------------------------------------------------------------------------

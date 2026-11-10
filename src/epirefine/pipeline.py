@@ -82,7 +82,11 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
-    provenance = runinfo.provenance(dict(locals()))  # first statement: locals() are the options as given
+    args = dict(locals())  # first statement: the options as given
+    # the inputs are checked before anything is read or written: a missing file or a wrong table must not
+    # cost the minutes (hours on a large sample) it takes to reach the place where it is used
+    runinfo.check_inputs(args)
+    provenance = runinfo.provenance(args)
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     runinfo.write_params(out / "params.json", provenance)  # a run that does not finish leaves its settings
@@ -91,8 +95,14 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
 
     # the assembly is streamed (lengths, then the motif-grouping sample, then the encoded copy on disk): held
     # whole as Python strings it took about three times its size, 53 GB for an 18.9 GB soil assembly
+    motifs = pio.read_motifs(motifs_path, log=_log)
+    cb_given = pio.read_contig_bin(contig_bin, log=_log)
+    pileup_first = runinfo.check_pileup_head(pileup)
     lengths = pio.fasta_lengths(assembly)
-    cb = {c: b for c, b in pio.read_contig_bin(contig_bin).items() if c in lengths}
+    cb = runinfo.match_contig_bin(cb_given, lengths, contig_bin, log=_log)
+    if pileup_first not in lengths:
+        _log(f"WARNING: the first contig of the pileup, {pileup_first!r}, is not in the assembly: was the pileup "
+             f"made from reads mapped to this assembly?")
     bins = sorted(set(cb.values()))
     bin_idx = {b: i for i, b in enumerate(bins)}
     host_contigs = sorted(cb)
@@ -104,7 +114,6 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     _log(f"{len(lengths)} contigs, {H} bins, {len(host_contigs)} host contigs, {len(targets)} targets")
 
     # motif groups, from the records of a random sample of the sequence
-    motifs = pio.read_motifs(motifs_path)
     relevant = sorted(host_set | set(targets))
     sample = pio.fasta_subset(assembly, _sample_names(lengths, relevant, group_sample_bp, rng))
     records = build_records(sample, motifs)
@@ -140,6 +149,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     del sample
     cid = asm.index
 
+    if not parts:
+        raise runinfo.no_sites_error(pileup, pileup_first, lengths)
     # contig coverage (median reads per motif site, all sites): contigs below min_contig_coverage get
     # no decision at all (status low_coverage) and don't feed the calibration fragments. Against Hi-C
     # on ZymoFecal, flags on contigs below 5x were confirmed for 12.5% (81% at >= 10x).
@@ -214,6 +225,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         _log(f"calibration fragments from {len(hc_ok)} of {len(host_contigs)} host contigs with >= {min_contig_coverage:g}x")
         hc = pl.DataFrame({"contig": [cid[c] for c in hc_ok], "bin_idx": [bin_idx[cb[c]] for c in hc_ok],
                            "length": [lengths[c] for c in hc_ok]}, schema={"contig": pl.Int32, "bin_idx": pl.Int64, "length": pl.Int64})
+        runinfo.check_calibration_contigs([lengths[c] for c in hc_ok], len(host_contigs), min_contig_coverage, frag_lengths)
         per_bin = fragments_per_bin(frag_budget, len(frag_lengths), H, frags_per_bin)
         frags = select_fragments(hc, frag_lengths, per_bin, rng)
         _log(f"{frags.height} calibration fragments ({per_bin} per bin and length)")
