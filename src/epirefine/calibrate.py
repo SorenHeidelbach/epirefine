@@ -143,6 +143,9 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             A_own[i] = model.loo_rescore(sc, i, fbin[i], leave_out[i])
         # fragments from chunks the robust model calls foreign to their bin carry a wrong label
         keep = has_rest & np.array([bool((model.w[ch] >= 0.5).all()) for ch in chunks_of])
+        # the chunks' marginal tables (as large as L_chunks) were last needed by the leave-out profiles
+        # above; dropped here, the best model so far no longer holds a second copy during the next fit
+        model.Lp_chunks = None
         return sc, A_own, keep
 
     tau_rows, best, warm, group_ll = [], None, {}, []
