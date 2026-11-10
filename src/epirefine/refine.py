@@ -29,6 +29,9 @@ from scipy.special import expit, logsumexp
 from .model import credible_set
 
 CONFIDENCE = ((0.95, "high_confidence"), (0.8, "medium_confidence"), (0.5, "low_confidence"))
+# include_contigs.tsv, column confidence: the candidate reached the inclusion threshold but the bin already
+# holds its sequence (redundancy check), so it was not added
+DROPPED_REDUNDANT = "dropped_redundant"
 
 
 def em_weight(l_in: np.ndarray, l_out: np.ndarray, a: float = 1.0, b: float = 1.0, iters: int = 500,
@@ -241,11 +244,17 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
     pl.DataFrame(kept, schema={"contig": pl.Utf8, "bin": pl.Utf8}, orient="row").sort("bin", "contig").write_csv(
         out / "decontaminated_contig_bin.tsv", separator="\t")
 
+    # candidates whose inclusion (or move) the redundancy check dropped: redundancy is measured only for
+    # contigs that reached the inclusion threshold, and their include_bin is reset to -1 afterwards
+    dropped = (np.zeros(len(contigs), bool) if redundancy is None
+               else ~np.isnan(redundancy) & (ref.include_bin < 0))
     rows = []
     for i in np.flatnonzero(ref.candidate & (ref.best_alt < H) & (ref.p_best_alt >= CONFIDENCE[-1][0])):
         p = float(ref.p_best_alt[i])
+        # a dropped candidate is not added to any bin, so it must not read as a high-confidence inclusion
         rows.append({"contig": contigs[i], "bin": given_lbl[i] or "unbinned", "assigned_bin": labels[ref.best_alt[i]],
-                     "method": "epirefine", "prob": p, "mean_prob": p, "confidence": confidence(p)})
+                     "method": "epirefine", "prob": p, "mean_prob": p,
+                     "confidence": DROPPED_REDUNDANT if dropped[i] else confidence(p)})
     pl.DataFrame(rows, schema={"contig": pl.Utf8, "bin": pl.Utf8, "assigned_bin": pl.Utf8, "method": pl.Utf8,
                                "prob": pl.Float64, "mean_prob": pl.Float64, "confidence": pl.Utf8}).sort(
         "confidence", "contig").write_csv(out / "include_contigs.tsv", separator="\t", float_precision=4)
@@ -259,8 +268,9 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
     for i, c in enumerate(contigs):
         if c in sole:
             status[i] = "sole_contig_of_bin"
-    if redundancy is not None:
-        status[~np.isnan(redundancy) & (ref.include_bin < 0)] = "redundant"
+    # an unbinned contig whose inclusion was dropped by the redundancy check. A flagged binned contig whose
+    # move was dropped stays "contaminant": it is removed from its bin and listed in bin_contamination.tsv
+    status[dropped & (given < 0)] = "redundant"
     status[(ref.include_bin >= 0) & (given < 0)] = "included"
     status[(ref.include_bin >= 0) & (given >= 0)] = "moved"
     if evidence is not None:

@@ -49,12 +49,12 @@ One row per contig of the assembly.
 | Status | Meaning | In `new_contig_bin.tsv` |
 |---|---|---|
 | `kept` | binned; its methylation fits its bin | yes, in its bin |
-| `contaminant` | binned; its methylation contradicts its bin (`p_contaminant` ≥ 0.5 and a clear difference in at least one motif group) | no |
+| `contaminant` | binned; its methylation contradicts its bin (`p_contaminant` ≥ 0.5 and a clear difference in at least one motif group). Also a contaminant that fitted another bin but was not moved there because that bin already holds its sequence (`redundancy_with_bin` ≥ 0.3) | no |
 | `moved` | a contaminant whose best alternative bin has probability ≥ 0.9 | yes, in that bin |
 | `mixed` | a long binned contig that is partly its bin's and partly another genome's; nothing is split | yes, in its bin |
 | `included` | unbinned; one bin has probability ≥ 0.9 (≥ 0.95 for a bin without detected methylation) | yes, in that bin |
 | `unbinned` | unbinned; no bin is probable enough | no |
-| `redundant` | would be included, but ≥ 30% of its 21-mers are already in that bin (an assembly duplicate) | no |
+| `redundant` | unbinned; would be included, but ≥ 30% of its 21-mers are already in that bin (an assembly duplicate) | no |
 | `sole_contig_of_bin` | the only contig of its bin, so there is no profile without it to compare it with | yes, unchanged |
 | `no_methylation_evidence` | too little informative methylation to tell bins apart | binned: yes, unchanged |
 | `low_coverage` | median coverage below 5 reads per motif site | binned: yes, unchanged |
@@ -70,8 +70,10 @@ outputs can read EpiRefine's.
   `p_contaminant`, `p_cluster`.
 - **`include_contigs.tsv`**: inclusion candidates with probability ≥ 0.5: `contig`, `bin` (its current bin or
   `unbinned`), `assigned_bin`, `method`, `prob`, `mean_prob`, `confidence` (`high_confidence` ≥ 0.95,
-  `medium_confidence` ≥ 0.8, `low_confidence` ≥ 0.5). This lists candidates, not decisions: the contigs actually
-  added are those with status `included` or `moved` in `contig_decisions.tsv`.
+  `medium_confidence` ≥ 0.8, `low_confidence` ≥ 0.5; `dropped_redundant` for a candidate that reached the inclusion
+  threshold but was not added because the bin already holds its sequence). This lists candidates, not decisions:
+  inclusion is applied at 0.9 (0.95 for a bin without detected methylation), so some `medium_confidence` rows are
+  applied and the contigs actually added are those with status `included` or `moved` in `contig_decisions.tsv`.
 - **`decontaminated_contig_bin.tsv`**: `contig`, `bin`: the input bins minus the flagged contigs.
 
 ## Bins and motifs

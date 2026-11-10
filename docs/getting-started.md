@@ -94,7 +94,7 @@ Start with **`epirefine_out/contig_decisions.tsv`**, one row per contig. The col
 | `mixed` | long contig, partly its bin's and partly another genome's (`foreign_segments` says where) | yes, in its bin |
 | `included` | unbinned; fits one bin | yes, in that bin |
 | `unbinned` | unbinned; no bin fits well enough | no |
-| `redundant` | would be included, but its sequence is already in the bin | no |
+| `redundant` | unbinned; would be included, but its sequence is already in the bin | no |
 | `low_coverage`, `too_short`, `no_methylation_evidence` | not judged | unchanged |
 | `sole_contig_of_bin` | the only contig of its bin; nothing to compare it with | unchanged |
 
