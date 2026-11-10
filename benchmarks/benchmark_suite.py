@@ -5,6 +5,12 @@
     python benchmarks/benchmark_suite.py --only mono_train_1
     python benchmarks/benchmark_suite.py --suite <other suite.json>   # e.g. the workflow repository's benchmarks
 
+Nothing here names a location on a particular machine. The benchmark data live under a data root given with
+--data-root or the EPIREFINE_DATA environment variable; a suite file lists its scenarios' inputs relative to
+<data root>/<the suite's "root" entry> (absolute paths in a suite are used as they are). Run outputs go to
+--out-root (default <data root>/runs/epirefine/dev/bench_runs) and the per-version records to the development
+log given with --devlog or EPIREFINE_DEVLOG.
+
 Scenarios are listed in benchmarks/suite_monocultures.json (benchmarks/monoculture_sets.py); the held-out test and
 validation communities are optional and are for final evaluation only, never for tuning. Each run reuses its
 dataset's site cache, so wall time measures everything after the pileup pass unless the cache had to be rebuilt
@@ -17,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -32,6 +39,38 @@ from evaluate_refinement import evaluate  # noqa: E402
 
 METRICS = ["contam_recall", "contam_precision", "inclusion_recall", "placed_wrongly", "should_stay_unbinned",
            "contamination_after", "completeness_after", "wall_s", "peak_rss_gb"]
+
+
+PATH_KEYS = ("assembly", "pileup", "contig_bin", "motifs", "truth", "cache")
+
+
+def data_root(arg: str | None = None) -> Path:
+    """The benchmark data root: `arg` (--data-root) or $EPIREFINE_DATA. No machine-specific default."""
+    root = arg or os.environ.get("EPIREFINE_DATA")
+    if not root:
+        sys.exit("benchmark data root not set: pass --data-root <dir> or set the EPIREFINE_DATA environment variable "
+                 "(the directory that holds benchmarks/mono_bench)")
+    return Path(root)
+
+
+def load_suite(path: str | Path, root: str | Path | None = None) -> list[dict]:
+    """Scenarios of a suite file with their input paths made absolute.
+
+    Paths in a suite are relative to <data root>/<suite "root">; absolute ones are kept. The data root (`root`,
+    else $EPIREFINE_DATA) is only required when the suite holds a relative path.
+    """
+    suite = json.loads(Path(path).read_text())
+    base = None
+    out = []
+    for sc in suite["scenarios"]:
+        sc = dict(sc)
+        for k in PATH_KEYS:
+            if sc.get(k) and not os.path.isabs(sc[k]):
+                if base is None:
+                    base = data_root(str(root) if root else None) / suite.get("root", "")
+                sc[k] = str(base / sc[k])
+        out.append(sc)
+    return out
 
 
 def git(*args) -> str:
@@ -73,20 +112,27 @@ def main():
     ap.add_argument("--suite", default=str(REPO / "benchmarks/suite_monocultures.json"))
     ap.add_argument("--results", default=str(REPO / "benchmarks/results.tsv"),
                     help="per-version summary kept in the repository (one row per benchmark group and run)")
-    ap.add_argument("--devlog", default=str(Path.home() / "plasmid_binner_devlog"))
-    ap.add_argument("--out-root", default="/home/ubuntu/data/bench_runs")
+    ap.add_argument("--data-root", default=None,
+                    help="directory holding the benchmark data (default: the EPIREFINE_DATA environment variable); "
+                         "suite paths are relative to <data root>/<suite root>")
+    ap.add_argument("--devlog", default=os.environ.get("EPIREFINE_DEVLOG"),
+                    help="development log directory; records go to <devlog>/benchmarks "
+                         "(default: the EPIREFINE_DEVLOG environment variable)")
+    ap.add_argument("--out-root", default=None, help="run outputs (default: <data root>/runs/epirefine/dev/bench_runs)")
     ap.add_argument("--all", action="store_true", help="include optional scenarios")
     ap.add_argument("--only", nargs="+", help="run only these scenario names")
     ap.add_argument("--note", default="", help="what changed, stored with the history row")
     ap.add_argument("--jobs", type=int, default=1,
                     help="scenarios run at once (faster; timings then aren't comparable with jobs=1 records)")
     a = ap.parse_args()
-    scen = json.loads(Path(a.suite).read_text())["scenarios"]
+    if not a.devlog:
+        sys.exit("development log not set: pass --devlog <dir> or set the EPIREFINE_DEVLOG environment variable")
+    scen = load_suite(a.suite, a.data_root)
     scen = [s for s in scen if (s["name"] in a.only if a.only else a.all or not s.get("optional"))]
     ver, sha = version(), git("rev-parse", "--short", "HEAD") or "nogit"
     dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
     tag = f"{ver}_{sha}{'-dirty' if dirty else ''}"
-    out_root = Path(a.out_root) / tag
+    out_root = (Path(a.out_root) if a.out_root else data_root(a.data_root) / "runs/epirefine/dev/bench_runs") / tag
     rows = []
     workers = max(1, 16 // a.jobs)
 

@@ -22,3 +22,31 @@ def test_unjudged_contigs_are_left_out(tmp_path):
     r = evaluate(tmp_path / "truth.tsv", tmp_path / "contam.tsv", tmp_path / "new.tsv", "t", tmp_path / "dec.tsv")
     assert r["excluded_low_coverage"] == 1 and r["excluded_no_methylation_evidence"] == 1
     assert r["contaminants"] == 1 and r["contam_recall"] == 1.0
+
+
+def test_suite_paths_resolve_against_data_root(tmp_path, monkeypatch):
+    """Suite files hold no machine path: entries are relative to <data root>/<root>, absolute ones are kept."""
+    import json
+
+    import pytest
+    from benchmark_suite import load_suite
+
+    suite = tmp_path / "suite.json"
+    suite.write_text(json.dumps({"root": "benchmarks/x", "scenarios": [
+        {"name": "a", "group": "g", "assembly": "a/assembly.fasta", "cache": "/abs/cache", "optional": True}]}))
+    sc = load_suite(suite, tmp_path / "data")[0]
+    assert sc["assembly"] == str(tmp_path / "data/benchmarks/x/a/assembly.fasta")
+    assert sc["cache"] == "/abs/cache" and sc["optional"] is True
+    monkeypatch.setenv("EPIREFINE_DATA", str(tmp_path / "env"))
+    assert load_suite(suite)[0]["assembly"] == str(tmp_path / "env/benchmarks/x/a/assembly.fasta")
+    monkeypatch.delenv("EPIREFINE_DATA")
+    with pytest.raises(SystemExit):
+        load_suite(suite)
+
+
+def test_shipped_suite_has_no_absolute_paths():
+    import json
+
+    suite = json.loads((Path(__file__).resolve().parents[1] / "benchmarks/suite_monocultures.json").read_text())
+    assert suite["root"] and not suite["root"].startswith("/")
+    assert not any(isinstance(v, str) and v.startswith("/") for sc in suite["scenarios"] for v in sc.values())
