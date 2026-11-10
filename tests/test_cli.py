@@ -51,6 +51,31 @@ def test_cli_passes_every_run_argument():
         assert renamed.get(name, name) in dests, name
 
 
+def test_version_is_the_source_tree_version():
+    """A checkout run through an editable install (or PYTHONPATH) reports the version of its own pyproject.toml,
+    not that of install metadata left from an earlier version."""
+    import epirefine
+    want = re.search(r'^version = "([^"]+)"', (ROOT / "pyproject.toml").read_text(), re.M).group(1)
+    assert epirefine.__version__ == want
+
+
+def test_version_printed(capsys):
+    import epirefine
+    with pytest.raises(SystemExit):
+        cli.main(["--version"])
+    assert capsys.readouterr().out.strip() == f"epirefine {epirefine.__version__}"
+
+
+def test_installed_package_takes_its_version_from_the_metadata(tmp_path, monkeypatch):
+    import epirefine
+    monkeypatch.setattr(epirefine, "__file__", str(tmp_path / "site-packages" / "epirefine" / "__init__.py"))
+    assert epirefine._source_tree_version() is None  # no pyproject.toml above an installed package
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "other"\nversion = "9.9.9"\n')
+    assert epirefine._source_tree_version() is None  # some other project's file
+    from importlib.metadata import version
+    assert epirefine._version() == version("epirefine")
+
+
 def test_errors_go_to_the_progress_stream(tmp_path):
     """Progress is on standard output; an input error and an unexpected traceback must be there too, with a
     one-line message on standard error and a non-zero exit code."""
