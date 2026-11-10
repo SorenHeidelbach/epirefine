@@ -495,6 +495,11 @@ def noisy_groups(parts: list[str], contig_bin: "pl.DataFrame", contigs: list[int
     A bin is noise-like when at least half its measured contigs are. A group is noisy when noise-like
     bins are >= min_bin_share of the bins that measure it and at least min_noise_bins. Unbinned contigs
     are not used (a genome must be identifiable to count). Returns one row per measured group.
+
+    The rule cannot tell a real motif that the caller detects poorly (intermediate where it is methylated, zero
+    elsewhere) from a leak (intermediate nearly everywhere). `off_bin_share`, the share of measuring bins whose
+    level is below 0.05, is reported for that purpose and not used in the rule: a dropped group that is off in many
+    bins is worth a look.
     """
     import polars as pl
     lo, hi = partial
@@ -507,7 +512,8 @@ def noisy_groups(parts: list[str], contig_bin: "pl.DataFrame", contigs: list[int
         (pl.col("mean_fraction").is_between(lo, hi) & (pl.col("mid_sites") >= min_mid_sites)).alias("noise_like"))
     b = cg.group_by("group", "bin").agg(pl.col("noise_like").mean().alias("share"), pl.col("mean_fraction").median().alias("level"))
     g = (b.group_by("group").agg(pl.len().alias("bins"), (pl.col("share") >= 0.5).sum().alias("noise_bins"),
-                                 pl.col("level").median().alias("median_level"))
+                                 pl.col("level").median().alias("median_level"),
+                                 (pl.col("level") < 0.05).mean().alias("off_bin_share"))
          .with_columns((pl.col("noise_bins") / pl.col("bins")).alias("noise_bin_share"))
          .with_columns(((pl.col("noise_bin_share") >= min_bin_share) & (pl.col("noise_bins") >= min_noise_bins)).alias("noisy"))
          .sort("group"))

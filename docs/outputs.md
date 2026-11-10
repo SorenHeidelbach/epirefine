@@ -86,7 +86,8 @@ outputs can read EpiRefine's.
 - **`motif_groups.tsv`**: which Nanomotif motifs were merged into which motif group (`group`, `mod_type`, `motifs`),
   with the number of sites and reads.
 - **`motif_noise.tsv`**: per motif group, whether it was dropped as basecaller noise (`noisy`), with the bins it
-  was measured in and its typical level.
+  was measured in, its typical level, and the share of those bins where it is unmethylated (`off_bin_share`, level
+  below 0.05; a dropped group that is off in many bins may be a real, weakly detected motif).
 - **`group_weights.tsv`**: groups that behave as one enzyme and share one weight (`cluster`, `cluster_size`,
   `weight`).
 - **`detection_model.tsv`**: the basecaller model per motif group: the share of reads called modified at
