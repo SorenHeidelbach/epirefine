@@ -63,7 +63,7 @@ def main(argv=None):
     r.add_argument("--no-calibrate", action="store_true")
     r.add_argument("--calibration", default="legacy",
                    help="calibration design: 'legacy' (as in 0.10), 'coherent', or a comma-separated list of features "
-                        "(temper-then-mix, prior-averaged, prior-matched, conservative-temperature, unit-temperature, sites-temperature, common-tau, "
+                        "(temper-then-mix, prior-averaged, prior-matched, conservative-temperature, full-test-b, unit-temperature, sites-temperature, common-tau, "
                         "em-priors; '-name' removes one from 'coherent'). See docs/development/method-notes.md")
     r.add_argument("--frag-lengths", type=lambda s: tuple(int(x) for x in s.split(",")), default=DEFAULT_LENGTHS)
     r.add_argument("--frags-per-bin", type=int, default=30, help="cap on calibration fragments per bin and length")

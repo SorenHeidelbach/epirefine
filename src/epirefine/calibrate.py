@@ -56,6 +56,9 @@ FEATURES = {
     "conservative-temperature": "among temperatures >= 1, the largest one that is not worse than the best by more "
                                 "than 2 SE (bootstrap over source contigs): where the fragments cannot tell two "
                                 "temperatures apart, the flatter one is used",
+    "full-test-b": "the host-absent test counts every fragment, also those that cannot tell their bin from its "
+                   "nearest competitor: unbinned contigs of a genome that resembles a bin are part of the "
+                   "population the posteriors are reported for (needs a proper objective to make sense)",
     "common-tau": "tau values are compared on the fragments every tau fit keeps",
     "em-priors": "p_unknown has a Beta(2, 2) prior; the contamination rate counts only contigs that pass the "
                  "methylome-difference gate",
@@ -674,7 +677,9 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     has_sites = np.abs(L_frag[rest]).max(-1) > 0 if len(rest) else np.zeros((0, L_frag.shape[1]), bool)
     difference = np.where(has_sites, np.maximum(np.maximum(lo95 - pb, pb - hi95), 0.0), 0.0).max(1) if len(rest) else np.zeros(0)
     distinct_rest = np.zeros(len(rest), bool)
-    distinct_rest[np.searchsorted(rest, kidx)] = distinct
+    # full-test-b: D12 left the undecidable fragments out of test B because, under the objective of 0.10,
+    # they forced the temperature up (3.7); with a proper objective they cost what they should
+    distinct_rest[np.searchsorted(rest, kidx)] = True if "full-test-b" in features else distinct
     ff = FragmentFit(S=sc_best.S[rest], fbin=fbin_all[rest], Su_comm=sc_best.Su_comm[rest],
                      R={eta: relatives(eta, rest) for eta in etas} if H > 1 else {},
                      kept=keep[rest], distinct=distinct_rest, length=frags["length"].to_numpy()[rest],
