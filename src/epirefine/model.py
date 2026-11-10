@@ -317,18 +317,26 @@ class FittedModel:
                 break
         self.raw_pi = raw
 
-    def two_state_share(self, min_chunks: int = 5, batch: int = 500):
+    def two_state_share(self, min_chunks: int = 5, screen: float = 0.05, max_groups: int = 20, batch: int = 500):
         """Per bin: the largest share, over motif groups, of the smaller of two methylation states among its chunks.
 
-        A chunk is "on" in a group when its 95% interval for the methylated fraction lies above 0.5, "off"
-        when it lies below; chunks whose interval spans 0.5 (few sites, or a partly methylated motif) are
-        left out, and each counted chunk weighs its evidence (the range of its log-likelihood over levels).
-        One genome gives one state per group whatever the level, so a share well above the planted
-        contamination of a few percent means the bin holds two methylomes: a merge of genomes (or of
-        strains that differ in a methyltransferase). The pooled profile then sits between the two and, when
-        they differ in few sites per chunk, explains every chunk, so nothing is down-weighted or flagged:
-        this share is the only sign. Groups with fewer than min_chunks counted chunks are skipped.
-        Returns (share [H], group [H], -1 where no group qualifies).
+        One genome has one level per motif group: its chunks differ only by which of their sites are methylated,
+        which the site model already describes (a group at level 0.5 gives chunks around 0.5). A bin that holds
+        two methylomes (a merge of genomes, or of strains that differ in a methyltransferase) has chunks at two
+        levels, one below and one above 0.5. For each bin and group the distribution of chunk levels is
+        estimated (grid NPMLE over the bin's chunks) and compared with the best single level; when the
+        distribution wins by more than the BIC cost of a second level and weight (log of the number of chunks),
+        the share is the smaller of its masses below and above 0.5, otherwise 0.
+
+        Why it is reported: when the two methylomes differ in few sites per chunk, the pooled profile between
+        them explains every chunk better than a community draw, so the robust fit down-weights nothing and no
+        contig is flagged (single-motif merges from about 20% on the monoculture stress sets). This share is
+        then the only sign that the bin is mixed.
+
+        Groups are screened first (chunks whose 95% interval lies wholly on one side of 0.5, at least
+        min_chunks of them and two on the smaller side, smaller side >= screen of their evidence; at most
+        max_groups per bin), so the NPMLE runs on few groups.
+        Returns (share [H], group [H], -1 where no group shows two states).
         """
         H, (U, M, G) = self.n_bins, self.Lp_chunks.shape
         on_w, off_w = np.zeros((H, M)), np.zeros((H, M))
@@ -342,11 +350,29 @@ class FittedModel:
             np.add.at(on_w, b, info * on); np.add.at(off_w, b, info * off)
             np.add.at(on_n, b, on); np.add.at(off_n, b, off)
         tot = on_w + off_w
-        minor = np.where((on_n + off_n >= min_chunks) & (tot > 0), np.minimum(on_w, off_w) / np.maximum(tot, 1e-300), 0.0)
-        minor = np.where(np.minimum(on_n, off_n) >= 2, minor, 0.0)   # one stray chunk is not a second state
-        g = minor.argmax(1)
-        share = minor[np.arange(H), g]
-        return share, np.where(share > 0, g, -1)
+        minor = np.where((on_n + off_n >= min_chunks) & (np.minimum(on_n, off_n) >= 2) & (tot > 0),
+                         np.minimum(on_w, off_w) / np.maximum(tot, 1e-300), 0.0)
+        share, group = np.zeros(H), np.full(H, -1)
+        upper = self.grid.x >= 0.5
+        order = np.argsort(self.chunk_bin, kind="stable")
+        bounds = np.searchsorted(self.chunk_bin[order], np.arange(H + 1))
+        for h in range(H):
+            ms = np.flatnonzero(minor[h] >= screen)
+            if not len(ms):
+                continue
+            ms = ms[np.argsort(-minor[h, ms], kind="stable")[:max_groups]]
+            idx = order[bounds[h]:bounds[h + 1]]
+            ell = self.Lp_chunks[idx][:, ms, :].astype(np.float64)        # [chunks, groups, G]
+            ell = ell[:, :, :] - ell.max(-1, keepdims=True)
+            rho = npmle(ell, iters=200, tol=1e-5)                         # [groups, G]
+            two = np.log(np.maximum(np.einsum("umg,mg->um", np.exp(ell), rho), 1e-300)).sum(0)
+            one = ell.sum(0).max(-1)
+            ok = two - one > np.log(len(idx))
+            sh = np.where(ok, np.minimum(rho[:, upper].sum(1), rho[:, ~upper].sum(1)), 0.0)
+            k = int(sh.argmax())
+            if sh[k] > 0:
+                share[h], group[h] = sh[k], ms[k]
+        return share, group
 
     def robust_unconverged(self, tol: float = 0.05) -> np.ndarray:
         """Per bin: True when some chunk weight was still moving by more than tol in the last round."""
