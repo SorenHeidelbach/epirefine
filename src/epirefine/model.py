@@ -32,14 +32,22 @@ from .detection import DetectionParams, bb_logpmf
 from .grid import Grid
 
 
-def site_terms(keys: pl.DataFrame, det: dict[int, DetectionParams], grid: Grid) -> np.ndarray:
-    """log P(k | n, phi = x_g) for each row (group, n, k) of `keys`: one row per distinct count pattern."""
+def site_terms(keys: pl.DataFrame, det: dict[int, DetectionParams], grid: Grid, block: int = 65_536) -> np.ndarray:
+    """log P(k | n, phi = x_g) for each row (group, n, k) of `keys`: one row per distinct count pattern.
+
+    The [P, G] table is filled in row blocks: in one expression the two broadcast sums are held next
+    to the result, three times the table (10.9 GB instead of 3.6 GB for 7.1 million patterns).
+    """
     grp, n, k = (keys[c].to_numpy() for c in ("group", "n", "k"))
     n, k = n.astype(float), k.astype(float)
     p = [det[g] for g in range(max(det) + 1)]
     mu0, k0, mu1, k1 = (np.array([getattr(q, f) for q in p])[grp] for f in ("mu0", "kappa0", "mu1", "kappa1"))
     la, lb = bb_logpmf(k, n, mu1, k1), bb_logpmf(k, n, mu0, k0)
-    return np.logaddexp(la[:, None] + grid.logx[None, :], lb[:, None] + grid.log1mx[None, :])
+    out = np.empty((len(la), grid.size))
+    for s in range(0, len(la), block):
+        e = s + block
+        np.logaddexp(la[s:e, None] + grid.logx[None, :], lb[s:e, None] + grid.log1mx[None, :], out=out[s:e])
+    return out
 
 
 def unit_loglik(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int, DetectionParams],

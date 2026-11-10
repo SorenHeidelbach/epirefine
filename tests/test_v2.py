@@ -298,3 +298,21 @@ def test_fragment_rows_match_the_join():
     assert sorted(zip(u.tolist(), r.tolist())) == sorted(zip(ju.tolist(), jr.tolist()))
     u, r = _fragment_rows(cid, pos, fr.filter(pl.col("contig") > 6))
     assert len(u) == 0 and len(r) == 0
+
+
+def test_site_terms_blocks_are_bit_identical():
+    from epirefine.detection import DetectionParams
+    from epirefine.grid import Grid
+    from epirefine.model import site_terms
+    rng = np.random.default_rng(5)
+    grid = Grid(64)
+    det = {0: DetectionParams(0.03, 20.0, 0.85, 8.0, 0.5, 100), 1: DetectionParams(0.1, 5.0, 0.6, 3.0, 0.5, 100)}
+    n = rng.integers(1, 300, 1000)
+    keys = pl.DataFrame({"group": rng.integers(0, 2, 1000), "n": n, "k": rng.integers(0, n + 1)})
+    grp, nf, kf = keys["group"].to_numpy(), n.astype(float), keys["k"].to_numpy().astype(float)
+    from epirefine.detection import bb_logpmf
+    mu0, k0, mu1, k1 = (np.array([getattr(det[g], f) for g in (0, 1)])[grp] for f in ("mu0", "kappa0", "mu1", "kappa1"))
+    whole = np.logaddexp(bb_logpmf(kf, nf, mu1, k1)[:, None] + grid.logx[None, :],
+                         bb_logpmf(kf, nf, mu0, k0)[:, None] + grid.log1mx[None, :])
+    for block in (1, 7, 256, 65_536):
+        assert np.array_equal(site_terms(keys, det, grid, block=block), whole)
