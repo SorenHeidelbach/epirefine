@@ -187,14 +187,14 @@ class MotifMatcher:
                     pass
         return self._compiled
 
-    def _find_pieces(self, codes: np.ndarray, starts: np.ndarray, min_piece: int = 1_000_000) -> dict[str, np.ndarray]:
+    def _find_pieces(self, codes: np.ndarray, starts: np.ndarray, min_piece: int = 262_144) -> dict[str, np.ndarray]:
         """find(codes) with the sequence cut at contig starts into pieces scanned on threads (the scan is one
         thread's work: 38 s for the 50 Mb grouping sample of ZymoFecal with the compiled scanner). A match cannot
         cross a contig start (the separator of Ns is as long as the longest motif), so the pieces hold the same
         records; find orders them by shape, then start, then entry, which a stable sort of the pieces' records,
         concatenated in sequence order, by the shape of their (motif, orientation) restores."""
         from .model import _n_threads
-        n_pieces = min(_n_threads(), max(1, len(codes) // min_piece))
+        n_pieces = max(1, len(codes) // min_piece)
         idx = np.searchsorted(starts, np.linspace(0, len(codes), n_pieces + 1)[1:-1])
         cuts = np.unique(starts[idx[idx < len(starts)]]) if n_pieces > 1 else []
         bounds = [0, *[int(c) for c in cuts if 0 < c < len(codes)], len(codes)]
@@ -203,21 +203,39 @@ class MotifMatcher:
         if len(bounds) <= 2:
             return find(codes)
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(len(bounds) - 1) as ex:
+        # threads: no more than the cores this process may run on (more only added memory: each thread keeps its
+        # own allocator arena; ZymoOral on 4 cores, 16 threads: +0.2 GB at the grouping step and slower)
+        cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else _n_threads()
+        with ThreadPoolExecutor(max(1, min(_n_threads(), cores, len(bounds) - 1))) as ex:
             recs = list(ex.map(lambda ab: find(codes[ab[0]:ab[1]]), zip(bounds[:-1], bounds[1:])))
-        rec = {}
-        for k in recs[0]:
-            parts = []
-            for a, r in zip(bounds[:-1], recs):
-                v = r[k]
-                parts.append(v + a if k == "pos" else v + 2 * a if k == "occ" else v)
-            rec[k] = np.concatenate(parts)
         if getattr(self, "_shape_of", None) is None:
-            self._shape_of = np.zeros((len(self.motifs), 2), np.int64)
+            self._shape_of = np.zeros((len(self.motifs), 2), np.int32)
             for si, sh in enumerate(self.shapes):
                 self._shape_of[sh["mi"], sh["orient"]] = si
-        order = np.argsort(self._shape_of[rec["motif"], rec["strand"]], kind="stable")
-        return {k: v[order] for k, v in rec.items()}
+        # each piece's records come by shape: the output is, shape by shape, that shape's run of every piece in
+        # sequence order, copied field by field into one array (no sort, no index array; each piece's field is
+        # dropped once copied)
+        runs = []
+        n_shapes = len(self.shapes)
+        cuts = [np.searchsorted(self._shape_of[r["motif"], r["strand"]], np.arange(n_shapes + 1)) for r in recs]
+        for si in range(n_shapes):
+            for i, c in enumerate(cuts):
+                if c[si + 1] > c[si]:
+                    runs.append((i, int(c[si]), int(c[si + 1])))
+        total = sum(e - b for _, b, e in runs)
+        rec = {}
+        for k in list(recs[0]):
+            out = np.empty(total, recs[0][k].dtype)
+            at = 0
+            for i, b, e in runs:
+                v = recs[i][k][b:e]
+                a = bounds[i]
+                out[at:at + e - b] = v + a if k == "pos" else v + 2 * a if k == "occ" else v
+                at += e - b
+            for r in recs:
+                del r[k]
+            rec[k] = out
+        return rec
 
     def find_many(self, contigs: dict[str, str], batch_bp: int = 20_000_000):
         """Yield (contig names, contig index per record, record dict) for batches of contigs.
