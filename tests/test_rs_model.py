@@ -122,3 +122,23 @@ def test_summed_scores(monkeypatch, dtype):
     assert np.allclose(got[0], ref[0], rtol=1e-12, atol=0) and np.allclose(got[1], ref[1], rtol=1e-12, atol=0)
     ref, got = _both(monkeypatch, lambda: M.summed_scores(Lp, m.log_prof))
     assert np.allclose(got, ref, rtol=1e-12, atol=0)
+
+
+def test_score_in_batches_is_score(monkeypatch):
+    """Scoring in unit batches (kernel only) returns what scoring all units at once returns with the kernel."""
+    if not rs.supports("score_sums"):
+        pytest.skip("epirefine-rs without score_sums")
+    rng = np.random.default_rng(7)
+    grid = Grid(64)
+    L, cb = _tables(rng, U=200, Mg=9), rng.integers(0, 5, 200)
+    m = M.FittedModel(L, cb, 5, ["a"] * 9, grid, 100.0)
+    m.set_unknown_params(0.05, 0.9)
+    Lt = _tables(rng, U=8192, Mg=9)  # (batches large enough for summed_scores to use the kernel)
+    rows = np.sort(rng.choice(8192, 700, replace=False))
+    whole = m.score(Lt, lp_rows=rows)
+    monkeypatch.setattr(M.FittedModel, "SCORE_BATCH", 4096)
+    parts = m.score(Lt, lp_rows=rows)
+    for f in ("S", "R", "Lp", "lp_rows"):
+        assert np.array_equal(getattr(parts, f), getattr(whole, f)), f
+    for f in ("Au", "Su", "Su_comm"):
+        assert np.allclose(getattr(parts, f), getattr(whole, f), rtol=1e-12, atol=0), f

@@ -849,6 +849,8 @@ class FittedModel:
         all targets is a second copy of their likelihood tables (18.8 GB for 80,526 contigs x 913
         groups), read afterwards for the leave-one-out scores of binned contigs and nothing else.
         """
+        if lp_rows is not None and len(L_units) > self.SCORE_BATCH and _rs("score_sums") is not None:
+            return self._score_in_batches(L_units, np.asarray(lp_rows, dtype=np.int64))
         Lp = self.marginal(L_units)
         Au = group_scores(Lp, self.log_pi[None])[:, 0, :]
         S, R = summed_scores(Lp, self.log_prof, rel=(self.eta if self.eta else 0.05, Au))
@@ -858,6 +860,26 @@ class FittedModel:
             lp_rows = np.asarray(lp_rows, dtype=np.int64)
             Lp = Lp[lp_rows]
         return Scores(S, Su, Au, Lp, Su_comm, R, lp_rows)
+
+    SCORE_BATCH = 8192  # units per batch of _score_in_batches (a multiple of marginalize_unit's 2048)
+
+    def _score_in_batches(self, L_units, lp_rows: np.ndarray) -> Scores:
+        """score() without the marginal tables of all units at once: they are a second copy of L_units (6.3 GB
+        for the 34,878 contigs of ZymoFecal, and the peak of the run), of which only the rows lp_rows are kept.
+        Used with the scoring kernel of epirefine-rs, whose sums for a unit do not depend on the units scored
+        with it (the BLAS products of the numpy sums do, in the last bits: see summed_scores)."""
+        U, M, G = L_units.shape
+        eta = self.eta if self.eta else 0.05
+        S, R, Au = np.empty((U, self.n_bins)), np.empty((U, self.n_bins)), np.empty((U, M))
+        kept = np.empty((len(lp_rows), M, G), L_units.dtype)
+        for s in range(0, U, self.SCORE_BATCH):
+            Lp = self.marginal(L_units[s:s + self.SCORE_BATCH])
+            Au[s:s + len(Lp)] = group_scores(Lp, self.log_pi[None])[:, 0, :]
+            S[s:s + len(Lp)], R[s:s + len(Lp)] = summed_scores(Lp, self.log_prof, rel=(eta, Au[s:s + len(Lp)]))
+            a, b = np.searchsorted(lp_rows, [s, s + len(Lp)])
+            kept[a:b] = Lp[lp_rows[a:b] - s]
+        Su_comm = Au.sum(1)
+        return Scores(S, unknown_score(R, Su_comm, self.eta, self.lam), Au, kept, Su_comm, R, lp_rows)
 
     def state_terms(self, sc: Scores, batch: int = 2000):
         """Per unit and motif group: log P(sites | the group is unmethylated) and log P(sites | methylated), the
