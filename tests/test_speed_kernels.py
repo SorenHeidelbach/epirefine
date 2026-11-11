@@ -285,3 +285,61 @@ def test_own_bin_scores_and_margin_vs_unknown(monkeypatch, threads):
     _, _, ref = A.margin_vs_competitors(model, H1, H0, t, 1.7, batch=128)
     np.testing.assert_allclose(A.margin_vs_unknown(model, H1, H0, t, 1.7, batch=128), ref, rtol=1e-12, atol=1e-9)
 
+
+def _two_state_share_plain(model, min_chunks=5, screen=0.05, max_groups=20, batch=500):
+    """two_state_share as it was: one loop over chunk batches, then one bin after another."""
+    H, (U, Mg, G) = model.n_bins, model.Lp_chunks.shape
+    on_w, off_w, on_n, off_n = (np.zeros((H, Mg)) for _ in range(4))
+    for s in range(0, U, batch):
+        Lp = model.Lp_chunks[s:s + batch].astype(np.float64)
+        _, lo, hi, _ = model.grid.summarize(Lp)
+        info = Lp.max(-1) - Lp.min(-1)
+        b = model.chunk_bin[s:s + batch]
+        on, off = (lo >= 0.5) & (info > 0), (hi < 0.5) & (info > 0)
+        np.add.at(on_w, b, info * on); np.add.at(off_w, b, info * off)
+        np.add.at(on_n, b, on); np.add.at(off_n, b, off)
+    tot = on_w + off_w
+    minor = np.where((on_n + off_n >= min_chunks) & (np.minimum(on_n, off_n) >= 2) & (tot > 0),
+                     np.minimum(on_w, off_w) / np.maximum(tot, 1e-300), 0.0)
+    share, group = np.zeros(H), np.full(H, -1)
+    upper = model.grid.x >= 0.5
+    order = np.argsort(model.chunk_bin, kind="stable")
+    bounds = np.searchsorted(model.chunk_bin[order], np.arange(H + 1))
+    for h in range(H):
+        ms = np.flatnonzero(minor[h] >= screen)
+        if not len(ms):
+            continue
+        ms = ms[np.argsort(-minor[h, ms], kind="stable")[:max_groups]]
+        idx = order[bounds[h]:bounds[h + 1]]
+        ell = model.Lp_chunks[idx][:, ms, :].astype(np.float64)
+        ell = ell - ell.max(-1, keepdims=True)
+        rho = M.npmle(ell, iters=200, tol=1e-5)
+        two = np.log(np.maximum(np.einsum("umg,mg->um", np.exp(ell), rho), 1e-300)).sum(0)
+        one = ell.sum(0).max(-1)
+        ok = two - one > np.log(len(idx))
+        sh = np.where(ok, np.minimum(rho[:, upper].sum(1), rho[:, ~upper].sum(1)), 0.0)
+        k = int(sh.argmax())
+        if sh[k] > 0:
+            share[h], group[h] = sh[k], ms[k]
+    return share, group
+
+
+@pytest.mark.parametrize("threads", ["1", "4"])
+def test_two_state_share_threads_bits(monkeypatch, threads):
+    """two_state_share with chunk rows and bins on threads = the plain loops, bit for bit."""
+    monkeypatch.setenv("OMP_NUM_THREADS", threads)
+    rng = np.random.default_rng(6)
+    grid = Grid(64)
+    U, Mg, H = 700, 9, 6
+    model = object.__new__(M.FittedModel)
+    model.grid, model.n_bins = grid, H
+    model.chunk_bin = rng.integers(0, H, U)
+    lvl = np.where(rng.random((U, Mg)) < 0.5, 0.1, 0.9)  # two states in every bin: the NPMLE runs
+    k = rng.binomial(30, lvl)[..., None]
+    x = grid.x[None, None, :]
+    model.Lp_chunks = (k * np.log(x) + (30 - k) * np.log1p(-x)).astype(np.float32)
+    model.Lp_chunks[rng.random((U, Mg)) < 0.2] = 0.0
+    ref = _two_state_share_plain(model)
+    got = model.two_state_share()
+    assert (ref[1] >= 0).sum() >= 3
+    assert np.array_equal(ref[0], got[0]) and np.array_equal(ref[1], got[1])

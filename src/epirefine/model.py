@@ -746,14 +746,24 @@ class FittedModel:
         H, (U, M, G) = self.n_bins, self.Lp_chunks.shape
         on_w, off_w = np.zeros((H, M)), np.zeros((H, M))
         on_n, off_n = np.zeros((H, M)), np.zeros((H, M))
-        for s in range(0, U, batch):
-            Lp = self.Lp_chunks[s:s + batch].astype(np.float64)
-            _, lo, hi, _ = self.grid.summarize(Lp)
-            info = Lp.max(-1) - Lp.min(-1)
-            b = self.chunk_bin[s:s + batch]
-            on, off = (lo >= 0.5) & (info > 0), (hi < 0.5) & (info > 0)
+        # per chunk and group: evidence and side of 0.5, computed row by row on threads (each row from its own
+        # values: the same bits for any slicing), then added up per bin in chunk order as before
+        on_all, off_all, info_all = np.empty((U, M), bool), np.empty((U, M), bool), np.empty((U, M))
+
+        def side(sl):
+            for s in range(sl.start, sl.stop, 64):
+                e = min(s + 64, sl.stop)
+                Lp = self.Lp_chunks[s:e].astype(np.float64)
+                _, lo, hi, _ = self.grid.summarize(Lp)
+                info = Lp.max(-1) - Lp.min(-1)
+                on_all[s:e], off_all[s:e] = (lo >= 0.5) & (info > 0), (hi < 0.5) & (info > 0)
+                info_all[s:e] = info
+        _on_threads(side, U)
+        for s in range(0, U, batch):  # np.add.at adds the rows one after another: the order of the old loop
+            b, on, off, info = self.chunk_bin[s:s + batch], on_all[s:s + batch], off_all[s:s + batch], info_all[s:s + batch]
             np.add.at(on_w, b, info * on); np.add.at(off_w, b, info * off)
             np.add.at(on_n, b, on); np.add.at(off_n, b, off)
+        del on_all, off_all, info_all
         tot = on_w + off_w
         minor = np.where((on_n + off_n >= min_chunks) & (np.minimum(on_n, off_n) >= 2) & (tot > 0),
                          np.minimum(on_w, off_w) / np.maximum(tot, 1e-300), 0.0)
@@ -761,15 +771,15 @@ class FittedModel:
         upper = self.grid.x >= 0.5
         order = np.argsort(self.chunk_bin, kind="stable")
         bounds = np.searchsorted(self.chunk_bin[order], np.arange(H + 1))
-        for h in range(H):
+        def one_bin(h):
             ms = np.flatnonzero(minor[h] >= screen)
             if not len(ms):
-                continue
+                return
             ms = ms[np.argsort(-minor[h, ms], kind="stable")[:max_groups]]
             idx = order[bounds[h]:bounds[h + 1]]
             ell = self.Lp_chunks[idx][:, ms, :].astype(np.float64)        # [chunks, groups, G]
             ell = ell[:, :, :] - ell.max(-1, keepdims=True)
-            rho = npmle(ell, iters=200, tol=1e-5)                         # [groups, G]
+            rho = npmle(ell, iters=200, tol=1e-5, blocks=1)               # [groups, G] (one thread per bin: the bins run on threads)
             two = np.log(np.maximum(np.einsum("umg,mg->um", np.exp(ell), rho), 1e-300)).sum(0)
             one = ell.sum(0).max(-1)
             ok = two - one > np.log(len(idx))
@@ -777,6 +787,9 @@ class FittedModel:
             k = int(sh.argmax())
             if sh[k] > 0:
                 share[h], group[h] = sh[k], ms[k]
+        # bins are independent (each writes its own entries); on threads
+        with ThreadPoolExecutor(max(1, min(_n_threads(), H))) as ex:
+            list(ex.map(one_bin, range(H)))
         return share, group
 
     def robust_unconverged(self, tol: float = 0.05) -> np.ndarray:
