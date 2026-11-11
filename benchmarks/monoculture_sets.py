@@ -20,8 +20,11 @@ synthetic communities from them with realistic problems, in three disjoint sets:
     folders or, where missing, from the workflow repository's workflow/monocultures.smk (modkit pileup,
     nanomotif motif_discovery).
 
-    python benchmarks/monoculture_sets.py --isolates mono_bench/isolates_inputs.tsv \
-        --out /home/ubuntu/data/mono_bench --suite benchmarks/suite_monocultures.json
+    python benchmarks/monoculture_sets.py --isolates <data root>/benchmarks/mono_bench/isolates_inputs.tsv \
+        --data-root <data root> --suite benchmarks/suite_monocultures.json
+
+The data root is --data-root or the EPIREFINE_DATA environment variable; the sets are written to
+<data root>/benchmarks/mono_bench (or --out), and the suite file lists them relative to that directory.
 
 Writes, per community, assembly.fasta, pileup.bed, contig_bin.tsv, bin-motifs.tsv, truth_actions.tsv
 (perturb_bins.py's columns) and pieces.tsv (piece, isolate, parent contig, plasmid, coverage factor),
@@ -32,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -46,6 +50,7 @@ from epirefine import io as pio  # noqa: E402
 
 COLS = [f"c{i}" for i in range(1, 19)]  # modkit bedMethyl, 18 columns
 COUNTS = ["c12", "c13", "c14", "c15", "c16", "c17", "c18"]  # Nmod Ncanonical Nother Ndelete Nfail Ndiff Nnocall
+SUITE_ROOT = "benchmarks/mono_bench"  # where the sets live below the data root; recorded as the suite file's "root"
 
 
 def discover(table: str) -> pl.DataFrame:
@@ -137,7 +142,9 @@ def motif_table(rows: list[dict]) -> pl.DataFrame:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--isolates", required=True, help="isolate, assembly, pileup, motifs, plasmids (TSV)")
-    ap.add_argument("--out", default="/home/ubuntu/data/mono_bench")
+    ap.add_argument("--data-root", default=os.environ.get("EPIREFINE_DATA"),
+                    help="benchmark data root (default: the EPIREFINE_DATA environment variable)")
+    ap.add_argument("--out", default=None, help="output directory (default: <data root>/" + SUITE_ROOT + ")")
     ap.add_argument("--suite", default=str(Path(__file__).parent / "suite_monocultures.json"))
     ap.add_argument("--fractions", type=float, nargs=3, default=(0.6, 0.2, 0.2))
     ap.add_argument("--communities", type=int, nargs=3, default=(6, 3, 3), help="per split: train test val")
@@ -152,7 +159,12 @@ def main():
     ap.add_argument("--seed", type=int, default=7)
     a = ap.parse_args()
     rng = np.random.default_rng(a.seed)
-    out = Path(a.out)
+    if not (a.out or a.data_root):
+        sys.exit("output location not set: pass --data-root <dir> (or set EPIREFINE_DATA), or --out <dir>")
+    out = Path(a.out) if a.out else Path(a.data_root) / SUITE_ROOT
+    # the suite lists paths relative to <data root>/<root>; with an --out outside the data root they stay absolute
+    in_root = bool(a.data_root) and out.resolve() == (Path(a.data_root) / SUITE_ROOT).resolve()
+    rel = (lambda p: str(p.relative_to(out))) if in_root else str
     cache = out / "isolates"
     cache.mkdir(parents=True, exist_ok=True)
 
@@ -197,15 +209,17 @@ def main():
                             "--out", str(d), "--orphan-bins", str(a.orphan_bins), "--missing", str(a.missing),
                             "--contaminants", str(a.contaminants), "--genome-motifs", str(d / "genome_motifs.tsv"),
                             "--seed", str(int(rng.integers(1 << 31)))], check=True)
-            scenarios.append({"name": name, "group": label, "assembly": str(d / "assembly.fasta"),
-                              "pileup": str(d / "pileup.bed"), "contig_bin": str(d / "contig_bin.tsv"),
-                              "motifs": str(d / "bin-motifs.tsv"), "truth": str(d / "truth_actions.tsv"),
-                              "cache": str(d / "pbcache"), "optional": label != "mono-train"})
+            scenarios.append({"name": name, "group": label, "assembly": rel(d / "assembly.fasta"),
+                              "pileup": rel(d / "pileup.bed"), "contig_bin": rel(d / "contig_bin.tsv"),
+                              "motifs": rel(d / "bin-motifs.tsv"), "truth": rel(d / "truth_actions.tsv"),
+                              "cache": rel(d / "pbcache"), "optional": label != "mono-train"})
             print(f"{name}: {pick.height} isolates, coverage targets " + ", ".join(f"{x:.0f}x" for x in target))
     Path(a.suite).write_text(json.dumps({
         "description": "Monoculture benchmark sets (benchmarks/monoculture_sets.py). Tune on mono-train, select on "
-                       "mono-test, report mono-val once. Isolates split by genus; pileups thinned to 3-60x.",
-        "scenarios": scenarios}, indent=1))
+                       "mono-test, report mono-val once. Isolates split by genus; pileups thinned to 3-60x. "
+                       "Paths are relative to <data root>/<root>; the data root is benchmark_suite.py's --data-root "
+                       "or the EPIREFINE_DATA environment variable.",
+        **({"root": SUITE_ROOT} if in_root else {}), "scenarios": scenarios}, indent=1))
     print(f"wrote {len(scenarios)} scenarios to {a.suite}")
 
 

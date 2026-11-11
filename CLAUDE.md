@@ -5,11 +5,17 @@ to their bin (contamination detection) and places unbinned contigs into bins (co
 calibrated posteriors and Nanomotif-compatible outputs. It builds on Nanomotif's motif output and a
 modkit pileup. This repository holds only the tool, its tests and its monoculture benchmark. The Snakemake
 workflow, Hi-C validation and the other benchmarks live in a separate repository that calls the tool
-(`/home/ubuntu/epirefine_workflow`); keep them out of here.
+(the `workflow` checkout next to this one); keep them out of here.
+
+No tracked file may name a location on a particular machine (no absolute local paths, in code, configs,
+docs or comments). Data and log locations come from the command line or from the environment:
+`EPIREFINE_DATA` (benchmark data root) and `EPIREFINE_DEVLOG` (development log). On the development server
+both are exported by `submission/paths.sh` in the project directory that holds this checkout
+(`source ../submission/paths.sh`).
 
 ## Before changing anything
 
-1. Read the development log at `/home/ubuntu/plasmid_binner_devlog/`: `README.md` (current state and
+1. Read the development log (`$EPIREFINE_DEVLOG`, the `devlog` directory next to this checkout): `README.md` (current state and
    open questions), then `DECISIONS.md`. Every model and design choice there was made for a measured
    reason. Don't reverse one, or remove what it added, without a benchmark result showing the
    reversal is better, and say so to the user first.
@@ -43,7 +49,8 @@ workflow, Hi-C validation and the other benchmarks live in a separate repository
 
 ## Measuring and reporting the effect of every change
 
-- Run `benchmarks/benchmark_suite.py --note "<what changed>"` before merging any change to the model,
+- Run `benchmarks/benchmark_suite.py --note "<what changed>"` (needs `EPIREFINE_DATA` and `EPIREFINE_DEVLOG`,
+  or `--data-root` and `--devlog`) before merging any change to the model,
   the pipeline or performance, and for every new version. It runs the monoculture training communities
   (about 5 minutes), records accuracy (contaminants found, flag precision, contigs put back, contigs of
   unbinned genomes wrongly placed, bin completeness and contamination), wall time and peak memory,
@@ -58,7 +65,8 @@ workflow, Hi-C validation and the other benchmarks live in a separate repository
 
 ## Development log (outside git)
 
-`/home/ubuntu/plasmid_binner_devlog/` holds the reasoning behind the code, for future sessions:
+`$EPIREFINE_DEVLOG` (the `devlog` directory next to this checkout) holds the reasoning behind the code, for
+future sessions:
 
 - `README.md`: current state, how the pieces fit, open questions. Keep it current.
 - `DECISIONS.md`: one entry per decision (date, version, choice, why, rejected alternatives,
@@ -88,8 +96,8 @@ workflow, Hi-C validation and the other benchmarks live in a separate repository
   the k-mer check against inclusions the bin already holds; `motifs.py` motif matching and grouping.
   Don't add tooling, plotting or other data types (Hi-C, coverage) here without asking the user.
 - `tests/`: unit tests.
-- `benchmarks/`: the monoculture benchmark: `benchmark_suite.py`, `suite_monocultures.json` (absolute
-  paths on this server), `evaluate_refinement.py`, the set builders (`monoculture_sets.py`,
+- `benchmarks/`: the monoculture benchmark: `benchmark_suite.py`, `suite_monocultures.json` (paths relative
+  to `$EPIREFINE_DATA/benchmarks/mono_bench`), `evaluate_refinement.py`, the set builders (`monoculture_sets.py`,
   `fragment_assembly.py`, `perturb_bins.py`) and `results.tsv` (summary per version).
 - `dev/`: git hooks and speed prototypes.
 - `docs/`: user documentation (`getting-started.md`, `usage.md`, `outputs.md`, `how-it-works.md`, `faq.md`);

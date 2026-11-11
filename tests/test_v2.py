@@ -271,3 +271,156 @@ def test_inclusion_into_unmethylated_bin_needs_higher_posterior():
     r = refine(S, np.array([-40., -40.]), given, given >= 0, temperature=1.0, p_unknown=0.01,
                unmethylated_bins=np.array([False, True, False]), include_threshold_unmethylated=0.95)
     assert r.include_bin.tolist() == [-1, 0]
+
+
+def test_fragment_rows_match_the_join():
+    """The range lookup returns the (unit, row) pairs of the join on contig filtered on position, in its order."""
+    from epirefine.sites import _fragment_rows
+    rng = np.random.default_rng(3)
+    cid = np.sort(rng.integers(0, 6, 4000)).astype(np.int32)
+    pos = np.concatenate([np.sort(rng.integers(0, 30_000, int((cid == c).sum()))) for c in range(6)]).astype(np.int64)
+    fr = pl.DataFrame({"unit": np.arange(40), "contig": rng.integers(0, 8, 40).astype(np.int32),
+                       "start": rng.integers(0, 6, 40) * 5000}).with_columns((pl.col("start") + 5000).alias("end"))
+    fr = pl.concat([fr, fr.head(5).with_columns(pl.col("unit") + 40, pl.lit(0, pl.Int64).alias("start"),
+                                                  pl.lit(20_000, pl.Int64).alias("end"))])
+
+    def join(cid, pos):
+        f = (pl.DataFrame({"row": np.arange(len(cid)), "contig": cid, "pos": pos}).join(fr, on="contig", how="inner")
+             .filter((pl.col("pos") >= pl.col("start")) & (pl.col("pos") < pl.col("end"))))
+        return f["unit"].to_numpy(), f["row"].to_numpy()
+    u, r = _fragment_rows(cid, pos, fr)
+    ju, jr = join(cid, pos)
+    assert len(r) > 500 and np.array_equal(u, ju) and np.array_equal(r, jr)
+    # a part that is not sorted takes the join itself
+    p = rng.permutation(len(cid))
+    u, r = _fragment_rows(cid[p], pos[p], fr)
+    ju, jr = join(cid[p], pos[p])
+    assert sorted(zip(u.tolist(), r.tolist())) == sorted(zip(ju.tolist(), jr.tolist()))
+    u, r = _fragment_rows(cid, pos, fr.filter(pl.col("contig") > 6))
+    assert len(u) == 0 and len(r) == 0
+
+
+def test_site_terms_blocks_are_bit_identical():
+    from epirefine.detection import DetectionParams
+    from epirefine.grid import Grid
+    from epirefine.model import site_terms
+    rng = np.random.default_rng(5)
+    grid = Grid(64)
+    det = {0: DetectionParams(0.03, 20.0, 0.85, 8.0, 0.5, 100), 1: DetectionParams(0.1, 5.0, 0.6, 3.0, 0.5, 100)}
+    n = rng.integers(1, 300, 1000)
+    keys = pl.DataFrame({"group": rng.integers(0, 2, 1000), "n": n, "k": rng.integers(0, n + 1)})
+    grp, nf, kf = keys["group"].to_numpy(), n.astype(float), keys["k"].to_numpy().astype(float)
+    from epirefine.detection import bb_logpmf
+    mu0, k0, mu1, k1 = (np.array([getattr(det[g], f) for g in (0, 1)])[grp] for f in ("mu0", "kappa0", "mu1", "kappa1"))
+    whole = np.logaddexp(bb_logpmf(kf, nf, mu1, k1)[:, None] + grid.logx[None, :],
+                         bb_logpmf(kf, nf, mu0, k0)[:, None] + grid.log1mx[None, :])
+    # (one logarithm per cell instead of logaddexp since 0.11: equal to rounding; blocks do not change a bit)
+    first = site_terms(keys, det, grid, block=1)
+    np.testing.assert_allclose(first, whole, rtol=1e-13)
+    for block in (7, 256, 65_536):
+        assert np.array_equal(site_terms(keys, det, grid, block=block), first)
+
+
+def test_summed_scores_same_bits_whatever_the_memory_budget(monkeypatch):
+    monkeypatch.setenv("EPIREFINE_RS", "0")  # the numpy sums (the kernel of epirefine-rs: tests/test_rs_model.py)
+    """Scores don't depend on how many group blocks run at once, and equal the block-wise sums they replace."""
+    from epirefine import model as md
+    rng = np.random.default_rng(11)
+    U, M, G, H = 400, 37, 64, 30
+    Lp = (-rng.gamma(2.0, 20.0, (U, M, G))).astype(np.float32)
+    prof = np.log(rng.dirichlet(np.ones(G) * 0.3, (H, M)))
+    Au = -rng.gamma(2.0, 5.0, (U, M))
+    eta = 0.05
+    # the sums as they were formed before: one accumulator per block of groups, then the blocks added up
+    A = md.group_scores(Lp, prof)                                   # [U, H, M]
+    RA = np.logaddexp(A + np.log1p(-eta), (np.log(eta) + Au)[:, None, :])
+    blocks = [b for b in np.array_split(np.arange(M), min(M, md._n_threads())) if len(b)]
+
+    def blockwise(X):
+        parts = []
+        for b in blocks:
+            acc = np.zeros((U, H))
+            for m in b:
+                acc += X[:, :, m]
+            parts.append(acc)
+        return sum(parts)
+    S0, R0 = blockwise(A), blockwise(RA)
+    per_block = 3 * 8 * U * H
+    for budget in (1, per_block, 3 * per_block, 7 * per_block, 1 << 40, None):
+        S, R = md.summed_scores(Lp, prof, rel=(eta, Au), max_bytes=budget)
+        assert np.array_equal(S, S0) and np.array_equal(R, R0), budget
+        assert np.array_equal(md.summed_scores(Lp, prof, max_bytes=budget), S0), budget
+    assert np.allclose(S0, A.sum(-1), rtol=1e-12, atol=0)
+
+
+def test_scores_keep_lp_rows_of_chosen_units_only():
+    """score(lp_rows=...) gives the same scores, and leave-one-out rescoring of a kept unit the same bits."""
+    import pytest
+    rng = np.random.default_rng(4)
+    model = _model([[0.95, 0.01, 0.01], [0.01, 0.95, 0.01], [0.01, 0.01, 0.95]], rng=rng)
+    model.set_unknown_params(0.05, 0.9)
+    L = np.stack([_sim_L(p, 40, rng=rng) for p in ([0.95, 0.01, 0.01], [0.01, 0.95, 0.01], [0.5, 0.5, 0.5],
+                                                 [0.01, 0.01, 0.95], [0.95, 0.95, 0.01])])
+    full, part = model.score(L), model.score(L, lp_rows=[1, 3])
+    assert part.Lp.shape[0] == 2 and np.array_equal(part.Lp, full.Lp[[1, 3]])
+    for f in ("S", "Su", "Au", "Su_comm", "R"):
+        assert np.array_equal(getattr(full, f), getattr(part, f))
+    for i, b in ((1, 1), (3, 2)):
+        a = model.loo_rescore(full, i, b, np.array([6 * b]))
+        assert np.array_equal(a, model.loo_rescore(part, i, b, np.array([6 * b])))
+    assert np.array_equal(full.S, part.S) and np.array_equal(full.R, part.R) and np.array_equal(full.Su, part.Su)
+    assert np.array_equal(model.host_terms(full, np.array([3, 1]), np.array([0, 2])),
+                          model.host_terms(part, np.array([3, 1]), np.array([0, 2])))
+    for i in (0, 2, 4):
+        with pytest.raises(KeyError):
+            part.lp(i)
+
+
+def test_expected_tables_chunks_are_bit_identical():
+    """Reducing T[r] * w in blocks of whole (unit, group) cells gives the bits of the single reduction."""
+    rng = np.random.default_rng(8)
+    n = 6000
+    sites = pl.DataFrame({"unit": rng.integers(0, 40, n), "group": rng.integers(0, 3, n), "n": rng.integers(1, 80, n)})
+    table: dict = {}
+    whole = expected_tables(sites, 41, 3, DET, G, dtype=np.float32, table=table, chunk_rows=10 ** 9)
+    assert np.abs(whole[0]).sum() > 0 and not whole[0][40].any()
+    for chunk_rows in (1, 2, 17, 100, 1000):
+        part = expected_tables(sites, 41, 3, DET, G, dtype=np.float32, table=table, chunk_rows=chunk_rows)
+        assert np.array_equal(part[0], whole[0]) and np.array_equal(part[1], whole[1]), chunk_rows
+
+
+def test_outlier_responsibility_does_not_depend_on_the_batch():
+    model = _model([[0.95, 0.01, 0.01], [0.01, 0.95, 0.01]], contaminant=(1, [0.95, 0.01, 0.01]))
+    ref = model._outlier_responsibility(0.05, batch=200)
+    for batch in (1, 3, 5, None):  # (the cached community term _s_out is kept: it is from the first robust round)
+        assert np.array_equal(model._outlier_responsibility(0.05, batch=batch), ref)
+
+
+def test_batched_summary_does_not_depend_on_the_batch():
+    from epirefine.pipeline import _batched_summary
+    L = -np.random.default_rng(2).gamma(2.0, 10.0, (57, 5, G.size))
+    ref = G.summarize(L)
+    for batch in (1, 4, 50, 2000):
+        got = _batched_summary(G, lambda sl: L[sl], len(L), batch=batch)
+        assert all(np.array_equal(a, b) for a, b in zip(got, ref))
+
+
+def test_lean_logsumexp_has_the_bits_of_scipy():
+    import scipy
+    from scipy.special import logsumexp as ref
+    from epirefine.model import logsumexp as lse
+    rng = np.random.default_rng(0)
+    same = np.array_equal if tuple(int(v) for v in scipy.__version__.split(".")[:2]) >= (1, 15) else np.allclose
+    for shape, axis, dt in (((300, 40, 64), -1, np.float64), ((300, 50), 1, np.float64), ((64,), -1, np.float64),
+                            ((100, 7, 64), -1, np.float32), ((1, 495), 1, np.float64)):
+        a = (-rng.gamma(2, 30, shape)).astype(dt)
+        a.reshape(-1)[::17] = -np.inf
+        if a.ndim > 1 and len(a) > 2:
+            a[0] = -np.inf          # nothing in the row
+            a[1] = a[1].max()       # every element tied for the maximum
+            a[2, ..., :2] = 0.0     # two tied maxima
+        for kd in (False, True):
+            x, y = ref(a, axis=axis, keepdims=kd), lse(a, axis=axis, keepdims=kd)
+            assert np.shape(x) == np.shape(y) and x.dtype == y.dtype and same(x, y, equal_nan=True)
+    odd = np.array([[np.inf, 1.0], [np.nan, 1.0], [-np.inf, -np.inf]])
+    assert np.array_equal(ref(odd, axis=1), lse(odd, axis=1), equal_nan=True)

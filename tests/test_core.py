@@ -102,3 +102,46 @@ def test_score_prefers_matching_host_and_unknown_is_fallback():
     assert P[0].argmax() == 0 and P[0, 0] > 0.9
     P_masked = posterior(S, Su, 0.1, host_mask=np.array([[False, True]]))
     assert P_masked[0].argmax() == 2  # true host removed -> unknown, not the wrong host
+
+
+def test_repeated_contig_name_is_an_error(tmp_path):
+    """A name that occurs twice would give two records one length, one bin and one row of scores."""
+    import pytest
+    from epirefine import io as pio
+    from epirefine.sites import EncodedAssembly
+    fa = tmp_path / "a.fasta"
+    fa.write_text(">c1 first\nACGT\n>c2\nAC\n>c1 again\nGGGGGG\n")
+    with pytest.raises(ValueError, match="c1.*more than once"):
+        pio.fasta_lengths(fa)
+    with pytest.raises(ValueError, match="c1.*more than once"):
+        EncodedAssembly.write(pio.iter_fasta(fa), tmp_path / "asm")
+    fa.write_text(">c1\nACGT\n>c2\nAC\n")
+    assert pio.fasta_lengths(fa) == {"c1": 4, "c2": 2}
+    assert EncodedAssembly.write(pio.iter_fasta(fa), tmp_path / "asm").names == ["c1", "c2"]
+
+
+def test_cache_manifest_is_removed_before_a_rebuild(tmp_path, monkeypatch):
+    """A rebuild that dies in the pileup pass must not leave the old manifest pointing at rewritten parts."""
+    import json
+    import pytest
+    from epirefine import pipeline
+    rng = np.random.default_rng(0)
+    fa = tmp_path / "a.fasta"
+    fa.write_text("".join(f">c{i}\n{''.join(rng.choice(list('ACGT'), 3000))}\n" for i in range(3)))
+    (tmp_path / "cb.tsv").write_text("c0\tb1\nc1\tb2\n")
+    (tmp_path / "motifs.tsv").write_text("motif\tmod_type\tmod_position\nGATC\ta\t1\n")
+    (tmp_path / "p.bed").write_text("c0\t10\t11\ta\t5\t+\t10\t11\t255,0,0\t5\t100.00\t5\t0\t0\t0\t0\t0\t0\n")
+    cache = tmp_path / "cache"
+    (cache / "sites").mkdir(parents=True)
+    (cache / "sites" / "r0000_0000.parquet").write_bytes(b"old part")
+    man = cache / "manifest.json"
+    man.write_text(json.dumps({"inputs": {"assembly": "another assembly", "group_of": [0]},
+                               "parts": ["r0000_0000.parquet"]}))
+
+    def killed(*a, **k):
+        raise RuntimeError("killed in the pileup pass")
+    monkeypatch.setattr(pipeline, "extract_sites", killed)
+    with pytest.raises(RuntimeError, match="killed"):
+        pipeline.run(fa, tmp_path / "p.bed", tmp_path / "cb.tsv", tmp_path / "motifs.tsv", tmp_path / "out",
+                     cache_dir=cache, workers=1)
+    assert not man.exists()

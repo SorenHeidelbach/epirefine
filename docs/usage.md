@@ -14,7 +14,7 @@ truth and checked against Hi-C on a fecal sample; most users only set the inputs
 | `--assembly` | yes | Assembly FASTA (plain or gzipped). |
 | `--contig-bin` | yes | The bins to refine: `contig<TAB>bin`, no header. Contigs not listed are unbinned. |
 | `--pileup` | yes | `modkit pileup` bedMethyl (`.bed` or `.bed.gz`). Both the older space-separated and the all-tab formats work. The rows of each contig must be together, as modkit writes them. |
-| `--motifs` | yes | Nanomotif `bin-motifs.tsv` (or any TSV with `motif`, `mod_type`, `mod_position`). Only the list of motifs is used, plus their complements when given. |
+| `--motifs` | yes | Nanomotif `bin-motifs.tsv` (or any TSV with `motif`, `mod_type`, `mod_position`). Only the list of motifs is used, plus their complements when given. `mod_type` must be a modkit code (`a` = 6mA, `m` = 5mC, `21839` = 4mC, `h` = 5hmC), `mod_position` is 0-based; other mod types stop the run, invalid motifs are skipped and counted in the log. |
 | `--out` | yes | Output folder. |
 | `--motif-fit` | no | Also write `motif_fit.tsv`: each contig's methylated fraction per motif group next to its bin's. |
 | `--seed` | no (1) | Random seed; the same seed gives identical outputs. |
@@ -45,6 +45,10 @@ truth and checked against Hi-C on a fecal sample; most users only set the inputs
 |---|---|---|
 | `--min-jaccard` | 0.9 | Motifs whose sites overlap this much are merged into one motif group. A site matched by several groups counts in the most specific one. |
 | `--group-sample-mb` | 50 | Mb of sequence sampled to measure the overlap between motifs. |
+| `--shared-sites` | `sample` | Which group gets a site that motifs of several groups match: the group with the fewest occurrences in the sampled sequence (`sample`), or the one whose motif is rarest in random sequence (`motif`; does not depend on the sample or the seed). |
+| `--complement-pairs` | `sequence` | A motif and its reverse complement in the motif list: one two-strand site per occurrence, paired by sequence (`sequence`); paired only when each has a single modified position (`position`; the same sites unless a sequence is listed with several modified positions); or kept as two motifs with single-strand sites (`separate`). |
+| `--strand-sites` | `sum` | Reads of the two strands at one occurrence of a palindrome or complement pair: summed into one site (`sum`); one site per strand (`split`); or summed unless the strands can differ, i.e. complement pairs and occurrences where one strand is also a site of another motif group (`auto`). |
+| `--noise-max-off-share` | 1 | Call a motif group noise only when at most this share of the bins that measure it leave it unmethylated (1 = not used). |
 | `--no-motif-noise-filter` | off | Keep motif groups that look like basecaller noise (partly methylated on many contigs of many bins; see `motif_noise.tsv`). By default they are dropped. |
 | `--no-group-weights` | off | Count every motif group fully. By default, groups that can share sites and are methylated in the same bins share one weight, so variants of one enzyme don't vote several times (see `group_weights.tsv`). |
 
@@ -68,10 +72,21 @@ estimates. Leave them unset unless you are testing the model.
 | `--variation` | beta | How a contig's methylated fraction varies around its bin's: `beta` or `logit` (logit-normal). |
 | `--tau` | calibrated | The variation parameter (beta concentration, or logit-normal sigma). |
 | `--no-calibrate` | off | Skip calibration: temperature 1 and a fixed variation (beta concentration 100) unless set. Probabilities are then overconfident; for testing only. |
+| `--calibration` | `legacy` | Calibration design: `legacy` (as in 0.10), `consistent` (the features `temper-then-mix`, `common-tau`, `em-priors`), `coherent` (the full proposed design), or a comma-separated list of features; see `docs/development/method-notes.md` §7.6. |
 | `--frag-lengths` | `2000,5000,10000,20000,50000,100000` | Lengths of the calibration pieces in bp, comma-separated. |
 | `--frag-budget` | 6000 | Total number of calibration pieces, spread over bins and lengths. |
 | `--frags-per-bin` | 30 | At most this many pieces per bin and length. |
-| `--contam-eps` | 0.05 | Prior share of foreign pieces in a bin when building its fingerprint (0 = trust every piece). |
+| `--contam-eps` | 0.05 | Prior share of foreign pieces in a bin when building its fingerprint (0 = trust every piece; the regional model for long contigs is then off too, and the log says so; must be below 1). |
+| `--robust-fit` | `alternating` | `damped`: iterate the bin fingerprints in damped steps until they settle (slower; same results on every benchmark so far). |
+| `--unknown-prior` | `bins` | `unbinned`: a genome without a bin is assumed to carry each motif as often as the unbinned contigs do, not as often as the bins do. Far fewer contigs of genomes without a bin are placed into bins with no or one common motif; fewer contigs without a site of their bin's motifs are put back. |
+| `--unknown-prior-strength` | 5 | With `--unknown-prior unbinned`: pseudo-contigs at the bins' frequency (large values return to `bins`). |
+| `--redundancy-order` | `independent` | `sequential`: inclusion candidates of a bin are compared with the bin plus the candidates already accepted (most probable first), so two unbinned copies of one sequence are not both included. |
+| `--regional-leave-out`, `--regional-withdraw`, `--regional-tempered` | `chunk`, `vs_foreign`, off | Variants of the regional model: `contig` scores a long contig's pieces against the bin without the whole contig; `largest` withdraws a flag as `mixed` only when mixed is the most probable of member / foreign / mixed. |
+| `--gate-leave-out`, `--gate-unweighted`, `--eps-gated` | `none`, off, off | Variants of the methylome-difference requirement: against the bin's 95% interval without the contig; contig intervals from unweighted sites; contamination rate from contigs that pass it. |
+| `--max-flagged-share` | 1 | Below 1: apply no flag of a bin whose flagged contigs hold at least this share of its judged sequence (not recommended: see the dev log proposal of 2026-11-10). 1 = off. |
+| `--siteless-bin-guard` | off | Include nothing into a bin without a single motif site. |
+| `--tau-support` | `all` | `leave_bin_out`: a motif group gets between-contig variation only if the calibration supports it without its best bin. |
+| `--unlisted-genome`, `--inclusion-support` | off, `none` | Two rejected inclusion designs, kept for comparison. |
 | `--grid-size` | 64 | Points on the grid of methylated fractions. |
 
 ## Speed and caching

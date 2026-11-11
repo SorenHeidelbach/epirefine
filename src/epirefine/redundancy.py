@@ -13,6 +13,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
+from .model import _cores
+
 K = 21
 SCALE = 50  # keep k-mers whose hash falls in the lowest 1/SCALE of the range
 _MASK = (1 << (2 * K)) - 1
@@ -54,8 +56,15 @@ def containment(query: np.ndarray, target: np.ndarray) -> float:
     return float(np.isin(query, target, assume_unique=True).mean())
 
 
-def inclusion_redundancy(asm, candidates: list[tuple[int, int]], members: dict[int, list[int]]) -> np.ndarray:
-    """Containment of each (contig id, bin) candidate in that bin's current members' sequence."""
+def inclusion_redundancy(asm, candidates: list[tuple[int, int]], members: dict[int, list[int]],
+                         priority: np.ndarray | None = None, max_redundancy: float = 1.0) -> np.ndarray:
+    """Containment of each (contig id, bin) candidate in that bin's current members' sequence.
+
+    priority[i] (higher first) and max_redundancy < 1: the candidates of a bin are taken in that order and
+    each one accepted (containment below max_redundancy) joins the bin's k-mers before the next is
+    compared, so two unbinned copies of one sequence (haplotigs, a plasmid assembled twice) are not both
+    included. Without priority every candidate is compared with the given members only.
+    """
     out = np.zeros(len(candidates))
     by_bin: dict[int, list[int]] = {}
     for i, (_, b) in enumerate(candidates):
@@ -65,9 +74,16 @@ def inclusion_redundancy(asm, candidates: list[tuple[int, int]], members: dict[i
         b, idx = item
         bin_sk = np.unique(np.concatenate([sketch(np.asarray(asm.seq(c))) for c in members.get(b, [])] or
                                           [np.empty(0, np.uint64)]))
-        for i in idx:
-            out[i] = containment(sketch(np.asarray(asm.seq(candidates[i][0]))), bin_sk)
+        if priority is None:
+            for i in idx:
+                out[i] = containment(sketch(np.asarray(asm.seq(candidates[i][0]))), bin_sk)
+            return
+        for i in sorted(idx, key=lambda i: (-priority[i], candidates[i][0])):
+            sk = sketch(np.asarray(asm.seq(candidates[i][0])))
+            out[i] = containment(sk, bin_sk)
+            if out[i] < max_redundancy:
+                bin_sk = np.union1d(bin_sk, sk)
 
-    with ThreadPoolExecutor(min(16, os.cpu_count() or 1)) as ex:
+    with ThreadPoolExecutor(min(16, _cores())) as ex:
         list(ex.map(work, by_bin.items()))
     return out

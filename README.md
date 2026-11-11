@@ -73,7 +73,7 @@ contaminants and with the included contigs added. Every contig's decision, with 
 | `mixed` | a long contig that is partly its bin's and partly another genome's: kept, with a map of which stretch fits which bin |
 | `included` | unbinned, and its methylation fits one bin: added to it |
 | `unbinned` | unbinned, and no bin fits well enough: left out |
-| `redundant` | would be included, but its sequence is already in the bin |
+| `redundant` | unbinned; would be included, but its sequence is already in the bin |
 | `low_coverage`, `too_short`, `no_methylation_evidence`, `sole_contig_of_bin` | not judged: too few reads, too short, no informative methylation, or nothing to compare it with |
 
 The files `bin_contamination.tsv`, `include_contigs.tsv` and `decontaminated_contig_bin.tsv` have the same format

@@ -93,8 +93,23 @@ def _fit_one(args):
     return fit_mixture(n, k, w, prior, sd)
 
 
+POOL_MIN_ROWS = 60_000  # count patterns over all jobs below which the fits run in this process
+
+
+def _job_rows(job) -> int:
+    """Count patterns (rows of n, k, w) a fit job holds, at any nesting of its arguments."""
+    if isinstance(job, np.ndarray):
+        return len(job) // 3 if job.ndim == 1 else 0
+    return sum(_job_rows(x) for x in job) if isinstance(job, (tuple, list)) else 0
+
+
 def _map(fn, jobs, workers):
-    if workers <= 1 or len(jobs) <= 1:
+    """fn over jobs, on `workers` processes when the work is worth starting them.
+
+    Spawning the pool costs about 3 s; the fits of a 20-group monoculture set (10,000 count patterns)
+    take 0.5 s in one process. Each fit depends on its own job only, so where it runs changes nothing.
+    """
+    if workers <= 1 or len(jobs) <= 1 or sum(_job_rows(j) for j in jobs) < POOL_MIN_ROWS:
         return [fn(j) for j in jobs]
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
@@ -241,11 +256,14 @@ def fit_detection_by_bin(counts: pl.DataFrame, group_modtype: dict[int, str], un
         mu1, k1, _ = _fit_meth(*arrays(o), mu0, k0) if o.height else (DEFAULT_PRIOR.mu1, DEFAULT_PRIOR.kappa1, 1.0)
         type_p0[mt], type_p1[mt] = _theta(mu0, k0, 0.0, 0.5), _theta(mu1, k1, 0.5, 1.0)
 
+    # the rows of each (group, label) taken out in one pass (a filter of the whole table per group and label was
+    # 1,420 scans on ZymoFecal)
+    parts = agg.partition_by("group", "label", as_dict=True)
     jobs = []
     for g, mt in group_modtype.items():
-        z = agg.filter((pl.col("group") == g) & (pl.col("label") == 0))
-        o = agg.filter((pl.col("group") == g) & (pl.col("label") == 1))
-        jobs.append((g, arrays(z) if z.height else None, arrays(o) if o.height else None, type_p0[mt], type_p1[mt]))
+        z, o = parts.get((g, 0)), parts.get((g, 1))
+        jobs.append((g, arrays(z) if z is not None and z.height else None, arrays(o) if o is not None and o.height else None,
+                     type_p0[mt], type_p1[mt]))
     fits = _map(_group_fit, jobs, workers)
     n_sites = dict(counts.group_by("group").agg(pl.col("w").sum()).iter_rows())
     meth_frac = dict(lab.group_by("group").agg(
