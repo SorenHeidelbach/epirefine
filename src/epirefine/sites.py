@@ -673,29 +673,35 @@ def _unit_part(part: str, cfg: dict) -> dict:
     from .assignability import expected_tables
     from .detection import DetectionParams
     from .grid import Grid
-    from .model import unit_loglik
+    from .model import unit_loglik_arrays
 
     grid = Grid(cfg["grid_size"])
     det = {g: DetectionParams(*p) for g, p in cfg["det"].items()}
     M = cfg["n_groups"]
-    df = pl.read_parquet(part).filter((pl.col("n") >= cfg["min_cov"]) & ~pl.col("group").is_in(cfg.get("drop_groups", [])))
+    # (one block per column, so that the numpy arrays below are views of the table and not copies next to it)
+    df = (pl.read_parquet(part).filter((pl.col("n") >= cfg["min_cov"]) & ~pl.col("group").is_in(cfg.get("drop_groups", [])))
+          .rechunk())
     cid, pos = df["contig"].to_numpy(), df["pos"].to_numpy()
     grp, n, k = df["group"].to_numpy(), df["n"].to_numpy(), df["k"].to_numpy()
+    del df
 
     def tables(units, rows, with_h):
         ids, local = np.unique(units, return_inverse=True)
-        sub = pl.DataFrame({"unit": local, "group": grp[rows], "n": n[rows], "k": k[rows]})
-        res = {"ids": ids, "L": unit_loglik(sub, len(ids), M, det, grid, dtype=np.float32),
+        del units
+        local = local.astype(np.int32) if len(ids) < 2 ** 31 else local
+        g_, n_, k_ = (grp, n, k) if len(rows) == len(grp) and not with_h else (grp[rows], n[rows], k[rows])
+        res = {"ids": ids, "L": unit_loglik_arrays(local, g_, n_, k_, len(ids), M, det, grid, dtype=np.float32),
                "n_sites": np.bincount(local, minlength=len(ids))}
-        gs = sub.group_by("unit", "group").len()
-        res["n_sites_group"] = (ids[gs["unit"].to_numpy()], gs["group"].to_numpy(), gs["len"].to_numpy())
+        count = np.bincount(local.astype(np.int64) * M + g_, minlength=len(ids) * M)  # sites per (unit, group)
+        cell = np.flatnonzero(count)
+        res["n_sites_group"] = (ids[cell // M], (cell % M).astype(np.int32), count[cell].astype(np.uint32))
         if with_h:  # expected-evidence tables: calibration fragments only
             key = (cfg["grid_size"], tuple(sorted(cfg["det"].items())))
             if key not in _EXPECTED:
                 _EXPECTED.clear()  # another model: one table per process
                 _EXPECTED[key] = {}
-            res["H"] = expected_tables(sub.select("unit", "group", "n"), len(ids), M, det, grid, dtype=np.float32,
-                                       table=_EXPECTED[key])
+            res["H"] = expected_tables(pl.DataFrame({"unit": local, "group": g_, "n": n_}), len(ids), M, det, grid,
+                                       dtype=np.float32, table=_EXPECTED[key])
         return res
 
     out = {}

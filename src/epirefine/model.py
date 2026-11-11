@@ -65,18 +65,19 @@ def logsumexp(a: np.ndarray, axis: int = -1, keepdims: bool = False, work: np.nd
     return out if keepdims else out.squeeze(axis)
 
 
-def _rs():
+def _rs(feature: str = "model_kernels"):
     """The optional compiled model kernels (package epirefine-rs), or None when they are not installed, are
     switched off (EPIREFINE_RS=0) or do not provide the interface this code was written for. The numpy code
     below is the reference; the kernels do the same float64 arithmetic in one pass per unit, and their results
-    differ from it in the last bits of exp, log and sums (relative 1e-15)."""
+    differ from it in the last bits of exp, log and sums (relative 1e-15), except cell_sums, which adds in
+    numpy's order and returns numpy's bits."""
     if os.environ.get("EPIREFINE_RS", "1").strip().lower() in ("0", "false", "no", "off"):
         return None
     try:
         import epirefine_rs
     except ImportError:
         return None
-    return epirefine_rs if epirefine_rs.supports("api>=1") and epirefine_rs.supports("model_kernels") else None
+    return epirefine_rs if epirefine_rs.supports("api>=1") and epirefine_rs.supports(feature) else None
 
 
 def _n_threads():
@@ -122,28 +123,93 @@ def site_terms(keys: pl.DataFrame, det: dict[int, DetectionParams], grid: Grid, 
     return out
 
 
+def _cell_sums(table: np.ndarray, r: np.ndarray, w: np.ndarray, starts: np.ndarray, chunk_rows: int = 200_000) -> np.ndarray:
+    """[cells, G] float64: per cell (its rows start at starts[c]) the sum of w[i] * table[r[i]], as
+    np.add.reduceat(table[r] * w[:, None], starts, axis=0) adds it (the first row plus numpy's pairwise sum of
+    the others), in blocks of whole cells of about chunk_rows rows, so that the [rows, G] products are never
+    held for more than a block. The kernel of epirefine-rs does the same additions in one pass (same bits)."""
+    rs = _rs("cell_sums")
+    if rs is not None:
+        return rs.cell_sums(table, r, w, starts, threads=1 if len(r) < 100_000 else _n_threads())
+    res = np.empty((len(starts), table.shape[1]))
+    bounds = np.r_[starts, len(r)]
+    # the blocks run on threads, each a share of chunk_rows, so that together they hold what one block would
+    threads = _n_threads()
+    blocks, i = [], 0
+    while i < len(starts):
+        j = max(i + 1, int(np.searchsorted(bounds, bounds[i] + max(1, chunk_rows // threads), "right")) - 1)
+        blocks.append((i, j))
+        i = j
+
+    def reduce(block):
+        i, j = block
+        lo, hi = bounds[i], bounds[j]
+        res[i:j] = np.add.reduceat(table[r[lo:hi]] * w[lo:hi, None], starts[i:j] - lo, axis=0)
+    if threads <= 1 or len(blocks) <= 1:
+        for block in blocks:
+            reduce(block)
+    else:
+        with ThreadPoolExecutor(threads) as ex:
+            list(ex.map(reduce, blocks))
+    return res
+
+
 def unit_loglik(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int, DetectionParams],
-                grid: Grid, chunk_rows: int = 200_000, dtype=np.float64) -> np.ndarray:
-    """L[u, m, g] from a site table with integer columns unit, group, n, k (and optional count w).
+                grid: Grid, chunk_rows: int = 200_000, dtype=np.float64, batch_rows: int = 2_000_000) -> np.ndarray:
+    """L[u, m, g] from a site table with integer columns unit, group, n, k (and optional count w); see
+    unit_loglik_arrays."""
+    w = sites["w"].to_numpy() if "w" in sites.columns else None
+    return unit_loglik_arrays(*(sites[c].to_numpy() for c in ("unit", "group", "n", "k")), n_units, n_groups, det, grid,
+                              w=w, chunk_rows=chunk_rows, dtype=dtype, batch_rows=batch_rows)
+
+
+def unit_loglik_arrays(unit: np.ndarray, group: np.ndarray, n: np.ndarray, k: np.ndarray, n_units: int, n_groups: int,
+                       det: dict[int, DetectionParams], grid: Grid, w: np.ndarray | None = None,
+                       chunk_rows: int = 200_000, dtype=np.float64, batch_rows: int = 2_000_000) -> np.ndarray:
+    """L[u, m, g] from one row per site (or per w sites): unit, group, n reads, k of them methylated.
 
     The per-site term depends only on (group, n, k), so it is computed once per distinct pattern
     and gathered, instead of evaluating transcendental functions for every site.
+
+    Every (unit, group) cell is one float64 sum over its distinct (n, k) patterns in ascending (n, k) (added
+    as numpy's reduceat adds them, _cell_sums), stored in `dtype`. The order is part of the definition: up to 0.11 the rows of a cell were summed in the order
+    polars' group_by returned them, which differs from run to run, and a cell that crossed a 200,000-row block
+    was rounded to float32 twice, so two runs of the same command gave tables that differed in the last
+    float32 digit of several hundred values per part (ZymoFecal). With the order fixed, a cell does not depend
+    on which other units are processed with it: units are grouped and reduced `batch_rows` site rows at a time
+    (whole units), so the group-by never sees more than that, whatever the size of the part.
     """
-    w = pl.col("w").sum() if "w" in sites.columns else pl.len()
-    agg = (sites.group_by("unit", "group", "n", "k").agg(w.alias("w"))
-           .with_columns((pl.col("unit").cast(pl.Int64) * n_groups + pl.col("group")).alias("flat")))
     out = np.zeros((n_units * n_groups, grid.size), dtype)
-    if agg.height == 0:
+    N = len(unit)
+    if N == 0:
         return out.reshape(n_units, n_groups, grid.size)
-    keys = agg.select("group", "n", "k").unique().with_row_index("r")
-    table = site_terms(keys, det, grid)
-    agg = agg.join(keys, on=["group", "n", "k"]).sort("flat")
-    for start in range(0, agg.height, chunk_rows):
-        c = agg.slice(start, chunk_rows)
-        r, wt, flat = c["r"].to_numpy(), c["w"].to_numpy().astype(float), c["flat"].to_numpy()
-        term = table[r] * wt[:, None]
+    if N <= batch_rows:
+        batches = [slice(None)]
+    else:  # rows of whole units, about batch_rows rows per batch: slices when the rows come unit by unit
+        in_order = bool((unit[1:] >= unit[:-1]).all())
+        order = None if in_order else np.argsort(unit, kind="stable")
+        ends = np.cumsum(np.bincount(unit, minlength=n_units))  # rows of the units up to and including u
+        batches, a = [], 0
+        while a < N:
+            j = int(np.searchsorted(ends, a + batch_rows, "right")) - 1      # last unit that still fits
+            b = int(ends[j]) if j >= 0 and ends[j] > a else int(ends[np.searchsorted(ends, a, "right")])
+            batches.append(slice(a, b) if in_order else order[a:b])
+            a = b
+    for idx in batches:
+        cols = {"unit": unit, "group": group, "n": n, "k": k}
+        if w is not None:
+            cols["w"] = w
+        df = pl.DataFrame({c: v[idx] for c, v in cols.items()})
+        agg = df.group_by("unit", "group", "n", "k").agg((pl.col("w").sum() if w is not None else pl.len()).alias("w"))
+        del df
+        keys = agg.select("group", "n", "k").unique().with_row_index("r")
+        table = site_terms(keys, det, grid)
+        agg = (agg.with_columns((pl.col("unit").cast(pl.Int64) * n_groups + pl.col("group")).alias("flat"))
+               .join(keys, on=["group", "n", "k"]).sort("flat", "n", "k"))
+        r, wt, flat = agg["r"].to_numpy(), agg["w"].to_numpy().astype(float), agg["flat"].to_numpy()
+        del agg, keys
         starts = np.flatnonzero(np.r_[True, flat[1:] != flat[:-1]])
-        out[flat[starts]] += np.add.reduceat(term, starts, axis=0)
+        out[flat[starts]] = _cell_sums(table, r, wt, starts, chunk_rows)
     return out.reshape(n_units, n_groups, grid.size)
 
 

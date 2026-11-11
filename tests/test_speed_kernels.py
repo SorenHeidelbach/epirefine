@@ -130,7 +130,8 @@ def test_stack_product_bits(U, Mg):
 
 
 def _expected_tables_plain(sites, n_units, n_groups, det, grid, n_cap=500, dtype=np.float64):
-    """expected_tables as it was: one (group, n) combination at a time, tuple keys, one block."""
+    """expected_tables written plainly: one (group, n) combination at a time, tuple keys, one reduction (the rows
+    of a cell in ascending n)."""
     import polars as pl
     from scipy.special import gammaln
     from epirefine.detection import bb_logpmf
@@ -148,7 +149,7 @@ def _expected_tables_plain(sites, n_units, n_groups, det, grid, n_cap=500, dtype
     keys = sorted(set(zip(s["group"].to_list(), s["n"].to_list())))
     kid = {k: i for i, k in enumerate(keys)}
     T1 = np.stack([table[k][0] for k in keys]); T0 = np.stack([table[k][1] for k in keys])
-    s = s.with_columns((pl.col("unit").cast(pl.Int64) * n_groups + pl.col("group")).alias("flat")).sort("flat")
+    s = s.with_columns((pl.col("unit").cast(pl.Int64) * n_groups + pl.col("group")).alias("flat")).sort("flat", "n")
     flat, w = s["flat"].to_numpy(), s["w"].to_numpy().astype(float)
     r = np.array([kid[k] for k in zip(s["group"].to_list(), s["n"].to_list())])
     starts = np.flatnonzero(np.r_[True, flat[1:] != flat[:-1]])
@@ -191,3 +192,39 @@ def test_thread_count_follows_the_environment(monkeypatch):
     assert M._n_threads() == 1
     monkeypatch.setenv("OPENBLAS_NUM_THREADS", "x"); monkeypatch.setenv("OMP_NUM_THREADS", "3")
     assert M._n_threads() == min(3, full)
+
+
+def _unit_loglik_plain(unit, group, n, k, n_units, n_groups, det, grid):
+    """The definition: per (unit, group) cell the reduceat sum of count x term over its (n, k) in ascending order."""
+    import polars as pl
+    agg = (pl.DataFrame({"unit": unit, "group": group, "n": n, "k": k}).group_by("unit", "group", "n", "k").len()
+           .sort("unit", "group", "n", "k"))
+    table = M.site_terms(agg.select("group", "n", "k"), det, grid)
+    flat = agg["unit"].to_numpy().astype(np.int64) * n_groups + agg["group"].to_numpy()
+    starts = np.flatnonzero(np.r_[True, flat[1:] != flat[:-1]])
+    out = np.zeros((n_units * n_groups, grid.size), np.float32)
+    out[flat[starts]] = np.add.reduceat(table * agg["len"].to_numpy().astype(float)[:, None], starts, axis=0)
+    return out.reshape(n_units, n_groups, grid.size)
+
+
+def test_unit_loglik_is_defined_by_its_cells():
+    """The same table whatever the order of the site rows, the size of the unit batches and of the reduction
+    blocks, and equal to the plain definition (so it is the same in every run)."""
+    from epirefine.detection import DetectionParams
+    rng = np.random.default_rng(9)
+    det = {g: DetectionParams(rng.uniform(0.001, 0.1), rng.uniform(5, 200), rng.uniform(0.6, 0.99), rng.uniform(5, 50))
+           for g in range(4)}
+    N = 60_000
+    unit, group = np.sort(rng.integers(0, 50, N)), rng.integers(0, 4, N).astype(np.int32)
+    n = np.minimum(rng.geometric(0.05, N), 300).astype(np.int32)
+    k = rng.binomial(n, rng.random(N)).astype(np.int32)
+    grid = Grid(64)
+    ref = _unit_loglik_plain(unit, group, n, k, 50, 4, det, grid)
+    for kw in (dict(), dict(batch_rows=5_000), dict(batch_rows=700, chunk_rows=50)):
+        assert np.array_equal(M.unit_loglik_arrays(unit, group, n, k, 50, 4, det, grid, dtype=np.float32, **kw), ref)
+    p = rng.permutation(N)  # rows not unit by unit: the batches are taken through an index
+    got = M.unit_loglik_arrays(unit[p], group[p], n[p], k[p], 50, 4, det, grid, dtype=np.float32, batch_rows=5_000)
+    assert np.array_equal(got, ref)
+    import polars as pl
+    df = pl.DataFrame({"unit": unit[p], "group": group[p], "n": n[p], "k": k[p]})
+    assert np.array_equal(M.unit_loglik(df, 50, 4, det, grid, dtype=np.float32), ref)

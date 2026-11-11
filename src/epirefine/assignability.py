@@ -22,7 +22,7 @@ from scipy.special import logsumexp
 
 from concurrent.futures import ThreadPoolExecutor
 
-from .model import FittedModel, _n_threads, _on_threads, score_units
+from .model import FittedModel, _cell_sums, _n_threads, _on_threads, score_units
 
 
 def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int, DetectionParams],
@@ -72,7 +72,8 @@ def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[
     H0 = np.zeros_like(H1)
     if s.height == 0:
         return H1, H0
-    s = s.with_columns((pl.col("unit").cast(pl.Int64) * n_groups + pl.col("group")).alias("flat")).sort("flat")
+    # (rows of a cell in ascending n: the order of the sum is then the same in every run, see model.unit_loglik_arrays)
+    s = s.with_columns((pl.col("unit").cast(pl.Int64) * n_groups + pl.col("group")).alias("flat")).sort("flat", "n")
     flat, w = s["flat"].to_numpy(), s["w"].to_numpy().astype(float)
     # the distinct (group, n) of the rows in ascending order, and each row's index among them (integer keys:
     # as tuples in a Python dictionary this took seconds per part and about 1 GB of objects)
@@ -83,28 +84,8 @@ def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[
     starts = np.flatnonzero(np.r_[True, flat[1:] != flat[:-1]])
     # reduced in blocks of whole (unit, group) cells of about chunk_rows rows: T[r] * w in one piece is
     # 8 G bytes per distinct (unit, group, n) row, 3.4 GB for the 6.6 million rows of one part of contigs
-    # The blocks run on threads, each a share of chunk_rows, so that together they hold what one block held
-    # before; a cell is summed within one block whatever the block size, so the sums are the same.
-    bounds = np.r_[starts, len(flat)]
-    threads = _n_threads()
-    blocks, i = [], 0
-    while i < len(starts):
-        j = max(i + 1, int(np.searchsorted(bounds, bounds[i] + max(1, chunk_rows // threads), "right")) - 1)
-        blocks.append((i, j))
-        i = j
     for T, out in ((T1, H1), (T0, H0)):
-        flat_out = out.reshape(-1, grid.size)
-
-        def reduce(block):
-            i, j = block
-            a, b = bounds[i], bounds[j]
-            flat_out[flat[starts[i:j]]] = np.add.reduceat(T[r[a:b]] * w[a:b, None], starts[i:j] - a, axis=0)
-        if threads <= 1 or len(blocks) <= 1:
-            for block in blocks:
-                reduce(block)
-        else:
-            with ThreadPoolExecutor(threads) as ex:
-                list(ex.map(reduce, blocks))
+        out.reshape(-1, grid.size)[flat[starts]] = _cell_sums(T, r, w, starts, chunk_rows)
     return H1, H0
 
 

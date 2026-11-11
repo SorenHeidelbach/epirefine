@@ -77,3 +77,14 @@ def test_run_takes_the_same_decisions(monkeypatch, community, base_run, tmp_path
     monkeypatch.delenv("EPIREFINE_RS")
     k = run_pipeline(**community.args(copy_cache(base_run, tmp_path / "rs")))
     assert_same_outputs_to_rounding(py.out, k.out)
+
+
+def test_cell_sums_returns_numpys_bits(monkeypatch):
+    if not rs.supports("cell_sums"):
+        pytest.skip("epirefine-rs without cell_sums")
+    rng = np.random.default_rng(4)
+    table = -rng.gamma(2.0, 3.0, (300, 64))
+    r, w = rng.integers(0, 300, 150_000), rng.integers(1, 9, 150_000).astype(float)
+    starts = np.unique(np.r_[0, rng.integers(1, 100_000, 9_000), 100_000, 100_300])
+    ref, got = _both(monkeypatch, lambda: M._cell_sums(table, r, w, starts))
+    assert np.array_equal(got, ref) and np.array_equal(ref, np.add.reduceat(table[r] * w[:, None], starts, axis=0))
