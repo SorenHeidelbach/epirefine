@@ -9,6 +9,7 @@ number of motifs is held in memory.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -753,8 +754,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         pu0 = min(max(ref.p_unknown, 1e-3), 1 - 1e-3)
         lbl = bins + ["unknown"]
 
-        def segment_map(L_rows, nos, i):
-            sc_ = model.score(L_rows)
+        def segment_map(L_rows, nos, i, sc_=None):
+            sc_ = model.score(L_rows) if sc_ is None else sc_
             lg = np.concatenate([sc_.S / T0 + np.log((1 - pu0) / H), (sc_.Su / T0 + np.log(pu0))[:, None]], 1)
             pr = np.exp(lg - lg.max(1, keepdims=True)); pr /= pr.sum(1, keepdims=True)
             best, pbest = pr.argmax(1), pr.max(1)
@@ -765,11 +766,19 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                     runs.append(f"{lo}-{hi}:{lbl[best[start]]}({pbest[start:k].mean():.2f})")
                     start = k
             return ";".join(runs)
-        for j, u in enumerate(long_u):
-            i = tidx[u]
-            if mixed[i]:
+        # the chunks of all mixed contigs scored in one call (one call per contig cost about a second each on
+        # ZymoFecal, mostly the profiles' exponentials and per-group products, for a few chunks)
+        mixed_u = [u for u in long_u if mixed[tidx[u]]]
+        if mixed_u:
+            all_ks = np.concatenate([np.asarray(by_contig[u], np.int64) for u in mixed_u])
+            sc_all = model.score(L_chunks[all_ks])
+            at = 0
+            for u in mixed_u:
                 ks = by_contig[u]
-                seg_bins[i] = segment_map(L_chunks[ks], chunk_no[ks], i)
+                rows = slice(at, at + len(ks))
+                at += len(ks)
+                seg_bins[tidx[u]] = segment_map(None, chunk_no[ks], tidx[u],
+                                                SimpleNamespace(S=sc_all.S[rows], Su=sc_all.Su[rows]))
         if len(win):
             for u, ks in by_win.items():
                 i = tidx.get(u)
