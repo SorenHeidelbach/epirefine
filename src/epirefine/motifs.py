@@ -206,7 +206,7 @@ class MotifMatcher:
         # threads: no more than the cores this process may run on (more only added memory: each thread keeps its
         # own allocator arena; ZymoOral on 4 cores, 16 threads: +0.2 GB at the grouping step and slower)
         cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else _n_threads()
-        with ThreadPoolExecutor(max(1, min(_n_threads(), cores, len(bounds) - 1))) as ex:
+        with ThreadPoolExecutor(max(1, min(_n_threads(), cores, SCAN_THREADS, len(bounds) - 1))) as ex:
             recs = list(ex.map(lambda ab: find(codes[ab[0]:ab[1]]), zip(bounds[:-1], bounds[1:])))
         if getattr(self, "_shape_of", None) is None:
             self._shape_of = np.zeros((len(self.motifs), 2), np.int32)
@@ -257,6 +257,9 @@ class MotifMatcher:
                 rec["occ"] = rec["occ"] - 2 * offsets[cidx]
                 yield names, cidx, rec
                 names, seqs, size = [], [], 0
+
+
+SCAN_THREADS = 4  # threads of the piecewise motif scan (16 raised the training sets' peak memory by 5-10%)
 
 
 def find_records(seq: str, motif: Motif) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
