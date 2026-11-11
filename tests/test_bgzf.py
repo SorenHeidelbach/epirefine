@@ -46,3 +46,109 @@ def test_plain_gzip_is_one_range(tmp_path):
     assert not is_bgzf(f)
     assert split_pileup(f, 8, min_size=0) == [(0, -1)]
     assert b"".join(_blocks(str(f), 0, -1, 64)) == b"c1\t0\t1\ta\t0\t+\n" * 100
+
+
+def _rows(n_contigs=40, seed=2):
+    rng = random.Random(seed)
+    return "".join(f"contig_{c}\t{p}\t{p + 1}\ta\t{rng.randrange(1000)}\t+\t{p}\t{p + 1}\t0,0,0\t20\t5.0\t1\n"
+                   for c in range(n_contigs) for p in range(rng.choice([1, 2, 30, 400]))).encode()
+
+
+def test_bgzf_chunks_are_those_of_a_gzip_stream(tmp_path):
+    """Per-block inflate yields the chunks that reading `block` bytes at a time from gzip gave (they decide the parts)."""
+    import gzip
+    data = _rows()
+    for bgzf_block in (97, 4096, 65280):
+        f = tmp_path / f"p{bgzf_block}.bed.gz"
+        f.write_bytes(_bgzf(data, bgzf_block))
+        size = f.stat().st_size
+        for block in (64, 1000, 1 << 12, 1 << 20):
+            want, tail = [], b""
+            with gzip.open(f, "rb") as gz:
+                while True:
+                    buf = gz.read(block)
+                    if not buf:
+                        break
+                    buf = tail + buf
+                    cut = buf.rfind(b"\n") + 1
+                    tail = buf[cut:]
+                    if cut:
+                        want.append(buf[:cut])
+            if tail:
+                want.append(tail)
+            assert list(_blocks(str(f), 0, size << 16, block)) == want
+
+
+def test_damaged_bgzf_fails_loudly(tmp_path):
+    import pytest
+    data = _rows()
+    good = _bgzf(data, 4096)
+    f = tmp_path / "p.bed.gz"
+
+    def read(raw, end=None):
+        f.write_bytes(raw)
+        return b"".join(_blocks(str(f), 0, (len(raw) if end is None else end) << 16, 1 << 12))
+    assert read(good) == data
+    first = int.from_bytes(good[16:18], "little") + 1          # size of the first block
+    flipped = bytearray(good); flipped[first + 40] ^= 0x55      # a byte inside the second block's deflate data
+    wrong_crc = bytearray(good); wrong_crc[first - 8] ^= 0x01   # the first block's CRC-32
+    wrong_len = bytearray(good); wrong_len[first - 4] ^= 0x01   # the first block's length field
+    no_header = bytearray(good); no_header[first] = 0x00        # the second block's magic
+    for raw, end in ((bytes(flipped), None), (bytes(wrong_crc), None), (bytes(wrong_len), None), (bytes(no_header), None),
+                     (good[:len(good) - 40], len(good)),        # file cut short, range still expects the rest
+                     (good[:first + 30], first + 30)):          # cut inside a block
+        with pytest.raises(ValueError, match="BGZF block"):
+            read(raw, end)
+
+
+def test_contig_spanning_many_blocks_gives_the_same_sites(tmp_path):
+    """The rows of a contig that continues over many blocks are joined once; sites equal those of one big block."""
+    import polars as pl
+    from epirefine.sites import EncodedAssembly, _run_range
+    rng = random.Random(5)
+    contigs = {f"c{i}": "".join(rng.choice("ACGT") for _ in range(n)) for i, n in enumerate((3000, 40, 2500, 900))}
+    asm = EncodedAssembly.write(contigs, tmp_path / "asm")
+    rows = []
+    for name, seq in contigs.items():
+        for p, base in enumerate(seq):
+            if base in "AT":
+                n = rng.randrange(1, 30)
+                rows.append(f"{name}\t{p}\t{p + 1}\ta\t0\t{'+' if base == 'A' else '-'}\t{p}\t{p + 1}\t0,0,0\t{n}\t5.0\t{rng.randrange(n + 1)}\n")
+    pile = tmp_path / "p.bed"
+    pile.write_text("".join(rows))
+    cfg = {"asm_dir": asm.directory, "motifs": [("GATC", 1, "a"), ("CCWGG", 1, "m")], "group_of": [0, 1],
+           "motif_rank": [1, 1], "wanted": None}
+    out = {}
+    for block in (1 << 30, 4096, 700):
+        r = _run_range(cfg, str(pile), 0, -1, str(tmp_path / f"b{block}"), block, 10 ** 9)
+        out[block] = (pl.concat([pl.read_parquet(f) for f in r["parts"]]), r["contigs"], r["first"], r["last"])
+    assert out[1 << 30][0].height > 20 and out[1 << 30][2:] == ("c0", "c3")
+    for block in (4096, 700):
+        assert out[block][0].equals(out[1 << 30][0]) and out[block][1:] == out[1 << 30][1:]
+
+
+def _numeric_case(tmp_path, names, code, motif_type):
+    import polars as pl
+    from epirefine.sites import EncodedAssembly, _run_range
+    rng = random.Random(7)
+    contigs = {c: "".join(rng.choice("ACGT") for _ in range(1500)) for c in names}
+    asm = EncodedAssembly.write(contigs, tmp_path / "asm")
+    rows = [f"{name}\t{p}\t{p + 1}\t{code}\t0\t{'+' if base == 'A' else '-'}\t{p}\t{p + 1}\t0,0,0\t9\t5.0\t3\n"
+            for name, seq in contigs.items() for p, base in enumerate(seq) if base in "AT"]
+    (tmp_path / "p.bed").write_text("".join(rows))
+    cfg = {"asm_dir": asm.directory, "motifs": [("GATC", 1, motif_type)], "group_of": [0], "motif_rank": [1], "wanted": None}
+    r = _run_range(cfg, str(tmp_path / "p.bed"), 0, -1, str(tmp_path / "r"), 1 << 20, 10 ** 9)
+    return pl.concat([pl.read_parquet(f) for f in r["parts"]]) if r["parts"] else None, r
+
+
+def test_numeric_contig_names_give_sites(tmp_path):
+    """Contig names made of digits were read as integers and matched no contig of the assembly."""
+    sites, r = _numeric_case(tmp_path, ["12", "007", "c3"], "a", "a")
+    assert r["contigs"] == ["007", "12", "c3"] and sites is not None
+    assert sites["contig"].unique().sort().to_list() == [0, 1, 2] and sites["n"].is_in([9, 18]).all()
+
+
+def test_block_with_only_numeric_mod_codes(tmp_path):
+    """A block whose mod-code column holds only numbers (21839 = 4mC) was read as integers and crashed."""
+    sites, r = _numeric_case(tmp_path, ["c1", "c2"], "21839", "21839")
+    assert r["contigs"] == ["c1", "c2"]

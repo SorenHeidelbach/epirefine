@@ -18,10 +18,9 @@ this is checked and violations raise an error. Gzipped pileups are read by a sin
 """
 from __future__ import annotations
 
-import io
 import json
 import os
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from multiprocessing import get_context
 from pathlib import Path
 
@@ -57,8 +56,12 @@ class EncodedAssembly:
         d = Path(directory)
         d.mkdir(parents=True, exist_ok=True)
         names, offsets, lengths, off = [], [], [], 0
+        seen: set[str] = set()
         with open(d / "assembly.u8", "wb") as fh:
             for name, seq in (contigs.items() if isinstance(contigs, dict) else contigs):
+                if name in seen:  # the name -> index map would point both records at the last one
+                    raise ValueError(f"contig name {name!r} occurs more than once in the assembly; contig names must be unique")
+                seen.add(name)
                 fh.write(_CODE[np.frombuffer(seq.encode("ascii"), np.uint8)].tobytes())
                 names.append(name); offsets.append(off); lengths.append(len(seq)); off += len(seq)
         (d / "assembly.json").write_text(json.dumps({"names": names, "offsets": offsets, "lengths": lengths}))
@@ -241,46 +244,85 @@ def split_pileup(path, n_parts: int, min_size: int = 64 << 20) -> list[tuple[int
     return [(a, b) for a, b in zip(cuts[:-1], cuts[1:]) if b > a]
 
 
-class _FileSlice(io.RawIOBase):
-    """Read-only view of bytes [start, end) of a binary file."""
+def _bgzf_members(fh, c0: int, c1: int, path=""):
+    """Inflated data of each BGZF block from compressed offset c0 up to c1 (a block start).
 
-    def __init__(self, fh, start: int, end: int):
-        self.fh, self.pos, self.end = fh, start, end
-        fh.seek(start)
-
-    def readable(self):
-        return True
-
-    def readinto(self, b):
-        n = min(len(b), self.end - self.pos)
-        if n <= 0:
-            return 0
-        data = self.fh.read(n)
-        b[:len(data)] = data
-        self.pos += len(data)
-        return len(data)
+    One raw-deflate call per block and the block's own CRC-32 and length check: 3.5-4x the speed of
+    gzip.GzipFile over the same bytes, which decodes through a small-buffer Python reader. Anything
+    wrong with a block (no gzip member with a BGZF size field, ends short, does not inflate, wrong
+    checksum or length, or the blocks do not end at c1) raises: a truncated or damaged file must not
+    pass as a shorter one.
+    """
+    import zlib
+    fh.seek(c0)
+    pos = c0
+    while pos < c1:
+        head = fh.read(12)
+        if len(head) < 12 or head[:3] != b"\x1f\x8b\x08" or not head[3] & 4:
+            raise ValueError(f"{path}: no BGZF block at offset {pos} (truncated or corrupt file)")
+        xlen = int.from_bytes(head[10:12], "little")
+        extra, size, i = fh.read(xlen), 0, 0
+        while i + 4 <= len(extra):  # subfields: two id bytes, length, data; BGZF's is 'BC' with the block size - 1
+            n = int.from_bytes(extra[i + 2:i + 4], "little")
+            if extra[i:i + 2] == b"BC" and n == 2:
+                size = int.from_bytes(extra[i + 4:i + 6], "little") + 1
+            i += 4 + n
+        body = fh.read(size - 12 - xlen) if size > 12 + xlen + 8 else b""
+        if len(extra) < xlen or not size or len(body) < size - 12 - xlen or pos + size > c1:
+            raise ValueError(f"{path}: BGZF block at offset {pos} is incomplete (truncated or corrupt file)")
+        try:
+            data = zlib.decompress(body[:-8], -15)
+        except zlib.error as e:
+            raise ValueError(f"{path}: BGZF block at offset {pos} does not inflate ({e})") from None
+        if zlib.crc32(data) != int.from_bytes(body[-8:-4], "little") or len(data) != int.from_bytes(body[-4:], "little"):
+            raise ValueError(f"{path}: BGZF block at offset {pos} fails its checksum or length (corrupt file)")
+        pos += size
+        yield data
 
 
 def _bgzf_blocks(path, start: int, end: int, block: int):
-    """Line-complete chunks of the rows between two virtual offsets (both at line starts)."""
-    import gzip
+    """Line-complete chunks of the rows between two virtual offsets (both at line starts).
+
+    The inflated stream is cut every `block` bytes before the split at line ends, exactly as reading
+    `block` bytes at a time from a gzip stream did: the chunks decide where site-cache parts are
+    flushed, so they must not move.
+    """
     c0, u0, c1, u1 = start >> 16, start & 0xFFFF, end >> 16, end & 0xFFFF
-    with open(path, "rb") as fh:
-        last = _bgzf_inflate(fh, c1)[0][:u1] if u1 else b""
+
+    def reads(fh):  # the pieces of each read of exactly `block` bytes (the last one shorter)
+        got, n = [], 0
+        for data in _bgzf_members(fh, c0, c1, path):
+            while n + len(data) >= block:
+                k = block - n
+                got.append(data[:k])
+                yield got
+                got, n, data = [], 0, data[k:]
+            if data:
+                got.append(data); n += len(data)
+        if got:
+            yield got
+
+    with open(path, "rb", buffering=1 << 20) as fh:
+        last = next(_bgzf_members(fh, c1, float("inf"), path))[:u1] if u1 else b""
         tail, drop = b"", u0
-        if c1 > c0:
-            with gzip.GzipFile(fileobj=io.BufferedReader(_FileSlice(fh, c0, c1), 1 << 20)) as gz:
-                while True:
-                    buf = gz.read(block)
-                    if not buf:
-                        break
-                    if drop:
-                        buf, drop = buf[drop:], max(0, drop - len(buf))
-                    buf = tail + buf
-                    cut = buf.rfind(b"\n") + 1
-                    tail = buf[cut:]
-                    if cut:
-                        yield buf[:cut]
+        for pieces in reads(fh):
+            if drop:
+                buf = b"".join(pieces)
+                buf, drop = buf[drop:], max(0, drop - len(buf))
+                pieces = [buf]
+            # buf = tail + read; yield buf up to its last line end, keep the rest: done on the pieces, so
+            # the chunk is copied once (each copy of a 128 MB chunk costs as much as inflating a third of it)
+            pieces.insert(0, tail)
+            i = len(pieces) - 1
+            while i >= 0 and b"\n" not in pieces[i]:
+                i -= 1
+            if i < 0:
+                tail = b"".join(pieces)
+                continue
+            j = pieces[i].rfind(b"\n") + 1
+            tail = b"".join([pieces[i][j:]] + pieces[i + 1:])
+            pieces[i:] = [pieces[i][:j]]
+            yield b"".join(pieces)
         rest = tail + last[drop:]
         if rest:
             yield rest
@@ -321,14 +363,34 @@ def _blocks(path, start: int, end: int, block: int):
                 yield buf
 
 
+_PARSE_SCHEMA: dict | None = None
+
+
+def _parse_schema() -> dict:
+    """Types of the six columns read, keyed by the names read_csv gives projected headerless columns.
+
+    Contig, mod code and strand are text whatever a block holds: inferred per block, contig names made
+    of digits became integers (no contig matched: no sites, no error) and a block with only numeric
+    mod codes (21839) failed in the code lookup. The names are taken from a probe, not assumed: the
+    overrides written for 'column_2', 'column_10' and 'column_12' never applied, because this polars
+    numbers projected columns from 0.
+    """
+    global _PARSE_SCHEMA
+    if _PARSE_SCHEMA is None:
+        import io
+        probe = pl.read_csv(io.BytesIO(b"c\t1\t2\ta\t0\t+\t1\t2\t0\t1\t1.0\t1\n"), separator="\t", has_header=False,
+                            columns=_PARSE_COLS)
+        _PARSE_SCHEMA = dict(zip(probe.columns, (pl.Utf8, pl.Int64, pl.Utf8, pl.Utf8, pl.Int64, pl.Int64)))
+    return _PARSE_SCHEMA
+
+
 def _parse(block: bytes) -> pl.DataFrame:
     import io
     first = block[: block.find(b"\n")]
     if b" " in first:  # older modkit: columns 10+ space separated
         block = block.replace(b" ", b"\t")
     df = pl.read_csv(io.BytesIO(block), separator="\t", has_header=False, columns=_PARSE_COLS,
-                     comment_prefix="#", truncate_ragged_lines=True,
-                     schema_overrides={"column_2": pl.Int64, "column_10": pl.Int32, "column_12": pl.Int32})
+                     comment_prefix="#", truncate_ragged_lines=True, schema_overrides=_parse_schema())
     df.columns = ["contig", "pos", "mod_type", "strand", "n_valid", "n_mod"]
     return df
 
@@ -405,7 +467,11 @@ class _Worker:
 def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, block: int, flush_rows: int):
     w = _Worker(cfg)
     seen: set = set()
-    parts, buf, n_buf, carry = [], [], 0, None
+    parts, buf, n_buf = [], [], 0
+    # rows of the last contig seen, which may continue in the next block: kept as the pieces each block
+    # added and joined once when the contig ends. Joined, compared and filtered again at every block, a
+    # contig spanning B blocks was copied B(B+1)/2 times (91 block copies instead of 13 for 10 Mbp).
+    carry, carry_name = [], None
     first_contig = last_contig = None
 
     def flush():
@@ -420,22 +486,26 @@ def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, bloc
         df = _parse(blk)
         if not df.height:
             continue
-        if carry is not None:
-            df = pl.concat([carry, df])
         last = df["contig"][-1]
         if first_contig is None:
             first_contig = df["contig"][0]
         tail = df["contig"] == last
-        carry, df = df.filter(tail), df.filter(~tail)  # the last contig may continue in the next block
+        rest, cur = (df.clear(), df) if tail.all() else (df.filter(~tail), df.filter(tail))
+        if carry and carry_name == last:  # the carried contig goes on (its rows stay ahead of this block's)
+            carry.append(cur)
+            df = rest
+        else:                             # it ended: its rows and this block's other contigs are complete
+            df = pl.concat(carry + [rest]) if carry else rest
+            carry, carry_name = [cur], last
         if df.height:
             s = w.process(df, seen)
             if s is not None:
                 buf.append(s); n_buf += s.height
         if n_buf >= flush_rows:
             flush()
-    if carry is not None and carry.height:
-        last_contig = carry["contig"][0]
-        s = w.process(carry, seen)
+    if carry:
+        last_contig = carry_name
+        s = w.process(pl.concat(carry), seen)
         if s is not None:
             buf.append(s)
     flush()
@@ -483,6 +553,49 @@ def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: l
 # second pass: site cache -> per-unit likelihood tables
 
 
+def _fragment_rows(cid: np.ndarray, pos: np.ndarray, fr: pl.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """(unit, row) for every site row inside a calibration fragment (contig, start <= pos < end).
+
+    A site can lie in several fragments (of different lengths): one pair per (site, fragment), rows
+    ascending and the fragments of a row in the order of `fr`, which is the order of the join it
+    replaces. A part is sorted by (contig, pos), so the rows of a fragment are one interval found by
+    binary search. Joining sites to fragments on the contig and filtering on position afterwards
+    paired every site of a contig with every fragment of it first: 330-360 million rows (14-16 GB)
+    for a part of complete genomes with 18 fragments each, of which under 4 million survived.
+    """
+    fc, fs, fe, fu = (fr[c].to_numpy() for c in ("contig", "start", "end", "unit"))
+    if len(cid) > 1 and not (cid[1:] >= cid[:-1]).all():
+        lo = hi = None  # not sorted by contig: fall back to the join
+    else:
+        lo, hi = np.searchsorted(cid, fc, "left"), np.searchsorted(cid, fc, "right")
+        for a, b in set(zip(lo.tolist(), hi.tolist())):
+            if b - a > 1 and not (pos[a + 1:b] >= pos[a:b - 1]).all():
+                lo = None
+                break
+    if lo is None:
+        f = (pl.DataFrame({"row": np.arange(len(cid)), "contig": cid, "pos": pos})
+             .join(fr.select("unit", "contig", "start", "end"), on="contig", how="inner")
+             .filter((pl.col("pos") >= pl.col("start")) & (pl.col("pos") < pl.col("end"))))
+        return f["unit"].to_numpy(), f["row"].to_numpy()
+    rows, units = [], []
+    for j in np.flatnonzero(hi > lo):
+        p = pos[lo[j]:hi[j]]
+        a, b = lo[j] + np.searchsorted(p, fs[j], "left"), lo[j] + np.searchsorted(p, fe[j], "left")
+        if b > a:
+            rows.append(np.arange(a, b)); units.append(np.full(b - a, fu[j], fu.dtype))
+    if not rows:
+        return np.zeros(0, fu.dtype), np.zeros(0, np.int64)
+    rows, units = np.concatenate(rows), np.concatenate(units)
+    order = np.argsort(rows, kind="stable")
+    return units[order], rows[order]
+
+
+# (group, n) -> expected per-site log-likelihood rows (assignability.expected_tables), kept for the life of
+# a worker process: they depend only on the caller model and the grid, and filling them is a Python loop
+# of 0.5 ms per combination that every part repeated for the 110,000-285,000 combinations it holds
+_EXPECTED: dict = {}
+
+
 def _unit_part(part: str, cfg: dict) -> dict:
     from .assignability import expected_tables
     from .detection import DetectionParams
@@ -504,7 +617,12 @@ def _unit_part(part: str, cfg: dict) -> dict:
         gs = sub.group_by("unit", "group").len()
         res["n_sites_group"] = (ids[gs["unit"].to_numpy()], gs["group"].to_numpy(), gs["len"].to_numpy())
         if with_h:  # expected-evidence tables: calibration fragments only
-            res["H"] = expected_tables(sub.select("unit", "group", "n"), len(ids), M, det, grid, dtype=np.float32)
+            key = (cfg["grid_size"], tuple(sorted(cfg["det"].items())))
+            if key not in _EXPECTED:
+                _EXPECTED.clear()  # another model: one table per process
+                _EXPECTED[key] = {}
+            res["H"] = expected_tables(sub.select("unit", "group", "n"), len(ids), M, det, grid, dtype=np.float32,
+                                       table=_EXPECTED[key])
         return res
 
     out = {}
@@ -518,12 +636,9 @@ def _unit_part(part: str, cfg: dict) -> dict:
         out["targets"] = tables(to[rows], rows, False)
     fr = cfg["frags"]
     if fr is not None and fr.height:
-        # a site can lie in several fragments (of different lengths): one row per (site, fragment)
-        f = (pl.DataFrame({"row": np.arange(df.height), "contig": cid, "pos": pos})
-             .join(fr, on="contig", how="inner")
-             .filter((pl.col("pos") >= pl.col("start")) & (pl.col("pos") < pl.col("end"))))
-        if f.height:
-            out["frags"] = tables(f["unit"].to_numpy(), f["row"].to_numpy(), True)
+        units, rows = _fragment_rows(cid, pos, fr)
+        if len(rows):
+            out["frags"] = tables(units, rows, True)
     return out
 
 
@@ -554,21 +669,30 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
     os.environ.update({k: "1" for k in env})
     try:
         with ProcessPoolExecutor(workers, mp_context=get_context("spawn")) as ex:
-            for i, r in enumerate(ex.map(_unit_part, parts, [cfg] * len(parts))):
-                if "chunks" in r:
-                    c = r["chunks"]
-                    res["L_chunks"][c["ids"]] = c["L"]; res["chunk_sites"][c["ids"]] = c["n_sites"]
-                if "targets" in r:
-                    t = r["targets"]
-                    res["L_t"][t["ids"]] = t["L"]; res["n_sites_t"][t["ids"]] = t["n_sites"]
-                    u, g, n = t["n_sites_group"]
-                    res["n_sites_group_t"][u, g] = n
-                if "frags" in r:
-                    f = r["frags"]
-                    res["L_frag"][f["ids"]] += f["L"]; res["frag_sites"][f["ids"]] += f["n_sites"]
-                    res["H_frag"][0][f["ids"]] += f["H"][0]; res["H_frag"][1][f["ids"]] += f["H"][1]
-                if (i + 1) % max(1, len(parts) // 5) == 0:
-                    log(f"  unit tables: {i + 1}/{len(parts)} parts")
+            # results are taken as they complete: in submission order, the tables of parts that finished
+            # behind a slow one waited unpickled in this process. Parts hold whole contigs, so each
+            # chunk, target and fragment is written by exactly one part and the order does not matter.
+            pending, i = {ex.submit(_unit_part, p, cfg) for p in parts}, 0
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                while done:
+                    r = done.pop().result()
+                    if "chunks" in r:
+                        c = r["chunks"]
+                        res["L_chunks"][c["ids"]] = c["L"]; res["chunk_sites"][c["ids"]] = c["n_sites"]
+                    if "targets" in r:
+                        t = r["targets"]
+                        res["L_t"][t["ids"]] = t["L"]; res["n_sites_t"][t["ids"]] = t["n_sites"]
+                        u, g, n = t["n_sites_group"]
+                        res["n_sites_group_t"][u, g] = n
+                    if "frags" in r:
+                        f = r["frags"]
+                        res["L_frag"][f["ids"]] += f["L"]; res["frag_sites"][f["ids"]] += f["n_sites"]
+                        res["H_frag"][0][f["ids"]] += f["H"][0]; res["H_frag"][1][f["ids"]] += f["H"][1]
+                    i += 1
+                    if i % max(1, len(parts) // 5) == 0:
+                        log(f"  unit tables: {i}/{len(parts)} parts")
+                    del r
     finally:
         for k, v in env.items():
             if v is None:

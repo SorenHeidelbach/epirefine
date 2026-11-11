@@ -36,8 +36,17 @@ def read_fasta(path) -> dict[str, str]:
 
 
 def fasta_lengths(path) -> dict[str, int]:
-    """Contig lengths in file order, without holding the sequences."""
-    return {name: len(seq) for name, seq in iter_fasta(path)}
+    """Contig lengths in file order, without holding the sequences.
+
+    A contig name that occurs twice is an error: every table of the run is keyed by name, so the two
+    records would share one length, one bin and one row of scores while the encoded assembly held both.
+    """
+    out: dict[str, int] = {}
+    for name, seq in iter_fasta(path):
+        if name in out:
+            raise ValueError(f"{path}: contig name {name!r} occurs more than once; contig names must be unique")
+        out[name] = len(seq)
+    return out
 
 
 def fasta_subset(path, names) -> dict[str, str]:

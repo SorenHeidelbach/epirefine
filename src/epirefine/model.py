@@ -26,20 +26,54 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
-from scipy.special import expit, logsumexp
+from scipy.special import expit
 
 from .detection import DetectionParams, bb_logpmf
 from .grid import Grid
 
 
-def site_terms(keys: pl.DataFrame, det: dict[int, DetectionParams], grid: Grid) -> np.ndarray:
-    """log P(k | n, phi = x_g) for each row (group, n, k) of `keys`: one row per distinct count pattern."""
+def logsumexp(a: np.ndarray, axis: int = -1, keepdims: bool = False) -> np.ndarray:
+    """log sum exp(a) along one axis: the arithmetic of scipy.special.logsumexp (1.15 and later) without
+    its array-API layer, which cost 86 us per call and was 60% of calibration and scoring, called once per
+    fragment and per contig.
+
+    As scipy does: the largest elements (m of them when tied) are taken out of the sum, s = the sum of
+    exp(a - max) over the rest divided by m, result = log1p(s) + log(m) + max; rows whose result is not
+    finite (all -inf, an inf, a nan) fall back to log(sum(exp(a))). Same operations on the same operands,
+    so the same bits (test against scipy).
+    """
+    a = np.asarray(a)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        a_max = a.max(axis=axis, keepdims=True)
+        top = a == a_max
+        m = top.sum(axis=axis, keepdims=True, dtype=a.dtype)
+        e = np.exp(a - a_max)
+        e[top] = 0.0
+        s = e.sum(axis=axis, keepdims=True)
+        s = np.where(s == 0, s, s / m)
+        out = np.log1p(s) + np.log(m) + a_max
+        finite = np.isfinite(out)
+        if not finite.all():
+            out = np.where(finite, out, np.log(np.exp(a).sum(axis=axis, keepdims=True)))
+    return out if keepdims else out.squeeze(axis)
+
+
+def site_terms(keys: pl.DataFrame, det: dict[int, DetectionParams], grid: Grid, block: int = 65_536) -> np.ndarray:
+    """log P(k | n, phi = x_g) for each row (group, n, k) of `keys`: one row per distinct count pattern.
+
+    The [P, G] table is filled in row blocks: in one expression the two broadcast sums are held next
+    to the result, three times the table (10.9 GB instead of 3.6 GB for 7.1 million patterns).
+    """
     grp, n, k = (keys[c].to_numpy() for c in ("group", "n", "k"))
     n, k = n.astype(float), k.astype(float)
     p = [det[g] for g in range(max(det) + 1)]
     mu0, k0, mu1, k1 = (np.array([getattr(q, f) for q in p])[grp] for f in ("mu0", "kappa0", "mu1", "kappa1"))
     la, lb = bb_logpmf(k, n, mu1, k1), bb_logpmf(k, n, mu0, k0)
-    return np.logaddexp(la[:, None] + grid.logx[None, :], lb[:, None] + grid.log1mx[None, :])
+    out = np.empty((len(la), grid.size))
+    for s in range(0, len(la), block):
+        e = s + block
+        np.logaddexp(la[s:e, None] + grid.logx[None, :], lb[s:e, None] + grid.log1mx[None, :], out=out[s:e])
+    return out
 
 
 def unit_loglik(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int, DetectionParams],
@@ -164,21 +198,37 @@ def _group_term(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     am = a.max(1, keepdims=True)
     bm = b.max(1, keepdims=True)
     q = np.exp(a - am).astype(np.float64) @ np.exp(b - bm).T
-    return np.log(np.maximum(q, 1e-300)) + am + bm.T
+    np.log(np.maximum(q, 1e-300, out=q), out=q)  # in place: q is [U, H]
+    q += am
+    q += bm.T
+    return q
 
 
 def _n_threads():
     return min(16, os.cpu_count() or 1)
 
 
-def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None):
+SCORE_BYTES = 4 << 30  # memory summed_scores may use for the [U, H] work arrays of its threads
+
+
+def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None, max_bytes: int | None = None):
     """S[u, h] = sum_m log P(group m of u | h).
 
     Equal to group_scores(...).sum(-1) without the [U, H, M] tensor: groups are accumulated one at
-    a time, split over threads (numpy releases the GIL).
+    a time, in blocks of groups that run on threads (numpy releases the GIL).
     rel = (eta, Au[U, M]) also returns R[u, h] = sum_m log((1 - eta) P(group m | h) + eta exp(Au_um)):
     the score of an unbinned relative of bin h, whose level in each group is h's with prob 1 - eta
     and the community's otherwise.
+
+    Memory: a running block holds three [U, H] float64 arrays (its two sums and the current group's
+    term, updated in place), and only as many blocks run at once as fit in max_bytes (at least one);
+    a finished block is added to the result and freed. With every block on its own thread, each
+    keeping its sums to the end next to four temporaries, 581,835 contigs x 495 bins needed 74 GB
+    kept and up to 220 GB at peak; it now needs five arrays (11.5 GB), S and R included.
+    The additions are the same in the same order whatever max_bytes is (groups within a block, then
+    the blocks), and each group's matrix product is still one call over all units: scoring units in
+    batches instead would cap memory further, but the BLAS product gives a row different last bits
+    depending on the height of the batch (measured, up to 5e-16 relative), so results would change.
     """
     U, M, _ = Lp.shape
     H = log_prof.shape[0]
@@ -192,17 +242,28 @@ def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None
             A = _group_term(Lp[:, m, :], log_prof[:, m, :])
             acc += A
             if rel is not None:
-                accR += np.logaddexp(A + le1, le0[:, m, None])
+                A += le1
+                accR += np.logaddexp(A, le0[:, m, None], out=A)
         return acc, accR
 
     blocks = [b for b in np.array_split(np.arange(M), min(M, _n_threads())) if len(b)]
     if len(blocks) <= 1 or U * H < 10_000:
         S, R = work(range(M))
-    else:
-        with ThreadPoolExecutor(len(blocks)) as ex:
-            parts = list(ex.map(work, blocks))
-        S = sum(p[0] for p in parts)
-        R = sum(p[1] for p in parts) if rel is not None else None
+        return (S, R) if rel is not None else S
+    per_block = (3 if rel is not None else 2) * 8 * U * H
+    at_once = int(max(1, min(len(blocks), (SCORE_BYTES if max_bytes is None else max_bytes) // per_block)))
+    S = R = None
+    with ThreadPoolExecutor(at_once) as ex:
+        for i in range(0, len(blocks), at_once):
+            for acc, accR in ex.map(work, blocks[i:i + at_once]):
+                if S is None:  # 0 + first block, as sum() starts
+                    S = np.add(acc, 0, out=acc)
+                    R = np.add(accR, 0, out=accR) if rel is not None else None
+                else:
+                    S += acc
+                    if rel is not None:
+                        R += accR
+                del acc, accR
     return (S, R) if rel is not None else S
 
 
@@ -236,10 +297,13 @@ def posterior(S_hosts: np.ndarray, S_unknown: np.ndarray, p_unknown: float, temp
     """Posterior over [bins..., unknown]. host_mask[u, h] = False removes bin h as a candidate for unit u."""
     U, H = S_hosts.shape
     prior = np.r_[np.full(H, np.log((1 - p_unknown) / H)), np.log(p_unknown)]
-    logits = np.concatenate([S_hosts, S_unknown[:, None]], 1) / temperature + prior[None, :]
+    logits = np.concatenate([S_hosts, S_unknown[:, None]], 1)  # one [U, H + 1] array, updated in place
+    logits /= temperature
+    logits += prior[None, :]
     if host_mask is not None:
         logits[:, :H] = np.where(host_mask, logits[:, :H], -np.inf)
-    return np.exp(logits - logsumexp(logits, axis=1, keepdims=True))
+    logits -= logsumexp(logits, axis=1, keepdims=True)
+    return np.exp(logits, out=logits)
 
 
 def credible_set(post_row: np.ndarray, labels: list[str], level: float = 0.95) -> list[str]:
@@ -254,9 +318,19 @@ class Scores:
     S: np.ndarray        # [U, H]   log P(unit | bin)
     Su: np.ndarray       # [U]      log P(unit | unbinned genome)
     Au: np.ndarray       # [U, M]   per-group terms under a community draw
-    Lp: np.ndarray       # [U, M, G]
+    Lp: np.ndarray       # [U, M, G], or [len(lp_rows), M, G] when only some units' rows were kept
     Su_comm: np.ndarray  # [U]      community part of the unbinned-genome score
     R: np.ndarray        # [U, H]   score as an unbinned relative of each bin
+    lp_rows: np.ndarray | None = None  # ascending unit indices whose Lp rows are held (None: all units)
+
+    def lp(self, rows):
+        """Lp of unit(s) `rows` (unit indices), wherever their rows sit in the kept table."""
+        if self.lp_rows is None:
+            return self.Lp[rows]
+        j = np.searchsorted(self.lp_rows, rows)
+        if np.any(j >= len(self.lp_rows)) or np.any(self.lp_rows[np.minimum(j, len(self.lp_rows) - 1)] != rows):
+            raise KeyError("Lp was not kept for these units (see FittedModel.score, lp_rows)")
+        return self.Lp[j]
 
 
 class FittedModel:
@@ -289,12 +363,17 @@ class FittedModel:
                 break
         self.raw_pi = raw
 
-    def _outlier_responsibility(self, eps: float, batch: int = 200) -> np.ndarray:
+    def _outlier_responsibility(self, eps: float, batch: int | None = None) -> np.ndarray:
         """P(chunk is foreign to its bin): leave-chunk-out bin profile vs a random community host.
 
         Chunk batches run on threads (numpy releases the GIL); the community term does not depend
-        on the weights and is computed once per model.
+        on the weights and is computed once per model. A batch is at most 200 chunks and at most
+        30,000 (chunk, group) cells: every thread holds about nine float64 [batch, M, G] arrays, 13.5 GB
+        on 16 threads for 913 groups at 200 chunks. Each chunk's value is computed from its own rows
+        only, so the batch size does not change it.
         """
+        if batch is None:
+            batch = min(200, max(1, 30_000 // self.Lp_chunks.shape[1]))
         if getattr(self, "_s_out", None) is None:
             self._s_out = np.empty(len(self.chunk_bin))
 
@@ -325,13 +404,21 @@ class FittedModel:
     def set_unknown_params(self, eta: float | None, lam: float):
         self.eta, self.lam = eta, lam
 
-    def score(self, L_units) -> Scores:
+    def score(self, L_units, lp_rows=None) -> Scores:
+        """Scores of every unit. lp_rows: ascending unit indices whose Lp rows the result keeps (for
+        loo_rescore and host_terms); None keeps all. The pipeline keeps the binned contigs only: Lp of
+        all targets is a second copy of their likelihood tables (18.8 GB for 80,526 contigs x 913
+        groups), read afterwards for the leave-one-out scores of binned contigs and nothing else.
+        """
         Lp = self.marginal(L_units)
         Au = group_scores(Lp, self.log_pi[None])[:, 0, :]
         S, R = summed_scores(Lp, self.log_prof, rel=(self.eta if self.eta else 0.05, Au))
         Su_comm = Au.sum(1)
         Su = unknown_score(R, Su_comm, self.eta, self.lam)
-        return Scores(S, Su, Au, Lp, Su_comm, R)
+        if lp_rows is not None:
+            lp_rows = np.asarray(lp_rows, dtype=np.int64)
+            Lp = Lp[lp_rows]
+        return Scores(S, Su, Au, Lp, Su_comm, R, lp_rows)
 
     def host_terms(self, sc: Scores, rows: np.ndarray, hosts: np.ndarray | None = None,
                    log_prof: np.ndarray | None = None, batch: int = 1000) -> np.ndarray:
@@ -340,7 +427,7 @@ class FittedModel:
         for s in range(0, len(rows), batch):
             r = rows[s:s + batch]
             prof = self.log_prof[hosts[s:s + batch]] if log_prof is None else log_prof[s:s + batch]
-            A[s:s + batch] = logsumexp(sc.Lp[r].astype(np.float64) + prof, -1)
+            A[s:s + batch] = logsumexp(sc.lp(r).astype(np.float64) + prof, -1)
         return A
 
     def loo_profile(self, bin_idx: int, chunk_ids: np.ndarray) -> np.ndarray:
@@ -353,7 +440,7 @@ class FittedModel:
 
         Returns the per-group terms A[m] of that leave-out score.
         """
-        A = logsumexp(sc.Lp[i].astype(np.float64) + self.loo_profile(bin_idx, chunk_ids)[0], -1)
+        A = logsumexp(sc.lp(i).astype(np.float64) + self.loo_profile(bin_idx, chunk_ids)[0], -1)
         sc.S[i, bin_idx] = A.sum()
         eta = self.eta if self.eta else 0.05
         sc.R[i, bin_idx] = np.logaddexp(np.log1p(-eta) + A, np.log(eta) + sc.Au[i]).sum()
