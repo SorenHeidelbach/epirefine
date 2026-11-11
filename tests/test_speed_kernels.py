@@ -8,6 +8,12 @@ import epirefine.model as M
 from epirefine.grid import Grid
 
 
+@pytest.fixture(autouse=True)
+def numpy_code(monkeypatch):
+    """These tests are about the numpy code: the compiled kernels (tests/test_rs_model.py) stay off."""
+    monkeypatch.setenv("EPIREFINE_RS", "0")
+
+
 def _tables(rng, U=37, Mg=11, G=64, dtype=np.float32):
     L = -rng.gamma(2.0, 40.0, (U, Mg, G))
     L[rng.random((U, Mg)) < 0.2] = 0.0  # groups without sites

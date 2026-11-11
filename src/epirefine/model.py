@@ -65,6 +65,20 @@ def logsumexp(a: np.ndarray, axis: int = -1, keepdims: bool = False, work: np.nd
     return out if keepdims else out.squeeze(axis)
 
 
+def _rs():
+    """The optional compiled model kernels (package epirefine-rs), or None when they are not installed, are
+    switched off (EPIREFINE_RS=0) or do not provide the interface this code was written for. The numpy code
+    below is the reference; the kernels do the same float64 arithmetic in one pass per unit, and their results
+    differ from it in the last bits of exp, log and sums (relative 1e-15)."""
+    if os.environ.get("EPIREFINE_RS", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    try:
+        import epirefine_rs
+    except ImportError:
+        return None
+    return epirefine_rs if epirefine_rs.supports("api>=1") and epirefine_rs.supports("model_kernels") else None
+
+
 def _n_threads():
     """Threads for the passes of this module: the cores, at most 16, and no more than OMP_NUM_THREADS or
     OPENBLAS_NUM_THREADS allow when one is set (the worker processes of the unit-table pass run with both at
@@ -222,6 +236,9 @@ def bin_loglik(Lp_chunks: np.ndarray, chunk_bin: np.ndarray, n_bins: int, w: np.
     Bins are summed on threads (each bin is one product over its own chunks, as before: same bits), as many
     at once as keep the float64 copies of their chunks within BIN_BYTES (the largest bin sets the number)."""
     w = np.ones(len(chunk_bin)) if w is None else w
+    rs = _rs()
+    if rs is not None and Lp_chunks.dtype == np.float32 and Lp_chunks.ndim == 3:
+        return rs.bin_loglik(Lp_chunks, chunk_bin, n_bins, w, threads=_n_threads())
     ell = np.zeros((n_bins,) + Lp_chunks.shape[1:])
     order = np.argsort(chunk_bin, kind="stable")
     bounds = np.searchsorted(chunk_bin[order], np.arange(n_bins + 1))
@@ -258,6 +275,9 @@ def npmle(ell: np.ndarray, iters: int = 300, tol: float = 1e-6, init: np.ndarray
     B, M, G = ell.shape
     lik = np.exp(ell - ell.max(-1, keepdims=True)).transpose(1, 0, 2).copy()  # M, B, G
     pi = np.full((M, G), 1.0 / G) if init is None else init.copy()
+    rs = _rs() if blocks is None else None
+    if rs is not None:
+        return rs.npmle(lik, pi, iters, tol, threads=_n_threads())
     n_blocks = min(8, _n_threads()) if blocks is None else blocks  # more threads than 8 wait for each other
     if M * B * G < 200_000:  # small tables: the threads cost more than they save
         n_blocks = 1
@@ -683,6 +703,13 @@ class FittedModel:
         on 16 threads for 913 groups at 200 chunks. Each chunk's value is computed from its own rows
         only, so the batch size does not change it.
         """
+        rs = _rs() if batch is None and self.Lp_chunks.dtype == np.float32 else None
+        if rs is not None:
+            if getattr(self, "_s_out", None) is None:
+                self._s_out = rs.community_terms(self.Lp_chunks, self.log_pi, threads=_n_threads())
+            s_in = rs.leave_chunk_out_terms(self.Lp_chunks, self.chunk_bin, self.w, self.ell, self.log_pi,
+                                            threads=_n_threads())
+            return expit(np.log(eps) - np.log1p(-eps) + self._s_out - s_in)
         if batch is None:
             batch = min(200, max(1, 30_000 // self.Lp_chunks.shape[1]))
         if getattr(self, "_s_out", None) is None:

@@ -1,0 +1,79 @@
+"""The optional compiled model kernels (package epirefine-rs, feature model_kernels): each returns what the numpy
+code returns to the last bits of exp, log and sums, a whole run takes the same decisions, and EPIREFINE_RS=0
+switches them off. Skipped when the package is not installed (or is a build without these kernels)."""
+import numpy as np
+import pytest
+
+import epirefine.model as M
+from epirefine.grid import Grid
+from helpers import assert_same_outputs_to_rounding, copy_cache, run_pipeline
+
+rs = pytest.importorskip("epirefine_rs")
+pytestmark = pytest.mark.skipif(not rs.supports("model_kernels"), reason="epirefine-rs without model kernels")
+
+
+def _both(monkeypatch, fn):
+    """fn() with the numpy code, then with the kernels."""
+    monkeypatch.setenv("EPIREFINE_RS", "0")
+    assert M._rs() is None
+    ref = fn()
+    monkeypatch.delenv("EPIREFINE_RS")
+    assert M._rs() is not None
+    return ref, fn()
+
+
+def _tables(rng, U=90, Mg=13, G=64):
+    L = -rng.gamma(2.0, 40.0, (U, Mg, G))
+    L[rng.random((U, Mg)) < 0.2] = 0.0
+    return L.astype(np.float32)
+
+
+def test_bin_loglik(monkeypatch):
+    rng = np.random.default_rng(1)
+    Lp, cb, w = _tables(rng), rng.integers(0, 6, 90), rng.random(90)
+    cb[cb == 2] = 3  # an empty bin
+    ref, got = _both(monkeypatch, lambda: M.bin_loglik(Lp, cb, 6, w))
+    assert got.shape == ref.shape and np.allclose(got, ref, rtol=1e-12, atol=0)
+    ref, got = _both(monkeypatch, lambda: M.bin_loglik(Lp, cb, 6))
+    assert np.allclose(got, ref, rtol=1e-12, atol=0)
+
+
+@pytest.mark.parametrize("tol,iters", [(1e-6, 300), (1e-3, 300), (1e-2, 300), (0.0, 25)])
+def test_npmle(monkeypatch, tol, iters):
+    rng = np.random.default_rng(2)
+    ell = -rng.gamma(2.0, 3.0, (60, 41, 64)) * rng.integers(1, 40, (60, 41, 1))
+    ref, got = _both(monkeypatch, lambda: M.npmle(ell, iters, tol))
+    assert np.allclose(got, ref, rtol=1e-9, atol=1e-300)
+    start = ref
+    ref, got = _both(monkeypatch, lambda: M.npmle(ell * 1.2, iters, tol, init=start))
+    assert np.allclose(got, ref, rtol=1e-9, atol=1e-300)
+
+
+def test_outlier_responsibility_and_model(monkeypatch):
+    rng = np.random.default_rng(3)
+    grid = Grid(64)
+    L, cb = _tables(rng, U=120, Mg=7), rng.integers(0, 4, 120)
+    L[5] = 0.0  # a chunk without information
+
+    def fit():
+        m = M.FittedModel(L, cb, 4, ["a"] * 4 + ["m"] * 3, grid, 100.0)
+        return m.w, m.log_prof, m.log_pi, m._outlier_responsibility(0.05)
+    ref, got = _both(monkeypatch, fit)
+    for a, b in zip(ref, got):
+        assert np.allclose(b, a, rtol=1e-9, atol=1e-12)
+    # ties and -inf in the logsumexp, as the numpy code treats them
+    lp = np.zeros((3, 2, 64), np.float32); lp[1, 0, :] = -np.inf; lp[2, 1, 3:] = -50.0
+    log_pi = np.log(np.full((2, 64), 1 / 64))
+    want = M.logsumexp(lp.astype(np.float64) + log_pi[None], -1).sum(-1)
+    with np.errstate(all="ignore"):
+        assert np.array_equal(rs.community_terms(lp, log_pi), want) or np.allclose(rs.community_terms(lp, log_pi), want, rtol=1e-14)
+
+
+def test_run_takes_the_same_decisions(monkeypatch, community, base_run, tmp_path):
+    """A whole run with the kernels against one without, from the same site cache: every output table equal as
+    written (four decimals), the numbers of params.json (written in full) to 1e-9."""
+    monkeypatch.setenv("EPIREFINE_RS", "0")
+    py = run_pipeline(**community.args(copy_cache(base_run, tmp_path / "py")))
+    monkeypatch.delenv("EPIREFINE_RS")
+    k = run_pipeline(**community.args(copy_cache(base_run, tmp_path / "rs")))
+    assert_same_outputs_to_rounding(py.out, k.out)
