@@ -175,6 +175,11 @@ def test_expected_tables_bits(monkeypatch, threads):
     for chunk_rows in (200_000, 300):
         got = A.expected_tables(sites, 60, 5, det, grid, dtype=np.float32, chunk_rows=chunk_rows)
         assert np.array_equal(got[0], ref[0]) and np.array_equal(got[1], ref[1])
+    # in batches of units: the same tables (units 60..63 have no sites)
+    parts = list(A.expected_tables(sites, 64, 5, det, grid, dtype=np.float32, unit_batch=7))
+    assert [p[0] for p in parts] == list(range(0, 64, 7))
+    H1, H0 = (np.concatenate([p[i] for p in parts]) for i in (1, 2))
+    assert np.array_equal(H1[:60], ref[0]) and np.array_equal(H0[:60], ref[1]) and not H1[60:].any()
 
 
 def test_asimov_threads_bits():
@@ -396,3 +401,33 @@ def test_host_profiles_threads_bits(monkeypatch):
     log_pi = np.log(rng.dirichlet(np.ones(64), 410))
     lp = ell + log_pi[None]
     assert np.array_equal(M.host_profiles(ell, log_pi), lp - logsumexp(lp, axis=-1, keepdims=True))
+
+
+def test_mix_log_is_logaddexp():
+    rng = np.random.default_rng(10)
+    grid = Grid(64)
+    la, lb = rng.normal(-20, 15, 5000), rng.normal(-20, 15, 5000)
+    la[:5], lb[3:8] = -np.inf, -np.inf          # one side impossible, and both
+    lb[10:20] = la[10:20]                       # equal
+    ref = np.logaddexp(la[:, None] + grid.logx, lb[:, None] + grid.log1mx)
+    got = M.mix_log(la, lb, grid, block=777)
+    assert np.array_equal(np.isneginf(ref), np.isneginf(got))
+    f = np.isfinite(ref)
+    np.testing.assert_allclose(got[f], ref[f], rtol=1e-13, atol=1e-13)
+
+
+def test_unit_tables_by_keys_equal_the_group_by(monkeypatch):
+    """unit_loglik_arrays through packed integer keys (numpy) = through polars' group-by, bit for bit."""
+    from epirefine.detection import DetectionParams
+    rng = np.random.default_rng(11)
+    det = {g: DetectionParams(rng.uniform(0.001, 0.1), rng.uniform(5, 200), rng.uniform(0.6, 0.99), rng.uniform(5, 50))
+           for g in range(7)}
+    N = 50_000
+    unit, group = rng.integers(0, 90, N), rng.integers(0, 7, N)
+    n = np.minimum(rng.geometric(0.05, N), 3000)
+    k = rng.binomial(n, 0.4)
+    grid = Grid(64)
+    got = M.unit_loglik_arrays(unit, group, n, k, 90, 7, det, grid, dtype=np.float32, batch_rows=20_000)
+    monkeypatch.setattr(M, "_cells_by_keys", lambda *a: False)
+    ref = M.unit_loglik_arrays(unit, group, n, k, 90, 7, det, grid, dtype=np.float32, batch_rows=20_000)
+    assert np.array_equal(got, ref)

@@ -22,29 +22,45 @@ from scipy.special import logsumexp
 
 from concurrent.futures import ThreadPoolExecutor
 
-from .model import FittedModel, _cell_sums, _n_threads, _on_threads, _profile_exp, score_units
+from .model import FittedModel, _cell_sums, _n_threads, _on_threads, _profile_exp, mix_log, score_units
 
 
 def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int, DetectionParams],
                     grid: Grid, n_cap: int = 500, dtype=np.float64, table: dict | None = None,
-                    chunk_rows: int = 200_000):
-    """sites: integer columns unit, group, n (optional count w). Returns H1, H0 with shape [U, M, G].
+                    chunk_rows: int = 200_000, unit_batch: int | None = None):
+    """sites: integer columns unit, group, n (optional count w). Returns H1, H0 with shape [U, M, G], or with
+    unit_batch an iterator of (first unit, H1, H0) over consecutive batches of that many units (the same values;
+    only one batch's tables are held).
 
     table: a dict reused across calls (the per-(group, n) expectations depend only on the caller
     model and the grid), so streaming many batches doesn't recompute them in Python each time.
     """
-    w = pl.col("w").sum() if "w" in sites.columns else pl.len()
-    s = (sites.with_columns(pl.col("n").clip(upper_bound=n_cap))
-         .group_by("unit", "group", "n").agg(w.alias("w")))
+    # one integer key per (unit, group, n): its order is that of the (unit, group) cells with their rows in
+    # ascending n (the order of the sum is then the same in every run, see model.unit_loglik_arrays); one key
+    # column grouped and sorted instead of three
+    wcol = pl.col("w").sum() if "w" in sites.columns else pl.len()
+    s = (sites.select(((pl.col("unit").cast(pl.Int64) * n_groups + pl.col("group").cast(pl.Int64)) * (n_cap + 1)
+                       + pl.col("n").clip(upper_bound=n_cap).cast(pl.Int64)).alias("key"),
+                      *([pl.col("w")] if "w" in sites.columns else []))
+         .group_by("key").agg(wcol.alias("w")).sort("key"))
+    key = s["key"].to_numpy()
+    w = s["w"].to_numpy().astype(float)
+    del s
+    flat = key // (n_cap + 1)
+    # the distinct (group, n) of the rows in ascending order, and each row's index among them (integer keys:
+    # as tuples in a Python dictionary this took seconds per part and about 1 GB of objects)
+    codes, r = np.unique((flat % n_groups) * (n_cap + 1) + key % (n_cap + 1), return_inverse=True)
+    del key
+    keys = list(zip((codes // (n_cap + 1)).tolist(), (codes % (n_cap + 1)).tolist()))
     table = {} if table is None else table
     missing: dict[int, list[int]] = {}
-    for g, n in s.select("group", "n").unique().sort("n", "group").iter_rows():
+    for g, n in sorted(keys, key=lambda k: (k[1], k[0])):
         if (g, n) not in table:
             missing.setdefault(n, []).append(g)
 
     def fill(task):
         # the expectations of a block of groups at one coverage n: for each group the operations of
-        #     k = 0..n; l1, l0 = bb_logpmf(k, n, ...); p = exp(logc + l); term = logaddexp(l1 + logx, l0 + log1mx)
+        #     k = 0..n; l1, l0 = bb_logpmf(k, n, ...); p = exp(logc + l); term = logaddexp(l1 + logx, l0 + log1mx) (mix_log)
         #     table[(g, n)] = (p1 / p1.sum()) @ term, (p0 / p0.sum()) @ term
         # with the element-wise steps done for the whole block at once
         n, gs = task
@@ -53,7 +69,7 @@ def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[
         mu1, k1, mu0, k0 = (np.array([getattr(det[g], f) for g in gs])[:, None] for f in ("mu1", "kappa1", "mu0", "kappa0"))
         l1, l0 = bb_logpmf(k[None, :], n, mu1, k1), bb_logpmf(k[None, :], n, mu0, k0)
         p1, p0 = np.exp(logc[None, :] + l1), np.exp(logc[None, :] + l0)
-        term = np.logaddexp(l1[:, :, None] + grid.logx, l0[:, :, None] + grid.log1mx)
+        term = mix_log(l1.ravel(), l0.ravel(), grid).reshape(l1.shape + (grid.size,))
         for i, g in enumerate(gs):
             table[(g, n)] = (p1[i] / p1[i].sum()) @ term[i], (p0[i] / p0[i].sum()) @ term[i]
     # A combination is (n + 1) x G logaddexp evaluations, about 0.5 ms: 150-200 s on one thread, one combination
@@ -68,25 +84,28 @@ def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[
     else:
         with ThreadPoolExecutor(threads) as ex:
             list(ex.map(fill, tasks))
-    H1 = np.zeros((n_units, n_groups, grid.size), dtype)
-    H0 = np.zeros_like(H1)
-    if s.height == 0:
+    T1 = np.stack([table[k][0] for k in keys]) if keys else None
+    T0 = np.stack([table[k][1] for k in keys]) if keys else None
+    starts = np.flatnonzero(np.r_[True, flat[1:] != flat[:-1]]) if len(flat) else np.zeros(0, np.int64)
+    cell = flat[starts]
+    bounds = np.r_[starts, len(flat)]
+
+    def tables(u0, u1):
+        H1 = np.zeros((u1 - u0, n_groups, grid.size), dtype)
+        H0 = np.zeros_like(H1)
+        c0, c1 = np.searchsorted(cell, [u0 * n_groups, u1 * n_groups])
+        if c1 > c0:
+            lo, hi = bounds[c0], bounds[c1]
+            # reduced in blocks of whole (unit, group) cells of about chunk_rows rows: T[r] * w in one piece is
+            # 8 G bytes per distinct (unit, group, n) row, 3.4 GB for the 6.6 million rows of one part of contigs
+            for T, out in ((T1, H1), (T0, H0)):
+                out.reshape(-1, grid.size)[cell[c0:c1] - u0 * n_groups] = _cell_sums(T, r[lo:hi], w[lo:hi],
+                                                                                     starts[c0:c1] - lo, chunk_rows)
         return H1, H0
-    # (rows of a cell in ascending n: the order of the sum is then the same in every run, see model.unit_loglik_arrays)
-    s = s.with_columns((pl.col("unit").cast(pl.Int64) * n_groups + pl.col("group")).alias("flat")).sort("flat", "n")
-    flat, w = s["flat"].to_numpy(), s["w"].to_numpy().astype(float)
-    # the distinct (group, n) of the rows in ascending order, and each row's index among them (integer keys:
-    # as tuples in a Python dictionary this took seconds per part and about 1 GB of objects)
-    code = s["group"].to_numpy().astype(np.int64) * (n_cap + 1) + s["n"].to_numpy().astype(np.int64)
-    codes, r = np.unique(code, return_inverse=True)
-    keys = list(zip((codes // (n_cap + 1)).tolist(), (codes % (n_cap + 1)).tolist()))
-    T1 = np.stack([table[k][0] for k in keys]); T0 = np.stack([table[k][1] for k in keys])
-    starts = np.flatnonzero(np.r_[True, flat[1:] != flat[:-1]])
-    # reduced in blocks of whole (unit, group) cells of about chunk_rows rows: T[r] * w in one piece is
-    # 8 G bytes per distinct (unit, group, n) row, 3.4 GB for the 6.6 million rows of one part of contigs
-    for T, out in ((T1, H1), (T0, H0)):
-        out.reshape(-1, grid.size)[flat[starts]] = _cell_sums(T, r, w, starts, chunk_rows)
-    return H1, H0
+
+    if unit_batch is None:
+        return tables(0, n_units)
+    return ((u0, *tables(u0, min(u0 + unit_batch, n_units))) for u0 in range(0, n_units, unit_batch))
 
 
 def asimov(H1, H0, phi):
@@ -167,6 +186,9 @@ def margin_vs_unknown(model: FittedModel, H1, H0, truth: np.ndarray, temperature
     return vs_unk
 
 
+EVIDENCE_BATCH = 2000  # contigs per batch of the evidence tables and margins
+
+
 def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray, model: FittedModel,
                     det: dict[int, DetectionParams], grid: Grid, temperature: float, min_cov: int = 1,
                     workers: int = 1, group_weights: np.ndarray | None = None, drop_groups=(),
@@ -219,15 +241,20 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
         inv = {c: i for i, c in enumerate(contigs)}
         s = (sites.filter(pl.col("contig").is_in(contigs))
              .select(pl.col("contig").replace_strict(inv, return_dtype=pl.Int64).alias("unit"), "group", "n"))
-        H1, H0 = expected_tables(s, len(units), model.log_prof.shape[1], det, grid, dtype=np.float32, table=shared)
-        if group_weights is not None:
-            gw = np.asarray(group_weights, np.float32)[None, :, None]
-            H1, H0 = H1 * gw, H0 * gw
-        if nearest:
-            b, _, u = margin_vs_competitors(model, H1, H0, truth[units], temperature)
-            vs_bin[units], vs_unk[units] = b, u   # each contig is evaluated in exactly one call
-        else:
-            vs_unk[units] = margin_vs_unknown(model, H1, H0, truth[units], temperature)
+        # the tables of 2,000 contigs at a time (the batch of the margins), not of the whole part (1.5 GB for the
+        # 4,125 contigs of a ZymoFecal part, held while the main process is at its peak)
+        for u0, H1, H0 in expected_tables(s, len(units), model.log_prof.shape[1], det, grid, dtype=np.float32,
+                                          table=shared, unit_batch=EVIDENCE_BATCH):
+            if group_weights is not None:
+                gw = np.asarray(group_weights, np.float32)[None, :, None]
+                H1, H0 = H1 * gw, H0 * gw
+            ub = units[u0:u0 + len(H1)]
+            if nearest:
+                b, _, u = margin_vs_competitors(model, H1, H0, truth[ub], temperature, batch=EVIDENCE_BATCH)
+                vs_bin[ub], vs_unk[ub] = b, u   # each contig is evaluated in exactly one call
+            else:
+                vs_unk[ub] = margin_vs_unknown(model, H1, H0, truth[ub], temperature, batch=EVIDENCE_BATCH)
+            del H1, H0
 
     def one(f):
         d = pl.read_parquet(f, columns=["contig", "group", "n"])

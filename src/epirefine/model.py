@@ -117,10 +117,33 @@ def site_terms(keys: pl.DataFrame, det: dict[int, DetectionParams], grid: Grid, 
     p = [det[g] for g in range(max(det) + 1)]
     mu0, k0, mu1, k1 = (np.array([getattr(q, f) for q in p])[grp] for f in ("mu0", "kappa0", "mu1", "kappa1"))
     la, lb = bb_logpmf(k, n, mu1, k1), bb_logpmf(k, n, mu0, k0)
+    return mix_log(la, lb, grid, block)
+
+
+def mix_log(la: np.ndarray, lb: np.ndarray, grid: Grid, block: int = 65_536) -> np.ndarray:
+    """[P, G] float64: logaddexp(la[p] + log x_g, lb[p] + log(1 - x_g)) for 1-d la, lb.
+
+    With one logarithm per cell: with d = la - lb and the larger of the two as base, base + log(x + (1 - x) e^-d)
+    (d > 0) or base + log((1 - x) + x e^d) (d <= 0); e^-|d| is one exponential per row. numpy's logaddexp is
+    scalar code (20 ns a cell: a quarter of a unit-table worker's time on ZymoFecal); this agrees with it to
+    rounding (float64, 5e-14 relative on a ZymoFecal part), and the float32 tables built from it were the same
+    bit for bit (one ZymoFecal part, the training sets, ZymoOral)."""
     out = np.empty((len(la), grid.size))
+    d = la - lb
+    up = d > 0
+    base = np.where(up, la, lb)[:, None]
+    e = np.exp(-np.abs(d))[:, None]
+    x, y = grid.x[None, :], 1.0 - grid.x[None, :]
     for s in range(0, len(la), block):
-        e = s + block
-        np.logaddexp(la[s:e, None] + grid.logx[None, :], lb[s:e, None] + grid.log1mx[None, :], out=out[s:e])
+        sl = slice(s, s + block)
+        o, u = out[sl], up[sl, None]
+        np.multiply(np.where(u, y, x), e[sl], out=o)   # the smaller term's weight times e^-|d|
+        o += np.where(u, x, y)                          # plus the larger term's weight
+        np.log(o, out=o)
+        o += base[sl]
+    both = np.isneginf(la) & np.isneginf(lb)
+    if both.any():
+        out[both] = -np.inf
     return out
 
 
@@ -164,6 +187,33 @@ def unit_loglik(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int,
                               w=w, chunk_rows=chunk_rows, dtype=dtype, batch_rows=batch_rows)
 
 
+def _cells_by_keys(unit, group, n, k, n_groups, det, grid, out, chunk_rows) -> bool:
+    """The body of unit_loglik_arrays for one batch without weights, with numpy on one integer key per row,
+    (unit, group, n, k) packed into the bits of an int64, instead of polars' group-by on four columns, join and
+    sort (single-threaded in a worker: 19 of the 42 s of a ZymoFecal part). np.unique sorts the keys, which is the
+    order of the (unit, group) cells with their rows in ascending (n, k): the same rows in the same order, the
+    same sums. Returns False (nothing done) when the key does not fit in 62 bits."""
+    if not len(unit):
+        return True
+    bn, bk = max(int(n.max()), 1).bit_length(), max(int(k.max()), 1).bit_length()
+    flat = unit.astype(np.int64) * n_groups + group.astype(np.int64)
+    if max(int(flat.max()), 1).bit_length() + bn + bk > 62 or int(n.min()) < 0 or int(k.min()) < 0:
+        return False
+    key = (flat << (bn + bk)) | (n.astype(np.int64) << bk) | k.astype(np.int64)
+    del flat
+    key, wt = np.unique(key, return_counts=True)
+    flat = key >> (bn + bk)
+    nk = key & ((1 << (bn + bk)) - 1)
+    del key
+    codes, r = np.unique(((flat % n_groups) << (bn + bk)) | nk, return_inverse=True)   # distinct (group, n, k)
+    del nk
+    keys = pl.DataFrame({"group": codes >> (bn + bk), "n": (codes >> bk) & ((1 << bn) - 1), "k": codes & ((1 << bk) - 1)})
+    table = site_terms(keys, det, grid)
+    starts = np.flatnonzero(np.r_[True, flat[1:] != flat[:-1]])
+    out[flat[starts]] = _cell_sums(table, r, wt.astype(float), starts, chunk_rows)
+    return True
+
+
 def unit_loglik_arrays(unit: np.ndarray, group: np.ndarray, n: np.ndarray, k: np.ndarray, n_units: int, n_groups: int,
                        det: dict[int, DetectionParams], grid: Grid, w: np.ndarray | None = None,
                        chunk_rows: int = 200_000, dtype=np.float64, batch_rows: int = 2_000_000) -> np.ndarray:
@@ -197,6 +247,8 @@ def unit_loglik_arrays(unit: np.ndarray, group: np.ndarray, n: np.ndarray, k: np
             batches.append(slice(a, b) if in_order else order[a:b])
             a = b
     for idx in batches:
+        if w is None and _cells_by_keys(unit[idx], group[idx], n[idx], k[idx], n_groups, det, grid, out, chunk_rows):
+            continue
         cols = {"unit": unit, "group": group, "n": n, "k": k}
         if w is not None:
             cols["w"] = w
