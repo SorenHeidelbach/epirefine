@@ -343,3 +343,45 @@ def test_two_state_share_threads_bits(monkeypatch, threads):
     got = model.two_state_share()
     assert (ref[1] >= 0).sum() >= 3
     assert np.array_equal(ref[0], got[0]) and np.array_equal(ref[1], got[1])
+
+
+@pytest.mark.parametrize("threads", ["1", "4"])
+def test_summed_scores_row_form(monkeypatch, threads):
+    """The row form of summed_scores (one-thread BLAS products on unit slices, one logarithm for the relatives)
+    agrees with the group form to rounding, does not depend on the thread count, and leaves BLAS's thread count
+    as it found it."""
+    monkeypatch.setenv("OMP_NUM_THREADS", threads)
+    rng = np.random.default_rng(7)
+    U, Mg, H = 300, 11, 7
+    Lp = _tables(rng, U, Mg)
+    lp = np.log(rng.dirichlet(np.ones(64) * 0.05, (H, Mg)))  # sparse profiles: many cells far below the maximum
+    lp[0, 0, :10] = -900.0
+    Au = rng.normal(-30, 5, (U, Mg))
+    Au = np.minimum(Au, Lp.max(-1))  # Au <= max of the unit's table, as for a community draw
+    api = M._blas_thread_api()
+    before = api[1]() if api else None
+    S0, R0 = M.summed_scores(Lp, lp, rel=(0.05, Au), form="groups")
+    S1, R1 = M.summed_scores(Lp, lp, rel=(0.05, Au), form="rows")
+    np.testing.assert_allclose(S1, S0, rtol=1e-12)
+    np.testing.assert_allclose(R1, R0, rtol=1e-12)
+    assert (api[1]() if api else None) == before
+    monkeypatch.setenv("OMP_NUM_THREADS", "3")
+    S2, R2 = M.summed_scores(Lp, lp, rel=(0.05, Au), form="rows")
+    assert np.array_equal(S1, S2) and np.array_equal(R1, R2)
+    # units scored in batches of a multiple of ROWS_STEP: the same bits
+    b = M.ROWS_STEP
+    S3 = np.concatenate([M.summed_scores(Lp[s:s + b], lp, form="rows") for s in range(0, U, b)])
+    assert np.array_equal(S3, M.summed_scores(Lp, lp, form="rows"))
+
+
+def test_profile_exp_flush_keeps_products():
+    """Products with the flushed profile exponentials equal those with the full ones (terms < 1e-250 vanish)."""
+    rng = np.random.default_rng(8)
+    lp = np.log(rng.dirichlet(np.ones(64) * 0.02, (50, 9)))
+    a = rng.uniform(-80, 0, (200, 64)).astype(np.float32)
+    x = np.exp(a - a.max(1, keepdims=True)).astype(np.float64)
+    for h in range(9):
+        b = lp[:, h, :]
+        full = np.exp(b - b.max(1, keepdims=True))
+        assert (full < M._TINY).any()
+        np.testing.assert_array_equal(x @ M._profile_exp(b).T, x @ full.T)

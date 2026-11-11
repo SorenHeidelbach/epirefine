@@ -21,6 +21,7 @@ Arrays:
 from __future__ import annotations
 
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
@@ -422,21 +423,170 @@ def group_scores(Lp: np.ndarray, log_prof: np.ndarray) -> np.ndarray:
     return A
 
 
+_TINY = 1e-250  # exp(log_prof - max) below this enters the products as 0 (see _profile_exp)
+
+
+def _profile_exp(b: np.ndarray) -> np.ndarray:
+    """exp(b - max b) along the last axis, entries below _TINY set to 0.
+
+    About a third of the cells of a fitted profile lie more than 575 nats below their group's maximum: their
+    exponentials are subnormal or close to it, and products with subnormal operands or results take a slow path
+    in the CPU (the score products ran at 14 instead of 3 ns per unit, bin and group on ZymoFecal). A dropped
+    term is below 1e-250, while the profile's maximum cell (1) meets an exponential of the unit table of at
+    least 1.2e-38 (float32): a sum moves only where it is itself below about 1e-232. The scores were bit for bit
+    the same on ZymoFecal tables (tests/test_speed_kernels.py checks it on synthetic ones)."""
+    y = np.exp(b - b.max(-1, keepdims=True))
+    y[y < _TINY] = 0.0
+    return y
+
+
 def _group_term(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     am = a.max(1, keepdims=True)
     bm = b.max(1, keepdims=True)
-    q = np.exp(a - am).astype(np.float64) @ np.exp(b - bm).T
+    q = np.exp(a - am).astype(np.float64) @ _profile_exp(b).T
     np.log(np.maximum(q, 1e-300, out=q), out=q)  # in place: q is [U, H]
     q += am
     q += bm.T
     return q
 
 
+ROWS_MIN = 20_000_000   # unit x bin x group cells from which summed_scores takes the row form
+ROWS_STEP = 128         # units per row slice of the row form (a divisor of FittedModel.SCORE_BATCH)
+ROWS_GROUPS = 4         # groups per step of a row slice
+
+
+def _score_form(U: int, H: int, M: int) -> str:
+    return "rows" if U * H * M >= ROWS_MIN else "groups"
+
+
+_blas_lock = threading.Lock()
+_blas_api: list = []
+
+
+def _blas_thread_api():
+    """(set, get) of the number of threads of the OpenBLAS that numpy loaded, through ctypes; None when it
+    cannot be found (another BLAS, another platform): the callers then run with BLAS's own threads."""
+    if not _blas_api:
+        api = None
+        try:
+            import ctypes
+            with open("/proc/self/maps") as fh:
+                libs = sorted({ln.split()[-1] for ln in fh if "openblas" in ln.lower() and ".so" in ln})
+            names = [("scipy_openblas_set_num_threads64_", "scipy_openblas_get_num_threads64_"),
+                     ("scipy_openblas_set_num_threads", "scipy_openblas_get_num_threads"),
+                     ("openblas_set_num_threads64_", "openblas_get_num_threads64_"),
+                     ("openblas_set_num_threads", "openblas_get_num_threads")]
+            for path in libs:
+                lib = ctypes.CDLL(path)
+                for sn, gn in names:
+                    if hasattr(lib, sn) and hasattr(lib, gn):
+                        api = (getattr(lib, sn), getattr(lib, gn))
+                        break
+                if api:
+                    break
+        except (OSError, ValueError):
+            api = None
+        _blas_api.append(api)
+    return _blas_api[0]
+
+
+class _single_threaded_blas:
+    """BLAS on one thread inside the block (restored after), for code that issues many small products from
+    threads of its own: with BLAS's threads waiting next to them they ran 2-3x slower. Products then have
+    the arithmetic of a one-thread BLAS whatever the number of cores."""
+
+    def __enter__(self):
+        _blas_lock.acquire()
+        api = _blas_thread_api()
+        self.prev = api[1]() if api else None
+        if api:
+            api[0](1)
+        return self
+
+    def __exit__(self, *exc):
+        api = _blas_thread_api()
+        if api and self.prev:
+            api[0](self.prev)
+        _blas_lock.release()
+
+
+def _summed_scores_rows(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None):
+    """summed_scores for large tables: units in slices of ROWS_STEP on threads, each slice through all groups,
+    ROWS_GROUPS at a time (stacked [step, G] x [G, H] products on a one-thread BLAS, work buffers reused).
+    A unit's result depends only on its slice (ROWS_STEP-aligned), not on the thread count or on how many
+    units are scored with it in steps of ROWS_STEP. The relatives' term is taken with one logarithm,
+        log((1 - eta) P + eta e^Au) = log(q + c d) + log(1 - eta) + am + bm,
+        q = sum_g e^(a - am) e^(b - bm), c = eta e^(Au - am) / (1 - eta), d = e^-bm,
+    instead of numpy's logaddexp (scalar code, 20 ns a cell); c <= eta / (1 - eta) since Au <= am, and
+    d <= G for normalised profiles. Agrees with the group form to about 1e-14 relative (other order of the
+    sums over groups, another product kernel)."""
+    U, M, G = Lp.shape
+    H = log_prof.shape[0]
+    bm = log_prof.max(-1)                                                          # [H, M]
+    ebT = np.ascontiguousarray(_profile_exp(log_prof).transpose(1, 2, 0))          # [M, G, H]
+    bmT = np.ascontiguousarray(bm.T)[:, None, :]                                   # [M, 1, H]
+    S = np.empty((U, H))
+    R = np.empty((U, H)) if rel is not None else None
+    if rel is not None:
+        eta = float(rel[0])
+        dT = np.exp(-bmT)
+        bmR = bmT + np.log1p(-eta)
+        if not np.isfinite(dT).all():
+            raise ValueError("summed_scores: profiles are not normalised (exp(-max) overflows)")
+    K = ROWS_GROUPS
+
+    def rows(sl):
+        a = Lp[sl]
+        n = len(a)
+        am = a.max(-1)                                                             # [n, M]
+        amT = np.ascontiguousarray(am.T)[:, :, None]                               # [M, n, 1]
+        accS = np.zeros((n, H))
+        xb, qb = np.empty((K, n, G)), np.empty((K, n, H))
+        if rel is not None:
+            cT = (np.exp(np.log(eta) + np.asarray(rel[1][sl], np.float64).T - am.T) / (1.0 - eta))[:, :, None]
+            accR, tb = np.zeros((n, H)), np.empty((K, n, H))
+        for m0 in range(0, M, K):
+            ms = slice(m0, min(m0 + K, M))
+            k = ms.stop - m0
+            x, q = xb[:k], qb[:k]
+            x[...] = np.exp(a[:, ms, :].transpose(1, 0, 2) - amT[ms])          # float32 exp, as the group form
+            np.matmul(x, ebT[ms], out=q)
+            np.maximum(q, 1e-300, out=q)
+            if rel is not None:
+                t = tb[:k]
+                np.multiply(cT[ms], dT[ms], out=t)
+                t += q
+                np.log(t, out=t)
+                t += amT[ms]
+                t += bmR[ms]
+                for j in range(k):
+                    accR += t[j]
+            np.log(q, out=q)
+            q += amT[ms]
+            q += bmT[ms]
+            for j in range(k):
+                accS += q[j]
+        S[sl] = accS
+        if rel is not None:
+            R[sl] = accR
+
+    slices = [slice(s, min(s + ROWS_STEP, U)) for s in range(0, U, ROWS_STEP)]
+    with _single_threaded_blas():
+        with ThreadPoolExecutor(max(1, min(_n_threads(), len(slices)))) as ex:
+            list(ex.map(rows, slices))
+    return (S, R) if rel is not None else S
+
+
 SCORE_BYTES = 4 << 30  # memory summed_scores may use for the [U, H] work arrays of its threads
 
 
-def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None, max_bytes: int | None = None):
+def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None, max_bytes: int | None = None,
+                  form: str | None = None):
     """S[u, h] = sum_m log P(group m of u | h).
+
+    form: "rows" (_summed_scores_rows, the form for large tables: from ROWS_MIN unit x bin x group cells on) or
+    "groups" (below); None chooses by the size of this call (_score_form). Callers that score the units of one
+    table in batches pass the form of the whole table, so that every unit gets the same arithmetic.
 
     Equal to group_scores(...).sum(-1) without the [U, H, M] tensor: groups are accumulated one at
     a time, in blocks of groups that run on threads (numpy releases the GIL).
@@ -458,13 +608,15 @@ def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None
     H = log_prof.shape[0]
     if rel is not None:
         le1, le0 = np.log1p(-rel[0]), np.log(rel[0]) + rel[1]
+    if (form or _score_form(U, H, M)) == "rows":
+        return _summed_scores_rows(Lp, log_prof, rel)
     rs = _rs("score_sums") if U * H * M >= 100_000 else None
     if rs is not None:
         # The kernel of epirefine-rs does the sums; the exponentials stay numpy's (the float32 exp of the unit
         # tables decides the eighth digit of a score). Groups are added in ascending order there, in blocks of
         # groups here: scores agree to about 1e-14 relative.
         bm = log_prof.max(-1)                                                          # [H, M]
-        eb = np.ascontiguousarray(np.exp(log_prof - bm[..., None]).transpose(1, 2, 0))  # [M, G, H]
+        eb = np.ascontiguousarray(_profile_exp(log_prof).transpose(1, 2, 0))           # [M, G, H]
         bm = np.ascontiguousarray(bm.T)
         S = np.empty((U, H))
         R = np.empty((U, H)) if rel is not None else None
@@ -862,11 +1014,12 @@ class FittedModel:
         all targets is a second copy of their likelihood tables (18.8 GB for 80,526 contigs x 913
         groups), read afterwards for the leave-one-out scores of binned contigs and nothing else.
         """
-        if lp_rows is not None and len(L_units) > self.SCORE_BATCH and _rs("score_sums") is not None:
-            return self._score_in_batches(L_units, np.asarray(lp_rows, dtype=np.int64))
+        form = _score_form(len(L_units), self.n_bins, L_units.shape[1])
+        if lp_rows is not None and len(L_units) > self.SCORE_BATCH and (form == "rows" or _rs("score_sums") is not None):
+            return self._score_in_batches(L_units, np.asarray(lp_rows, dtype=np.int64), form)
         Lp = self.marginal(L_units)
         Au = group_scores(Lp, self.log_pi[None])[:, 0, :]
-        S, R = summed_scores(Lp, self.log_prof, rel=(self.eta if self.eta else 0.05, Au))
+        S, R = summed_scores(Lp, self.log_prof, rel=(self.eta if self.eta else 0.05, Au), form=form)
         Su_comm = Au.sum(1)
         Su = unknown_score(R, Su_comm, self.eta, self.lam)
         if lp_rows is not None:
@@ -876,11 +1029,11 @@ class FittedModel:
 
     SCORE_BATCH = 8192  # units per batch of _score_in_batches (a multiple of marginalize_unit's 2048)
 
-    def _score_in_batches(self, L_units, lp_rows: np.ndarray) -> Scores:
+    def _score_in_batches(self, L_units, lp_rows: np.ndarray, form: str = "groups") -> Scores:
         """score() without the marginal tables of all units at once: they are a second copy of L_units (6.3 GB
         for the 34,878 contigs of ZymoFecal, and the peak of the run), of which only the rows lp_rows are kept.
-        Used with the scoring kernel of epirefine-rs, whose sums for a unit do not depend on the units scored
-        with it (the BLAS products of the numpy sums do, in the last bits: see summed_scores)."""
+        Used with the row form of summed_scores and with the scoring kernel of epirefine-rs, whose sums for a unit do
+        not depend on the units scored with it (the BLAS products of the group form do, in the last bits)."""
         U, M, G = L_units.shape
         eta = self.eta if self.eta else 0.05
         S, R, Au = np.empty((U, self.n_bins)), np.empty((U, self.n_bins)), np.empty((U, M))
@@ -888,7 +1041,7 @@ class FittedModel:
         for s in range(0, U, self.SCORE_BATCH):
             Lp = self.marginal(L_units[s:s + self.SCORE_BATCH])
             Au[s:s + len(Lp)] = group_scores(Lp, self.log_pi[None])[:, 0, :]
-            S[s:s + len(Lp)], R[s:s + len(Lp)] = summed_scores(Lp, self.log_prof, rel=(eta, Au[s:s + len(Lp)]))
+            S[s:s + len(Lp)], R[s:s + len(Lp)] = summed_scores(Lp, self.log_prof, rel=(eta, Au[s:s + len(Lp)]), form=form)
             a, b = np.searchsorted(lp_rows, [s, s + len(Lp)])
             kept[a:b] = Lp[lp_rows[a:b] - s]
         Su_comm = Au.sum(1)

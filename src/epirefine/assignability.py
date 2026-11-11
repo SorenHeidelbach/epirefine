@@ -22,7 +22,7 @@ from scipy.special import logsumexp
 
 from concurrent.futures import ThreadPoolExecutor
 
-from .model import FittedModel, _cell_sums, _n_threads, _on_threads, score_units
+from .model import FittedModel, _cell_sums, _n_threads, _on_threads, _profile_exp, score_units
 
 
 def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int, DetectionParams],
@@ -135,7 +135,7 @@ def own_scores(Lp: np.ndarray, log_prof: np.ndarray, t: np.ndarray, batch: int =
     score_units to rounding, about 1e-15 relative)."""
     U = len(Lp)
     bm = log_prof.max(-1)                       # [H, M]
-    eb = np.exp(log_prof - bm[..., None])       # [H, M, G]
+    eb = _profile_exp(log_prof)                 # [H, M, G] (cells < 1e-250 as 0: see model._profile_exp)
     out = np.empty(U)
 
     def rows(sl):
