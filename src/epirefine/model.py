@@ -324,6 +324,39 @@ def unknown_logit(R: np.ndarray | None, Su_comm: np.ndarray, eta: float | None, 
     return np.logaddexp(np.log(lam) + Su_comm / T, np.log1p(-lam) + rel)
 
 
+def unbinned_state_frequencies(off: np.ndarray, on: np.ndarray, q: np.ndarray, strength: float = 5.0,
+                               iters: int = 500, tol: float = 1e-7) -> np.ndarray:
+    """c[m]: how often motif group m is methylated among the given units (the unbinned contigs).
+
+    off, on [n, M]: log-likelihood of each unit's sites in each group if the group is unmethylated / methylated
+    (FittedModel.state_terms). Per group, c maximises sum_i log((1 - c) exp(off) + c exp(on)) over the units
+    that have sites in it (EM, groups independent), with `strength` pseudo-units at the bins' frequency q, so
+    that with few unbinned contigs the estimate stays at q (the community draw).
+
+    Why: an unbinned genome was scored as a community draw, each group's state drawn at the frequency seen
+    among the BINS. The motif list comes from the bins, so a genome without a bin lacks most listed motifs by
+    construction, and a draw at the bins' frequencies makes that improbable (the product over groups of
+    1 - q): the bin that is itself unmethylated, or methylated only at a motif many genomes share, then looks
+    like the one good explanation of every such contig. The unbinned contigs are the population an unbinned
+    contig comes from, so their own state frequencies are used instead: absence of a motif that is rare among
+    them says little, presence of one that is rare among them says more than before, and a motif that many of
+    them carry (Dam) says as little as it should.
+    """
+    off, on = off.astype(np.float64), on.astype(np.float64)
+    has = np.abs(on - off) > 1e-9
+    n = has.sum(0)
+    d = np.where(has, on - off, 0.0)
+    c = q.copy()
+    for _ in range(iters):
+        rho = expit(np.log(c) - np.log1p(-c) + d)
+        new = np.clip(((rho * has).sum(0) + strength * q) / (n + strength), 1e-9, 1 - 1e-9)
+        done = np.abs(new - c).max() < tol
+        c = new
+        if done:
+            break
+    return c
+
+
 def score_units(Lp: np.ndarray, log_prof: np.ndarray) -> np.ndarray:
     """S[u, h] = log P(unit | host h) without own-MTase terms."""
     return summed_scores(Lp, log_prof)
@@ -386,31 +419,122 @@ class FittedModel:
     """Host profiles and population prior for a given tau; scores arbitrary units."""
 
     def __init__(self, L_chunks, chunk_bin, n_bins, group_modtype, grid: Grid, tau, prior_lam=5.0,
-                 prior_floor=0.02, contam_eps=0.05, robust_iters=4, init_w=None, init_pi=None):
+                 prior_floor=0.02, contam_eps=0.05, robust_iters=None, init_w=None, init_pi=None,
+                 robust_fit="alternating", robust_damping=0.5, robust_tol=1e-3):
+        """robust_fit: how the chunk weights w = 1 - P(chunk foreign to its bin) and the bin profiles are
+        brought into agreement.
+
+        "alternating" (the scheme up to 0.10.x): w <- 1 - r(w) for a fixed 4 rounds. Where a bin holds two
+        methylomes in comparable shares the pooled profile sits between them and fits no chunk, so every
+        chunk is called foreign, the next profile is the prior, every chunk is a member again, and so on:
+        a 2-cycle that the fixed round count ends in the pooled state (no chunk down-weighted).
+        "damped": w <- w + damping * ((1 - r(w)) - w), until no weight moves by more than robust_tol
+        (at most robust_iters rounds). The same fixed points, but the step is too short to jump over
+        them; from the pooled start all weights shrink together, the profile widens, the majority's
+        chunks fit it first and the fit settles with the minority down-weighted.
+        robust_delta[u] is the last change of each chunk's weight (bins whose chunks still move did not
+        converge: see robust_unconverged()).
+        """
         self.grid, self.tau, self.n_bins = grid, tau, n_bins
         self.T = transition_spec(grid, tau)
         self.Lp_chunks = marginalize_unit(L_chunks, self.T)
         self.chunk_bin = chunk_bin
         self._s_out = None
         self.w = np.ones(len(chunk_bin)) if init_w is None else init_w.copy()
+        if robust_fit not in ("damped", "alternating"):
+            raise ValueError(f"unknown robust_fit {robust_fit!r}")
+        alpha = robust_damping if robust_fit == "damped" else 1.0
+        if robust_iters is None:
+            robust_iters = 50 if robust_fit == "damped" else 4
         raw = init_pi
-        for it in range(robust_iters + 1):
+        self.robust_delta = np.zeros(len(chunk_bin))
+        self.robust_rounds = 0
+
+        def fit_profiles(raw):
             self.ell = bin_loglik(self.Lp_chunks, chunk_bin, n_bins, self.w)
             self.log_pi, raw = fit_population_prior(self.ell, group_modtype, prior_lam, prior_floor,
                                                     init=raw, return_raw=True)
             self.log_prof = host_profiles(self.ell, self.log_pi)
+            return raw
+
+        for it in range(robust_iters + 1):
+            raw = fit_profiles(raw)
             if it == robust_iters or contam_eps <= 0:
                 break
-            w_new = 1.0 - self._outlier_responsibility(contam_eps)
-            converged = np.abs(w_new - self.w).max() < 1e-3
-            self.w = w_new
-            if converged:  # warm-started fits (e.g. the next tau) often need one or two rounds
-                self.ell = bin_loglik(self.Lp_chunks, chunk_bin, n_bins, self.w)
-                self.log_pi, raw = fit_population_prior(self.ell, group_modtype, prior_lam, prior_floor,
-                                                        init=raw, return_raw=True)
-                self.log_prof = host_profiles(self.ell, self.log_pi)
+            if robust_fit == "damped":
+                self._s_out = None  # the community term follows the refitted population prior
+            target = 1.0 - self._outlier_responsibility(contam_eps)
+            # convergence is judged on the full step, so a damped fit does not stop early
+            self.robust_delta = np.abs(target - self.w)
+            self.w = self.w + alpha * (target - self.w)
+            self.robust_rounds = it + 1
+            if self.robust_delta.max() < robust_tol:  # warm-started fits (e.g. the next tau) often need one or two rounds
+                raw = fit_profiles(raw)
                 break
         self.raw_pi = raw
+
+    def two_state_share(self, min_chunks: int = 5, screen: float = 0.05, max_groups: int = 20, batch: int = 500):
+        """Per bin: the largest share, over motif groups, of the smaller of two methylation states among its chunks.
+
+        One genome has one level per motif group: its chunks differ only by which of their sites are methylated,
+        which the site model already describes (a group at level 0.5 gives chunks around 0.5). A bin that holds
+        two methylomes (a merge of genomes, or of strains that differ in a methyltransferase) has chunks at two
+        levels, one below and one above 0.5. For each bin and group the distribution of chunk levels is
+        estimated (grid NPMLE over the bin's chunks) and compared with the best single level; when the
+        distribution wins by more than the BIC cost of a second level and weight (log of the number of chunks),
+        the share is the smaller of its masses below and above 0.5, otherwise 0.
+
+        Why it is reported: when the two methylomes differ in few sites per chunk, the pooled profile between
+        them explains every chunk better than a community draw, so the robust fit down-weights nothing and no
+        contig is flagged (single-motif merges from about 20% on the monoculture stress sets). This share is
+        then the only sign that the bin is mixed.
+
+        Groups are screened first (chunks whose 95% interval lies wholly on one side of 0.5, at least
+        min_chunks of them and two on the smaller side, smaller side >= screen of their evidence; at most
+        max_groups per bin), so the NPMLE runs on few groups.
+        Returns (share [H], group [H], -1 where no group shows two states).
+        """
+        H, (U, M, G) = self.n_bins, self.Lp_chunks.shape
+        on_w, off_w = np.zeros((H, M)), np.zeros((H, M))
+        on_n, off_n = np.zeros((H, M)), np.zeros((H, M))
+        for s in range(0, U, batch):
+            Lp = self.Lp_chunks[s:s + batch].astype(np.float64)
+            _, lo, hi, _ = self.grid.summarize(Lp)
+            info = Lp.max(-1) - Lp.min(-1)
+            b = self.chunk_bin[s:s + batch]
+            on, off = (lo >= 0.5) & (info > 0), (hi < 0.5) & (info > 0)
+            np.add.at(on_w, b, info * on); np.add.at(off_w, b, info * off)
+            np.add.at(on_n, b, on); np.add.at(off_n, b, off)
+        tot = on_w + off_w
+        minor = np.where((on_n + off_n >= min_chunks) & (np.minimum(on_n, off_n) >= 2) & (tot > 0),
+                         np.minimum(on_w, off_w) / np.maximum(tot, 1e-300), 0.0)
+        share, group = np.zeros(H), np.full(H, -1)
+        upper = self.grid.x >= 0.5
+        order = np.argsort(self.chunk_bin, kind="stable")
+        bounds = np.searchsorted(self.chunk_bin[order], np.arange(H + 1))
+        for h in range(H):
+            ms = np.flatnonzero(minor[h] >= screen)
+            if not len(ms):
+                continue
+            ms = ms[np.argsort(-minor[h, ms], kind="stable")[:max_groups]]
+            idx = order[bounds[h]:bounds[h + 1]]
+            ell = self.Lp_chunks[idx][:, ms, :].astype(np.float64)        # [chunks, groups, G]
+            ell = ell[:, :, :] - ell.max(-1, keepdims=True)
+            rho = npmle(ell, iters=200, tol=1e-5)                         # [groups, G]
+            two = np.log(np.maximum(np.einsum("umg,mg->um", np.exp(ell), rho), 1e-300)).sum(0)
+            one = ell.sum(0).max(-1)
+            ok = two - one > np.log(len(idx))
+            sh = np.where(ok, np.minimum(rho[:, upper].sum(1), rho[:, ~upper].sum(1)), 0.0)
+            k = int(sh.argmax())
+            if sh[k] > 0:
+                share[h], group[h] = sh[k], ms[k]
+        return share, group
+
+    def robust_unconverged(self, tol: float = 0.05) -> np.ndarray:
+        """Per bin: True when some chunk weight was still moving by more than tol in the last round."""
+        out = np.zeros(self.n_bins, bool)
+        np.maximum.at(out, self.chunk_bin, self.robust_delta > tol)
+        return out
 
     def _outlier_responsibility(self, eps: float, batch: int | None = None) -> np.ndarray:
         """P(chunk is foreign to its bin): leave-chunk-out bin profile vs a random community host.
@@ -469,6 +593,38 @@ class FittedModel:
             Lp = Lp[lp_rows]
         return Scores(S, Su, Au, Lp, Su_comm, R, lp_rows)
 
+    def state_terms(self, sc: Scores, batch: int = 2000):
+        """Per unit and motif group: log P(sites | the group is unmethylated) and log P(sites | methylated), the
+        level drawn from the part of the population prior below / at or above 0.5, and that prior's methylated
+        mass q[m]. A community draw is log((1 - q) exp(off) + q exp(on)) summed over groups (= Su_comm).
+        """
+        if sc.lp_rows is not None:
+            raise ValueError("needs the Lp rows of every unit: score with lp_rows=None")
+        up = self.grid.x[None, :] >= 0.5
+        q = np.exp(logsumexp(np.where(up, self.log_pi, -np.inf), axis=-1))
+        q = np.clip(q, 1e-9, 1 - 1e-9)
+        l_on = np.where(up, self.log_pi, -np.inf) - np.log(q)[:, None]
+        l_off = np.where(~up, self.log_pi, -np.inf) - np.log1p(-q)[:, None]
+        U, M, _ = sc.Lp.shape
+        off, on = np.empty((U, M), np.float32), np.empty((U, M), np.float32)
+        for s in range(0, U, batch):
+            Lp = sc.Lp[s:s + batch].astype(np.float64)
+            off[s:s + batch] = logsumexp(Lp + l_off[None], -1)
+            on[s:s + batch] = logsumexp(Lp + l_on[None], -1)
+        return off, on, q
+
+    def unlisted_score(self, sc: Scores, batch: int = 2000) -> np.ndarray:
+        """log P(unit | a genome with none of the listed motifs): every group's level drawn from the part of
+        the population prior below 0.5 (the levels of bins that do not methylate the group)."""
+        if sc.lp_rows is not None:
+            raise ValueError("needs the Lp rows of every unit: score with lp_rows=None")
+        off = np.where(self.grid.x[None, :] < 0.5, self.log_pi, -np.inf)
+        off = off - logsumexp(off, axis=-1, keepdims=True)
+        out = np.empty(len(sc.Lp))
+        for s in range(0, len(out), batch):
+            out[s:s + batch] = logsumexp(sc.Lp[s:s + batch].astype(np.float64) + off[None], -1).sum(-1)
+        return out
+
     def host_terms(self, sc: Scores, rows: np.ndarray, hosts: np.ndarray | None = None,
                    log_prof: np.ndarray | None = None, batch: int = 1000) -> np.ndarray:
         """Per-group terms A[n, M] of units `rows`, each under one bin: hosts[i], or log_prof[i] if given."""
@@ -479,17 +635,23 @@ class FittedModel:
             A[s:s + batch] = logsumexp(sc.lp(r).astype(np.float64) + prof, -1)
         return A
 
+    def chunk_llr(self, chunk_ids: np.ndarray, prof: np.ndarray) -> np.ndarray:
+        """Per chunk: log P(chunk | community draw) - log P(chunk | bin profile `prof` [1, M, G])."""
+        Lp = self.Lp_chunks[chunk_ids].astype(np.float64)
+        return logsumexp(Lp + self.log_pi[None], -1).sum(-1) - logsumexp(Lp + prof, -1).sum(-1)
+
     def loo_profile(self, bin_idx: int, chunk_ids: np.ndarray) -> np.ndarray:
         ell = self.ell[bin_idx] - (self.w[chunk_ids, None, None] * self.Lp_chunks[chunk_ids]).sum(0)
         return host_profiles(ell[None], self.log_pi)
 
-    def loo_rescore(self, sc: Scores, i: int, bin_idx: int, chunk_ids: np.ndarray):
+    def loo_rescore(self, sc: Scores, i: int, bin_idx: int, chunk_ids: np.ndarray, prof: np.ndarray | None = None):
         """Replace unit i's score for its own bin with a leave-chunks-out version (in place), and its
         score as a relative of that bin, so neither is built from the unit's own data.
 
         Returns the per-group terms A[m] of that leave-out score.
         """
-        A = logsumexp(sc.lp(i).astype(np.float64) + self.loo_profile(bin_idx, chunk_ids)[0], -1)
+        prof = self.loo_profile(bin_idx, chunk_ids) if prof is None else prof
+        A = logsumexp(sc.lp(i).astype(np.float64) + prof[0], -1)
         sc.S[i, bin_idx] = A.sum()
         eta = self.eta if self.eta else 0.05
         sc.R[i, bin_idx] = np.logaddexp(np.log1p(-eta) + A, np.log(eta) + sc.Au[i]).sum()

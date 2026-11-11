@@ -19,6 +19,7 @@ OUTPUT_FILES = [
     "calibration/summary.tsv", "calibration/reliability.tsv", "calibration/temperature_fit.tsv",
     "calibration/temperature_by_length.tsv", "calibration/tau_fit.tsv", "calibration/tau_groups.tsv",
     "calibration/fragments.tsv", "calibration/assignability.tsv", "calibration/lookalikes.tsv",
+    "calibration/false_flag_rate.tsv", "calibration/reliability_deployed.tsv",
     "cache/manifest.json",
 ]
 # files that must not change with the worker count, the cache state or the pileup's compression

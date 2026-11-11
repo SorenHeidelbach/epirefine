@@ -72,6 +72,8 @@ class Refinement:
     contaminant: np.ndarray    # [N] bool (P(foreign) above threshold and a methylome difference)
     candidate: np.ndarray      # [N] bool: unbinned, or flagged contaminant
     include_bin: np.ndarray    # [N] bin index to include into (high confidence), -1 otherwise
+    Su: np.ndarray | None = None     # [N] log P(contig | unbinned genome) as used (with the unlisted-genome part)
+    unlisted_share: float | None = None  # share of unbinned genomes without any listed motif (None: not modelled)
 
 
 def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarray, temperature: float,
@@ -80,7 +82,8 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
            methylome_difference: np.ndarray | None = None, min_difference: float = 0.4,
            decidable: np.ndarray | None = None, unmethylated_bins: np.ndarray | None = None,
            include_threshold_unmethylated: float = 0.95, Zu: np.ndarray | None = None,
-           eps_after_gate: bool = False) -> Refinement:
+           eps_after_gate: bool = False, eps_gated: bool = False,
+           S_unlisted: np.ndarray | None = None, empty_bins: np.ndarray | None = None) -> Refinement:
     """given[i] = bin index of contig i, -1 if unbinned; testable[i] = binned and scored leave-one-out.
     With one bin only (H = 1) no binned contig is tested for contamination (eps is NaN); unbinned contigs are
     still tested for inclusion into it.
@@ -116,6 +119,30 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     unb = (given < 0) & dec
     # p_u from the unbinned contigs: "some bin, uniformly" vs "an unbinned genome"
     l_bins = logsumexp(Z, axis=1) - np.log(H)
+    unlisted_share = None
+    if S_unlisted is not None:
+        # An unbinned genome is a community draw (each motif group's level drawn independently from the levels
+        # seen among the bins) or an "unlisted" genome: one with none of the listed motifs, unmethylated at every
+        # group. The motif list comes from the bins only, so that is what a genome without a bin usually looks
+        # like, and a community draw makes it improbable (the product over groups of P(off)), which is what
+        # made the one unmethylated or motif-poor bin the best explanation of every such contig. The three
+        # weights (some bin / community draw / unlisted) are estimated together from the unbinned contigs.
+        Zn = S_unlisted / T
+        w = np.full(3, 1 / 3) if p_unknown is None else np.array([1 - p_unknown, p_unknown / 2, p_unknown / 2])
+        cls = np.stack([l_bins[unb], Zu[unb], Zn[unb]], 1)
+        for _ in range(500 if len(cls) else 0):
+            z = cls + np.log(w)[None]
+            r = np.exp(z - logsumexp(z, axis=1, keepdims=True)).mean(0)
+            if p_unknown is not None:  # fixed by the user: only the split of the unbinned genomes is estimated
+                r = np.r_[1 - p_unknown, p_unknown * r[1:] / max(r[1:].sum(), 1e-12)]
+            new = np.clip(r, 1e-6, None); new /= new.sum()
+            done = np.abs(new - w).max() < 1e-8
+            w = new
+            if done:
+                break
+        p_unknown = float(np.clip(w[1] + w[2], 1e-6, 1 - 1e-6))
+        unlisted_share = float(w[2] / (w[1] + w[2]))
+        Zu = np.logaddexp(np.log1p(-unlisted_share) + Zu, np.log(unlisted_share) + Zn)
     if p_unknown is None:
         p_unknown, _ = em_weight(l_bins[unb], Zu[unb], *p_unknown_prior)
     lpu, lpb = np.log(p_unknown), np.log1p(-p_unknown)
@@ -153,7 +180,9 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     p_foreign = np.full(N, np.nan)
     t = testable & (given >= 0)
     gate_ok = None
-    if eps_after_gate and methylome_difference is not None:
+    # (eps_gated, the option --eps-gated, and eps_after_gate, part of the calibration feature em-priors, ask for
+    # the same thing; one implementation: em_weight's can_be_out)
+    if (eps_after_gate or eps_gated) and methylome_difference is not None:
         gate_ok = methylome_difference[t] >= min_difference
     eps, r = em_weight(Z[t, own[t]], l_alt[t], *eps_prior, can_be_out=gate_ok)
     if H == 1:
@@ -170,8 +199,13 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
         to_bin = best_alt < H
         thr[to_bin] = np.where(np.asarray(unmethylated_bins)[best_alt[to_bin]], include_threshold_unmethylated, include_threshold)
     include_bin = np.where(candidate & (best_alt < H) & (p_best_alt >= thr), best_alt, -1)
+    if empty_bins is not None and np.any(empty_bins):
+        # a bin without a single motif site has no profile (it equals the population prior, i.e. the community
+        # draw): its posterior is its prior share, which passes the threshold when p_unknown is near 0. Nothing
+        # is included into it (review 01, finding 7).
+        include_bin[(include_bin >= 0) & np.asarray(empty_bins)[np.maximum(include_bin, 0)]] = -1
     return Refinement(float(p_unknown), float(eps), p_foreign, best_alt, p_best_alt, contaminant, candidate,
-                      include_bin)
+                      include_bin, Zu * T, unlisted_share)
 
 
 def regional_pattern(llrs: list[np.ndarray], switch: float = 0.05, iters: int = 100, weights=None):
@@ -221,6 +255,31 @@ def regional_pattern(llrs: list[np.ndarray], switch: float = 0.05, iters: int = 
         w = np.clip(np.asarray(weights, float), 1e-6, None); w /= w.sum()
     z = L + np.log(w)[None]
     return np.exp(z - lse(z, axis=1, keepdims=True)), chunk_post, w
+
+
+def withdraw_as_mixed(post: np.ndarray, rule: str = "largest") -> np.ndarray:
+    """Which flags the regional model withdraws, from post[u] = P(member, foreign, mixed).
+
+    "largest": mixed is the most probable of the three explanations. "vs_foreign" (up to 0.10.x): mixed is
+    more probable than foreign, whatever the member term, so a contig whose chunks all look like the bin's
+    (member near 1, foreign and mixed both near 0) could be labelled mixed too.
+    """
+    post = np.asarray(post, float).reshape(-1, 3)
+    out = post[:, 2] > post[:, 1]
+    if rule == "largest":
+        out &= post[:, 2] > post[:, 0]
+    elif rule != "vs_foreign":
+        raise ValueError(f"unknown regional withdrawal rule {rule!r}")
+    return out
+
+
+def flagged_share_per_bin(given: np.ndarray, contaminant: np.ndarray, judged: np.ndarray, length: np.ndarray,
+                          n_bins: int) -> np.ndarray:
+    """Per bin: share of the judged sequence (contigs that could be flagged) that is flagged."""
+    length = np.asarray(length, float)
+    bin_bp = np.bincount(given[judged], weights=length[judged], minlength=n_bins)
+    flag_bp = np.bincount(given[contaminant], weights=length[contaminant], minlength=n_bins)
+    return np.divide(flag_bp, bin_bp, out=np.zeros(n_bins), where=bin_bp > 0)
 
 
 def confidence(p: float) -> str:

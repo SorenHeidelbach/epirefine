@@ -147,6 +147,48 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--cache-dir", help="site cache (default: <out>/cache); reused when inputs are unchanged")
     g.add_argument("--motif-fit", action="store_true",
                    help="also write motif_fit.tsv: each contig's methylated fraction per motif group next to its bin's")
+
+    g = r.add_argument_group("rule variants",
+                             "alternative designs of single rules; every default is the behaviour of 0.10")
+    g.add_argument("--robust-fit", choices=["damped", "alternating"], default="alternating",
+                   help="how chunk weights and bin profiles are iterated: damped steps to convergence, or the fixed four "
+                        "alternating rounds of 0.10.x (which end in the pooled profile when a bin holds two methylomes)")
+    g.add_argument("--max-flagged-share", type=float, default=1.0,
+                   help="no flag of a bin is applied when its flagged contigs hold at least this share of the bin's "
+                        "sequence (the bin is reported as a suspected merge of genomes); 1 = always apply")
+    g.add_argument("--regional-leave-out", choices=["contig", "chunk"], default="chunk",
+                   help="bin profile the chunks of a long contig are compared with in the regional model: without the "
+                        "whole contig (as for the contig's own score) or without the chunk only (0.10.x)")
+    g.add_argument("--regional-withdraw", choices=["largest", "vs_foreign"], default="vs_foreign",
+                   help="withdraw a flag as mixed when 'mixed' is the most probable of member / foreign / mixed, or "
+                        "whenever it is more probable than 'foreign' (0.10.x)")
+    g.add_argument("--regional-tempered", action="store_true", help="divide the regional chunk evidence by the temperature")
+    g.add_argument("--gate-leave-out", choices=["contig", "none"], default="none",
+                   help="methylome-difference gate against the bin's 95%% interval without the contig, or against the "
+                        "level of the full bin profile (0.10.x)")
+    g.add_argument("--gate-unweighted", action="store_true",
+                   help="contig intervals of the methylome-difference gate from unweighted site likelihoods")
+    g.add_argument("--eps-gated", action="store_true",
+                   help="estimate the contamination rate only from contigs that pass the methylome-difference gate")
+    g.add_argument("--unlisted-genome", action="store_true",
+                   help="unbinned genomes are community draws or genomes with none of the listed motifs (weights estimated)")
+    g.add_argument("--inclusion-support", choices=["methylated_groups", "none"], default="none",
+                   help="an inclusion must also reach the threshold on the motif groups its bin methylates alone")
+    g.add_argument("--unknown-prior", choices=["unbinned", "bins"], default="bins",
+                   help="an unbinned genome's state in each motif group is drawn at the frequency seen among the unbinned "
+                        "contigs, or among the bins (0.10.x)")
+    g.add_argument("--unknown-prior-strength", type=float, default=5.0,
+                   help="with --unknown-prior unbinned: pseudo-contigs at the bins' frequency per motif group")
+    g.add_argument("--tau-support", choices=["leave_bin_out", "all"], default="all",
+                   help="a motif group gets between-contig variation (finite tau) only if the calibration fragments support "
+                        "it without the bin that gains most, or on all fragments (0.10.x)")
+    g.add_argument("--two-state-warning", type=float, default=0.2,
+                   help="warn about a bin when, in some motif group, the smaller of two methylation states among its "
+                        "chunks holds at least this share, or its flagged contigs hold at least this share of the "
+                        "bin (bin_evidence.tsv, column warning; reporting only, no decision depends on it)")
+    g.add_argument("--redundancy-order", choices=["sequential", "independent"], default="independent",
+                   help="compare each inclusion candidate with the bin plus the inclusions already accepted, or with "
+                        "the given bin only (0.10.x)")
     return ap
 
 
@@ -168,7 +210,15 @@ def main(argv=None):
                 variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
                 cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed, shared_sites=a.shared_sites,
                 complement_pairs=a.complement_pairs, strand_sites=a.strand_sites,
-                noise_max_off_share=a.noise_max_off_share)
+                noise_max_off_share=a.noise_max_off_share,
+                two_state_warning=a.two_state_warning,
+                robust_fit=a.robust_fit,
+                max_flagged_share=a.max_flagged_share, regional_leave_out=a.regional_leave_out,
+                regional_withdraw=a.regional_withdraw, regional_tempered=a.regional_tempered,
+                gate_leave_out=a.gate_leave_out, gate_unweighted=a.gate_unweighted, eps_gated=a.eps_gated,
+                redundancy_order=a.redundancy_order, unlisted_genome=a.unlisted_genome,
+                inclusion_support=a.inclusion_support, tau_support=a.tau_support, unknown_prior=a.unknown_prior,
+                unknown_prior_strength=a.unknown_prior_strength)
         except InputError as e:
             # a problem with the inputs or options: the message says what; no traceback needed
             log(f"ERROR: {e}")

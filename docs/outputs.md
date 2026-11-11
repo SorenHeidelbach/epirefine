@@ -80,7 +80,16 @@ outputs can read EpiRefine's.
 
 - **`bin_evidence.tsv`**: per bin: `status` (`methylated`, or `no_methylation_detected` for bins without any
   methylated motif group, which need the stricter inclusion threshold), motif groups with sites, methylated,
-  confidently unmethylated and undetermined, and the number of sites.
+  confidently unmethylated and undetermined, and the number of sites. Then four columns about the bin as a whole:
+  `robust_fit` (`converged`, or `not_converged` when the bin's fingerprint did not settle), `flagged_share` (share of
+  the bin's judged sequence that was flagged), `two_state_share` with `two_state_group` (the motif group in which
+  the bin's pieces fall into two methylation states, one below and one above 0.5, and the share of the smaller state;
+  0 when the pieces agree) and `warning`. A `two_state_share` or `flagged_share` of 0.2 or more means the bin
+  probably holds two methylomes: two genomes or strains merged by the binner, or one genome with part of its
+  sequence in another state. When the two differ in a single sparse motif nothing is flagged in such a bin (the
+  fingerprint settles between them), so this column is then the only sign; look at the bin before trusting it.
+- **`unbinned_prior.tsv`** (with `--unknown-prior unbinned`): per motif group, how often it is methylated among the
+  bins and among the unbinned contigs.
 - **`host_profiles.tsv`**: each bin's fingerprint: per bin and motif group, the methylated fraction (`phi_mean`),
   its 95% interval (`phi_lo95`, `phi_hi95`) and the probability that it is above 0.5.
 - **`motif_fit.tsv`** (with `--motif-fit`): per contig and motif group, the contig's methylated fraction with its 95%

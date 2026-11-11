@@ -77,6 +77,15 @@ estimates. Leave them unset unless you are testing the model.
 | `--frag-budget` | 6000 | Total number of calibration pieces, spread over bins and lengths. |
 | `--frags-per-bin` | 30 | At most this many pieces per bin and length. |
 | `--contam-eps` | 0.05 | Prior share of foreign pieces in a bin when building its fingerprint (0 = trust every piece; the regional model for long contigs is then off too, and the log says so; must be below 1). |
+| `--robust-fit` | `alternating` | `damped`: iterate the bin fingerprints in damped steps until they settle (slower; same results on every benchmark so far). |
+| `--unknown-prior` | `bins` | `unbinned`: a genome without a bin is assumed to carry each motif as often as the unbinned contigs do, not as often as the bins do. Far fewer contigs of genomes without a bin are placed into bins with no or one common motif; fewer contigs without a site of their bin's motifs are put back. |
+| `--unknown-prior-strength` | 5 | With `--unknown-prior unbinned`: pseudo-contigs at the bins' frequency (large values return to `bins`). |
+| `--redundancy-order` | `independent` | `sequential`: inclusion candidates of a bin are compared with the bin plus the candidates already accepted, so two unbinned copies of one sequence are not both included. |
+| `--regional-leave-out`, `--regional-withdraw`, `--regional-tempered` | `chunk`, `vs_foreign`, off | Variants of the regional model: `contig` scores a long contig's pieces against the bin without the whole contig; `largest` withdraws a flag as `mixed` only when mixed is the most probable of member / foreign / mixed. |
+| `--gate-leave-out`, `--gate-unweighted`, `--eps-gated` | `none`, off, off | Variants of the methylome-difference requirement: against the bin's 95% interval without the contig; contig intervals from unweighted sites; contamination rate from contigs that pass it. |
+| `--max-flagged-share` | 1 | Apply no flag of a bin whose flagged contigs hold at least this share of it (not recommended: see the dev log proposal of 2026-11-10). |
+| `--tau-support` | `all` | `leave_bin_out`: a motif group gets between-contig variation only if the calibration supports it without its best bin. |
+| `--unlisted-genome`, `--inclusion-support` | off, `none` | Two rejected inclusion designs, kept for comparison. |
 | `--grid-size` | 64 | Points on the grid of methylated fractions. |
 
 ## Speed and caching

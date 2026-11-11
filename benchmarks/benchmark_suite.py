@@ -83,15 +83,15 @@ def version() -> str:
     return m.group(1) if m else "unknown"
 
 
-def run_scenario(sc: dict, out_root: Path, workers: int = 16, run_args: list[str] | None = None) -> dict:
+def run_scenario(sc: dict, out_root: Path, workers: int = 16, extra_args: list[str] | None = None) -> dict:
     out = out_root / sc["name"]
     out.mkdir(parents=True, exist_ok=True)
     cmd = ["/usr/bin/time", "-v", str(REPO / ".venv/bin/epirefine"), "run", "--assembly", sc["assembly"], "--pileup", sc["pileup"],
            "--contig-bin", sc["contig_bin"], "--motifs", sc["motifs"], "--out", str(out), "--workers", str(workers)]
     if sc.get("cache"):
         cmd += ["--cache-dir", sc["cache"]]
-    cmd += [str(x) for x in sc.get("args", [])]  # extra epirefine options of a suite variant
-    cmd += run_args or []
+    cmd += [str(x) for x in sc.get("args", [])]  # extra epirefine options of a suite variant (per scenario)
+    cmd += list(extra_args or [])
     t0 = time.time()
     p = subprocess.run(cmd, capture_output=True, text=True)
     wall = time.time() - t0
@@ -125,13 +125,13 @@ def main():
     ap.add_argument("--all", action="store_true", help="include optional scenarios")
     ap.add_argument("--only", nargs="+", help="run only these scenario names")
     ap.add_argument("--note", default="", help="what changed, stored with the history row")
-    ap.add_argument("--run-args", default="",
-                    help="extra options passed to every `epirefine run` (quoted), to benchmark a non-default setting, "
-                         "e.g. --run-args='--calibration legacy'")
     ap.add_argument("--jobs", type=int, default=1,
                     help="scenarios run at once (faster; timings then aren't comparable with jobs=1 records)")
-    ap.add_argument("--workers", type=int, default=None,
-                    help="processes per scenario (default: 16 divided by --jobs)")
+    ap.add_argument("--workers", type=int, default=16, help="processes per run, shared between the scenarios run at once")
+    ap.add_argument("--extra-args", default="",
+                    help="further `epirefine run` options for every scenario, as one quoted string (to benchmark a "
+                         "non-default setting; say which in --note)")
+    ap.add_argument("--label", default="", help="suffix of the run directory and the per-scenario record (with --extra-args)")
     a = ap.parse_args()
     if not a.devlog:
         sys.exit("development log not set: pass --devlog <dir> or set the EPIREFINE_DEVLOG environment variable")
@@ -139,14 +139,14 @@ def main():
     scen = [s for s in scen if (s["name"] in a.only if a.only else a.all or not s.get("optional"))]
     ver, sha = version(), git("rev-parse", "--short", "HEAD") or "nogit"
     dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
-    tag = f"{ver}_{sha}{'-dirty' if dirty else ''}"
+    tag = f"{ver}_{sha}{'-dirty' if dirty else ''}" + (f"_{a.label}" if a.label else "")
     out_root = (Path(a.out_root) if a.out_root else data_root(a.data_root) / "runs/epirefine/dev/bench_runs") / tag
     rows = []
-    workers = a.workers or max(1, 16 // a.jobs)
+    workers = max(1, a.workers // a.jobs)
 
     def one(sc):
         print(f"[{datetime.now():%H:%M:%S}] {sc['name']} ...", flush=True)
-        r = run_scenario(sc, out_root, workers, shlex.split(a.run_args))
+        r = run_scenario(sc, out_root, workers, shlex.split(a.extra_args))
         print(f"    {sc['name']}: {r['status']}, {r['wall_s']} s, {r['peak_rss_gb']} GB" +
               (f", contaminants found {r['contam_recall']:.3f}, put back {r['inclusion_recall']:.3f}, "
                f"wrongly placed {r['placed_wrongly']}" if "contam_recall" in r else ""), flush=True)

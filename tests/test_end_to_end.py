@@ -75,7 +75,8 @@ def test_documented_output_files_exist(base_run, cli_run):
     assert (cli_run.out / "motif_fit.tsv").stat().st_size > 0  # written with --motif-fit only
     # every file name the documentation mentions is covered by OUTPUT_FILES
     documented = set(re.findall(r"`([a-z_]+\.(?:tsv|json))`", DOCS.read_text()))
-    assert documented <= {Path(f).name for f in OUTPUT_FILES} | {"motif_fit.tsv"}
+    optional = {"motif_fit.tsv", "unbinned_prior.tsv"}  # --motif-fit; --unknown-prior unbinned
+    assert documented <= {Path(f).name for f in OUTPUT_FILES} | optional
 
 
 def test_decision_table_has_the_documented_columns(community, base_run):
