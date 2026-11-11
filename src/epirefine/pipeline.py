@@ -441,14 +441,14 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     own_chunks: dict[int, list[int]] = {}
     for u, c in enumerate(chunk_contig):
         own_chunks.setdefault(int(c), []).append(u)
-    for i, c in enumerate(targets):
-        if c not in host_set:
-            continue
+
+    def leave_out(i):  # each binned contig writes its own rows and chunks only: the contigs run on threads
+        c = targets[i]
         own = np.array(own_chunks.get(cid[c], []), dtype=np.int64)
         b = bin_idx[cb[c]]
         if len(own) and len(own) == bin_chunks[b]:
             sole_contig.add(c)  # leave-one-out would empty the bin: not an independent test
-            continue
+            return
         prof = model.loo_profile(b, own)
         A_loo = model.loo_rescore(sc, i, b, own, prof=prof)
         if refit_unknown:
@@ -460,6 +460,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
             diff[i] = np.where(n_sites_group[i] > 0, gap, 0.0).max()
         if regional_leave_out == "contig" and len(own) >= 2:
             llr_loo[own] = model.chunk_llr(own, prof)
+    with ThreadPoolExecutor(_n_threads()) as ex:
+        list(ex.map(leave_out, [i for i, c in enumerate(targets) if c in host_set]))
+    loo = dict(sorted(loo.items()))  # in contig order, as the loop filled it
 
     # bin refinement: contamination of binned contigs, inclusion of unbinned ones
     given = np.array([bin_idx[cb[c]] if c in cb else -1 for c in targets])
