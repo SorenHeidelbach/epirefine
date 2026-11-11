@@ -431,3 +431,24 @@ def test_unit_tables_by_keys_equal_the_group_by(monkeypatch):
     monkeypatch.setattr(M, "_cells_by_keys", lambda *a: False)
     ref = M.unit_loglik_arrays(unit, group, n, k, 90, 7, det, grid, dtype=np.float32, batch_rows=20_000)
     assert np.array_equal(got, ref)
+
+
+def test_spill_keeps_values(tmp_path, monkeypatch):
+    import epirefine.pipeline as P
+    a = np.random.default_rng(12).random((50, 7, 64)).astype(np.float32)
+    assert P._spill(a, tmp_path) is a  # small: kept in memory
+    monkeypatch.setattr(P, "SPILL_MIN_BYTES", 1)
+    m = P._spill(a, tmp_path)
+    assert isinstance(m, np.memmap) and np.array_equal(m, a) and np.array_equal(m[[3, 9]], a[[3, 9]])
+    assert not list(tmp_path.iterdir())  # unlinked temporary file
+
+
+def test_spilled_chunk_tables_same_outputs(community, base_run, tmp_path, monkeypatch):
+    """A run whose chunk tables go to a temporary file after the final fit writes the same tables."""
+    import filecmp
+    import epirefine.pipeline as P
+    from helpers import copy_cache, run_pipeline
+    monkeypatch.setattr(P, "SPILL_MIN_BYTES", 1)
+    run = run_pipeline(**community.args(copy_cache(base_run, tmp_path / "out")))
+    for f in sorted(base_run.out.glob("*.tsv")):
+        assert filecmp.cmp(f, run.out / f.name, shallow=False), f.name

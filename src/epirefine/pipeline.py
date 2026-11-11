@@ -118,6 +118,24 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
     return [np.concatenate([p[i] for p in parts]) for i in range(4)]
 
 
+SPILL_MIN_BYTES = 256 << 20  # tables from this size on are moved to a temporary file once only rows of them are read
+
+
+def _spill(a: np.ndarray, directory) -> np.ndarray:
+    """a as a read-only memory map of an unlinked temporary file in `directory` (the same values; its memory is freed
+    when the caller drops its last reference to the array), or a itself when it is small or the file cannot be written."""
+    if a.nbytes < SPILL_MIN_BYTES:
+        return a
+    import tempfile
+    try:
+        fh = tempfile.TemporaryFile(dir=directory)
+        a.tofile(fh)
+        fh.flush()
+        return np.memmap(fh, dtype=a.dtype, mode="r", shape=a.shape)
+    except OSError:
+        return a
+
+
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
@@ -385,6 +403,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
 
     model = FittedModel(L_chunks, chunk_bin, H, group_modtype, grid, tau, **warm, **model_kw)
     model.set_unknown_params(*unknown_params)
+    # from here on the chunk tables are read only for the few mixed contigs of the regional step: kept in a temporary
+    # file (memory-mapped, removed when the run ends) instead of memory, next to the model's own marginal copy
+    L_chunks = _spill(L_chunks, out)
     p_foreign = 1 - model.w
     _write(pl.DataFrame({"contig": [asm.names[i] for i in chunk_contig], "start": chunk_no * chunk_size,
                          "bin": [bins[b] for b in chunk_bin], "p_foreign": p_foreign}),
@@ -433,6 +454,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # weight with variants of the same methyltransferase keeps the interval its own sites give it
     gw = (group_w.astype(np.float64)[None, :, None] if gate_unweighted and group_weights and (group_w < 1).any() else None)
     phi_obs = _batched_summary(grid, lambda sl: L_t[sl].astype(np.float64) / (1.0 if gw is None else gw), len(targets))
+    table_cells = L_t.shape[1] * L_t.shape[2]
+    # the contigs' tables are not read after this point (the leave-one-out scores use the kept marginal rows):
+    # freed before the evidence step, where the main process had its peak (6.3 GB on ZymoFecal)
+    del L_t
     diff = np.zeros(len(targets))
     llr_loo = np.zeros(len(chunk_bin))
     sole_contig = set()
@@ -461,7 +486,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         if regional_leave_out == "contig" and len(own) >= 2:
             llr_loo[own] = model.chunk_llr(own, prof)
     binned = [i for i, c in enumerate(targets) if c in host_set]
-    if L_t.shape[1] * L_t.shape[2] < LOO_THREADS_MIN:  # small tables: Python-bound, threads only contend
+    if table_cells < LOO_THREADS_MIN:  # small tables: Python-bound, threads only contend
         for i in binned:
             leave_out(i)
     else:
