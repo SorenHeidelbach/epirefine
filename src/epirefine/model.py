@@ -66,7 +66,15 @@ def logsumexp(a: np.ndarray, axis: int = -1, keepdims: bool = False, work: np.nd
 
 
 def _n_threads():
-    return min(16, os.cpu_count() or 1)
+    """Threads for the passes of this module: the cores, at most 16, and no more than OMP_NUM_THREADS or
+    OPENBLAS_NUM_THREADS allow when one is set (the worker processes of the unit-table pass run with both at
+    1: each of them is one thread of that pass)."""
+    n = min(16, os.cpu_count() or 1)
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        v = os.environ.get(var, "").strip()
+        if v.isdigit() and int(v) > 0:
+            n = min(n, int(v))
+    return n
 
 
 def _on_threads(fn, n: int, min_step: int = 1) -> None:

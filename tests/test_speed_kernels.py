@@ -121,3 +121,67 @@ def test_stack_product_bits(U, Mg):
     e = np.exp(-rng.gamma(2.0, 5.0, (U, Mg, 64))).astype(np.float32)
     Tt = Grid(64).transition(30.0).T.astype(np.float32)
     assert np.array_equal(M._stack_product(e, Tt), e @ Tt)
+
+
+def _expected_tables_plain(sites, n_units, n_groups, det, grid, n_cap=500, dtype=np.float64):
+    """expected_tables as it was: one (group, n) combination at a time, tuple keys, one block."""
+    import polars as pl
+    from scipy.special import gammaln
+    from epirefine.detection import bb_logpmf
+    s = sites.with_columns(pl.col("n").clip(upper_bound=n_cap)).group_by("unit", "group", "n").agg(pl.len().alias("w"))
+    table = {}
+    for g, n in s.select("group", "n").unique().iter_rows():
+        p = det[g]
+        k = np.arange(n + 1, dtype=float)
+        logc = gammaln(n + 1) - gammaln(k + 1) - gammaln(n - k + 1)
+        l1, l0 = bb_logpmf(k, n, p.mu1, p.kappa1), bb_logpmf(k, n, p.mu0, p.kappa0)
+        p1, p0 = np.exp(logc + l1), np.exp(logc + l0)
+        term = np.logaddexp(l1[:, None] + grid.logx, l0[:, None] + grid.log1mx)
+        table[(g, n)] = (p1 / p1.sum()) @ term, (p0 / p0.sum()) @ term
+    H1 = np.zeros((n_units, n_groups, grid.size), dtype); H0 = np.zeros_like(H1)
+    keys = sorted(set(zip(s["group"].to_list(), s["n"].to_list())))
+    kid = {k: i for i, k in enumerate(keys)}
+    T1 = np.stack([table[k][0] for k in keys]); T0 = np.stack([table[k][1] for k in keys])
+    s = s.with_columns((pl.col("unit").cast(pl.Int64) * n_groups + pl.col("group")).alias("flat")).sort("flat")
+    flat, w = s["flat"].to_numpy(), s["w"].to_numpy().astype(float)
+    r = np.array([kid[k] for k in zip(s["group"].to_list(), s["n"].to_list())])
+    starts = np.flatnonzero(np.r_[True, flat[1:] != flat[:-1]])
+    for T, out in ((T1, H1), (T0, H0)):
+        out.reshape(-1, grid.size)[flat[starts]] = np.add.reduceat(T[r] * w[:, None], starts, axis=0)
+    return H1, H0
+
+
+@pytest.mark.parametrize("threads", [1, 5])
+def test_expected_tables_bits(monkeypatch, threads):
+    import polars as pl
+    from epirefine import assignability as A
+    from epirefine.detection import DetectionParams
+    monkeypatch.setattr(A, "_n_threads", lambda: threads)
+    rng = np.random.default_rng(7)
+    det = {g: DetectionParams(rng.uniform(0.001, 0.1), rng.uniform(5, 200), rng.uniform(0.6, 0.99), rng.uniform(5, 50))
+           for g in range(5)}
+    n = 30_000
+    sites = pl.DataFrame({"unit": rng.integers(0, 60, n), "group": rng.integers(0, 5, n),
+                          "n": np.minimum(rng.geometric(0.02, n), 700)})
+    grid = Grid(64)
+    ref = _expected_tables_plain(sites, 60, 5, det, grid, dtype=np.float32)
+    for chunk_rows in (200_000, 300):
+        got = A.expected_tables(sites, 60, 5, det, grid, dtype=np.float32, chunk_rows=chunk_rows)
+        assert np.array_equal(got[0], ref[0]) and np.array_equal(got[1], ref[1])
+
+
+def test_asimov_threads_bits():
+    from epirefine.assignability import asimov
+    rng = np.random.default_rng(8)
+    H1, H0 = (-rng.gamma(2.0, 3.0, (50, 400, 64)).astype(np.float32) for _ in range(2))
+    phi = rng.random((50, 400))
+    assert np.array_equal(asimov(H1, H0, phi), phi[..., None] * H1 + (1 - phi[..., None]) * H0)
+
+
+def test_thread_count_follows_the_environment(monkeypatch):
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False); monkeypatch.delenv("OPENBLAS_NUM_THREADS", raising=False)
+    full = M._n_threads()
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "1")
+    assert M._n_threads() == 1
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "x"); monkeypatch.setenv("OMP_NUM_THREADS", "3")
+    assert M._n_threads() == min(3, full)
