@@ -25,7 +25,7 @@ from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
-from .model import (LOO_THREADS_MIN, FittedModel, _cores, _n_threads, logsumexp, posterior, summed_scores, unbinned_state_frequencies, unknown_logit,
+from .model import (LOO_BATCH, LOO_THREADS_MIN, FittedModel, _cores, _n_threads, logsumexp, posterior, summed_scores, unbinned_state_frequencies, unknown_logit,
                     unknown_score)
 from .motifs import (build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights,
                      specificity_ranks)
@@ -502,31 +502,44 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     for u, c in enumerate(chunk_contig):
         own_chunks.setdefault(int(c), []).append(u)
 
-    def leave_out(i):  # each binned contig writes its own rows and chunks only: the contigs run on threads
-        c = targets[i]
+    # leave-one-out scores of the binned contigs, LOO_BATCH contigs at a time in whole-array steps (each contig
+    # writes its own rows and chunks only: the batches run on threads)
+    jobs = []
+    for i, c in enumerate(targets):
+        if c not in host_set:
+            continue
         own = np.array(own_chunks.get(cid[c], []), dtype=np.int64)
         b = bin_idx[cb[c]]
         if len(own) and len(own) == bin_chunks[b]:
             sole_contig.add(c)  # leave-one-out would empty the bin: not an independent test
-            return
-        prof = model.loo_profile(b, own)
-        A_loo = model.loo_rescore(sc, i, b, own, prof=prof)
+            continue
+        jobs.append((i, b, own))
+
+    def leave_out(batch):
+        rows = np.array([i for i, _, _ in batch], np.int64)
+        bs = np.array([b for _, b, _ in batch], np.int64)
+        profs = model.loo_profiles(bs, [own for _, _, own in batch])
+        A_loo = model.loo_rescore_many(sc, rows, bs, profs)
         if refit_unknown:
-            loo[i] = (b, A_loo)
+            for k, i in enumerate(rows):
+                loo[int(i)] = (int(bs[k]), A_loo[k])
         if gate_leave_out == "contig":
             # distance between the two 95% intervals: the contig's and that of its bin without the contig
-            _, lo_b, hi_b, _ = grid.summarize(prof[0])
-            gap = np.maximum(np.maximum(phi_obs[1][i] - hi_b, lo_b - phi_obs[2][i]), 0.0)
-            diff[i] = np.where(n_sites_group[i] > 0, gap, 0.0).max()
-        if regional_leave_out == "contig" and len(own) >= 2:
-            llr_loo[own] = model.chunk_llr(own, prof)
+            _, lo_b, hi_b, _ = grid.summarize(profs)
+            gap = np.maximum(np.maximum(phi_obs[1][rows] - hi_b, lo_b - phi_obs[2][rows]), 0.0)
+            diff[rows] = np.where(n_sites_group[rows] > 0, gap, 0.0).max(1)
+        if regional_leave_out == "contig":
+            for k, (_, _, own) in enumerate(batch):
+                if len(own) >= 2:
+                    llr_loo[own] = model.chunk_llr(own, profs[k:k + 1])
+    batches = [jobs[s:s + LOO_BATCH] for s in range(0, len(jobs), LOO_BATCH)]
     binned = [i for i, c in enumerate(targets) if c in host_set]
     if table_cells < LOO_THREADS_MIN:  # small tables: Python-bound, threads only contend
-        for i in binned:
-            leave_out(i)
+        for batch in batches:
+            leave_out(batch)
     else:
         with ThreadPoolExecutor(_n_threads()) as ex:
-            list(ex.map(leave_out, binned))
+            list(ex.map(leave_out, batches))
     loo = dict(sorted(loo.items()))  # in contig order, as the loop filled it
     _log(f"leave-one-out scores: {len(binned) - len(sole_contig)} binned contigs ({len(sole_contig)} sole contigs of their bin)")
 

@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from scipy.special import expit, logsumexp
 
 from .assignability import margin_vs_competitors
-from .model import LOO_THREADS_MIN, FittedModel, _n_threads, posterior, summed_scores, unknown_logit, unknown_score
+from .model import LOO_BATCH, LOO_THREADS_MIN, FittedModel, _n_threads, posterior, summed_scores, unknown_logit, unknown_score
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -577,16 +577,20 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         for i in loo_order:
             by_key.setdefault(loo_keys[i], []).append(i)
 
-        def one_contig(frs):
-            prof = model.loo_profile(fbin[frs[0]], leave_out[frs[0]])
-            for i in frs:
-                A_own[i] = model.loo_rescore(sc, i, fbin[i], leave_out[i], prof=prof)
+        groups = list(by_key.values())
+        batches = [groups[s:s + LOO_BATCH] for s in range(0, len(groups), LOO_BATCH)]
+
+        def one_batch(batch):  # LOO_BATCH contigs: their profiles, then all their fragments, in whole-array steps
+            profs = model.loo_profiles([fbin[frs[0]] for frs in batch], [leave_out[frs[0]] for frs in batch])
+            rows = np.array([i for frs in batch for i in frs], np.int64)
+            which = np.repeat(np.arange(len(batch)), [len(frs) for frs in batch])
+            A_own[rows] = model.loo_rescore_many(sc, rows, fbin[rows], profs[which])
         if L_frag.shape[1] * L_frag.shape[2] < LOO_THREADS_MIN:  # small tables: Python-bound, threads only contend
-            for frs in by_key.values():
-                one_contig(frs)
+            for batch in batches:
+                one_batch(batch)
         else:
-            with ThreadPoolExecutor(max(1, min(_n_threads(), len(by_key)))) as ex:
-                list(ex.map(one_contig, by_key.values()))
+            with ThreadPoolExecutor(max(1, min(_n_threads(), len(batches)))) as ex:
+                list(ex.map(one_batch, batches))
         # fragments from chunks the robust model calls foreign to their bin carry a wrong label
         keep = has_rest & np.array([bool((model.w[ch] >= 0.5).all()) for ch in chunks_of])
         # the chunks' marginal tables (as large as L_chunks) were last needed by the leave-out profiles

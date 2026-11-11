@@ -509,3 +509,30 @@ def test_prefetch_cache_reads_parts(tmp_path):
     th = P._prefetch_cache(tmp_path)
     th.join(10)
     assert not th.is_alive()
+
+
+def test_loo_batched_equals_one_by_one():
+    """loo_profiles / loo_rescore_many give each unit the bits of loo_profile / loo_rescore."""
+    import copy
+    rng = np.random.default_rng(14)
+    grid = Grid(64)
+    U, Mg, H, K = 120, 9, 5, 60
+    L = _tables(rng, U, Mg)
+    chunk_bin = rng.integers(0, H, U)
+    model = M.FittedModel(L, chunk_bin, H, ["a"] * Mg, grid, 100.0)
+    model.set_unknown_params(0.05, 0.9)
+    units = _tables(rng, K, Mg)
+    sc = model.score(units)
+    bins = rng.integers(0, H, K)
+    chunks = [np.flatnonzero(chunk_bin == b)[:int(rng.integers(0, 4))] for b in bins]
+    profs = model.loo_profiles(bins, chunks)
+    sc1, sc2 = copy.deepcopy(sc), copy.deepcopy(sc)
+    A1 = []
+    for k in range(K):
+        p = model.loo_profile(bins[k], chunks[k])
+        assert np.array_equal(p[0], profs[k])
+        A1.append(model.loo_rescore(sc1, k, bins[k], chunks[k], prof=p))
+    A2 = model.loo_rescore_many(sc2, np.arange(K), bins, profs)
+    assert np.array_equal(np.array(A1), A2)
+    for f in ("S", "R", "Su"):
+        assert np.array_equal(getattr(sc1, f), getattr(sc2, f)), f
