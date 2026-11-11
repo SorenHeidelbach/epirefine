@@ -314,11 +314,15 @@ def test_site_terms_blocks_are_bit_identical():
     mu0, k0, mu1, k1 = (np.array([getattr(det[g], f) for g in (0, 1)])[grp] for f in ("mu0", "kappa0", "mu1", "kappa1"))
     whole = np.logaddexp(bb_logpmf(kf, nf, mu1, k1)[:, None] + grid.logx[None, :],
                          bb_logpmf(kf, nf, mu0, k0)[:, None] + grid.log1mx[None, :])
-    for block in (1, 7, 256, 65_536):
-        assert np.array_equal(site_terms(keys, det, grid, block=block), whole)
+    # (one logarithm per cell instead of logaddexp since 0.11: equal to rounding; blocks do not change a bit)
+    first = site_terms(keys, det, grid, block=1)
+    np.testing.assert_allclose(first, whole, rtol=1e-13)
+    for block in (7, 256, 65_536):
+        assert np.array_equal(site_terms(keys, det, grid, block=block), first)
 
 
-def test_summed_scores_same_bits_whatever_the_memory_budget():
+def test_summed_scores_same_bits_whatever_the_memory_budget(monkeypatch):
+    monkeypatch.setenv("EPIREFINE_RS", "0")  # the numpy sums (the kernel of epirefine-rs: tests/test_rs_model.py)
     """Scores don't depend on how many group blocks run at once, and equal the block-wise sums they replace."""
     from epirefine import model as md
     rng = np.random.default_rng(11)

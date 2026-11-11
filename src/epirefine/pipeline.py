@@ -9,8 +9,10 @@ number of motifs is held in memory.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -23,7 +25,7 @@ from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
-from .model import (FittedModel, logsumexp, posterior, summed_scores, unbinned_state_frequencies, unknown_logit,
+from .model import (LOO_BATCH, LOO_THREADS_MIN, FittedModel, _cores, _n_threads, logsumexp, posterior, summed_scores, unbinned_state_frequencies, unknown_logit,
                     unknown_score)
 from .motifs import (build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights,
                      specificity_ranks)
@@ -67,6 +69,59 @@ def _manifest(**kw) -> dict:
     return json.loads(json.dumps(out, default=str))
 
 
+def _cached_assembly(cache: Path, assembly):
+    """The encoded assembly of a site cache that was written from this very file (the path, size and modification
+    time its manifest holds), or None. With it, contig lengths and the motif-grouping sample are taken from the
+    cache: reading the FASTA for them is two passes over the file (2.6 GB for ZymoFecal: 12 s each when the file
+    is in memory, 160 s from a cold disk), and the encoding holds the same names, lengths and bases."""
+    try:
+        cached = json.loads((cache / "manifest.json").read_text())
+        if cached["inputs"].get("assembly") != _manifest(assembly=assembly)["assembly"]:
+            return None
+        return EncodedAssembly(cache / "asm")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _prefetch_cache(cache: Path):
+    """Read the site-cache parts of a manifest in a background thread, so that they are in the page cache when the
+    first pass over them (the motif noise filter) starts: on ZymoFecal that pass took 27 s from a cold disk and 10 s
+    from memory, and motif grouping before it leaves the disk idle for 15-40 s. Only reads (nothing is kept by this
+    process), and only when the parts fit in half the available memory. Returns the thread or None."""
+    import threading
+    try:
+        files = [cache / "sites" / Path(f).name for f in json.loads((cache / "manifest.json").read_text())["parts"]]
+        size = sum(f.stat().st_size for f in files)
+        with open("/proc/meminfo") as fh:
+            avail = next(int(ln.split()[1]) * 1024 for ln in fh if ln.startswith("MemAvailable:"))
+    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+        return None
+    if size > avail // 2:
+        return None
+
+    def read():
+        buf = bytearray(1 << 24)
+        for f in files:
+            try:
+                with open(f, "rb", buffering=0) as fh:
+                    while fh.readinto(buf):
+                        pass
+            except OSError:
+                pass
+    th = threading.Thread(target=read, daemon=True)
+    th.start()
+    return th
+
+
+_LETTERS = np.frombuffer(b"ACGTN", np.uint8)
+
+
+def _decoded(asm, names) -> dict[str, str]:
+    """Sequences of the named contigs from the encoded assembly (anything but A, C, G, T reads N, which is what
+    the motif scan makes of it)."""
+    return {c: _LETTERS[asm.seq(asm.index[c])].tobytes().decode("ascii") for c in names}
+
+
 def _same_partition(a, b) -> bool:
     """Same grouping of motifs, whatever the group numbers."""
     if len(a) != len(b):
@@ -82,8 +137,35 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
     [b, M, G] arrays are alive at once: 4.7 GB for 913 groups at 2000 units)."""
     if n:
         batch = min(batch, max(1, 200_000 // logp_fn(slice(0, 1)).shape[1]))
-    parts = [grid.summarize(logp_fn(slice(s, s + batch))) for s in range(0, n, batch)]
+    # every unit is summarised from its own row, so the batches run on threads, each a share of `batch` (together
+    # they hold what one batch held); it was one thread's pass over the tables of all contigs
+    threads = _n_threads()
+    step = max(1, batch // threads)
+    slices = [slice(s, s + step) for s in range(0, n, step)]
+    if threads <= 1 or len(slices) <= 1:
+        parts = [grid.summarize(logp_fn(sl)) for sl in slices]
+    else:
+        with ThreadPoolExecutor(threads) as ex:
+            parts = list(ex.map(lambda sl: grid.summarize(logp_fn(sl)), slices))
     return [np.concatenate([p[i] for p in parts]) for i in range(4)]
+
+
+SPILL_MIN_BYTES = 256 << 20  # tables from this size on are moved to a temporary file once only rows of them are read
+
+
+def _spill(a: np.ndarray, directory) -> np.ndarray:
+    """a as a read-only memory map of an unlinked temporary file in `directory` (the same values; its memory is freed
+    when the caller drops its last reference to the array), or a itself when it is small or the file cannot be written."""
+    if a.nbytes < SPILL_MIN_BYTES:
+        return a
+    import tempfile
+    try:
+        fh = tempfile.TemporaryFile(dir=directory)
+        a.tofile(fh)
+        fh.flush()
+        return np.memmap(fh, dtype=a.dtype, mode="r", shape=a.shape)
+    except OSError:
+        return a
 
 
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
@@ -117,7 +199,11 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     motifs = pio.read_motifs(motifs_path, log=_log)
     cb_given = pio.read_contig_bin(contig_bin, log=_log)
     pileup_first = runinfo.check_pileup_head(pileup)
-    lengths = pio.fasta_lengths(assembly)
+    asm_cached = _cached_assembly(cache, assembly)
+    if asm_cached is not None:
+        _prefetch_cache(cache)
+    lengths = (dict(zip(asm_cached.names, asm_cached.lengths.tolist())) if asm_cached is not None
+               else pio.fasta_lengths(assembly))
     cb = runinfo.match_contig_bin(cb_given, lengths, contig_bin, log=_log)
     if pileup_first not in lengths:
         _log(f"WARNING: the first contig of the pileup, {pileup_first!r}, is not in the assembly: was the pileup "
@@ -138,7 +224,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
 
     # motif groups, from the records of a random sample of the sequence
     relevant = sorted(host_set | set(targets))
-    sample = pio.fasta_subset(assembly, _sample_names(lengths, relevant, group_sample_bp, rng))
+    sample_names = _sample_names(lengths, relevant, group_sample_bp, rng)
+    sample = _decoded(asm_cached, sample_names) if asm_cached is not None else pio.fasta_subset(assembly, sample_names)
+    del asm_cached
     if strand_sites not in ("sum", "split", "auto"):
         raise ValueError(f"strand_sites must be 'sum', 'split' or 'auto', not {strand_sites!r}")
     records = build_records(sample, motifs, pairing=complement_pairs)
@@ -233,7 +321,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         _log(f"redundant motif groups: {int((group_w < 1).sum())} groups in {wtab.filter(pl.col('cluster_size') > 1)['cluster'].n_unique()} "
              f"clusters down-weighted (effective groups {group_w.sum():.0f} of {n_groups})")
     det = fit_detection_by_bin(counts_bin, dict(enumerate(group_modtype)),
-                               workers=workers or min(16, os.cpu_count() or 1))
+                               workers=workers or min(16, _cores()))
     _write(detection_table(det), out / "detection_model.tsv")
     _log("detection model fitted")
 
@@ -349,6 +437,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
 
     model = FittedModel(L_chunks, chunk_bin, H, group_modtype, grid, tau, **warm, **model_kw)
     model.set_unknown_params(*unknown_params)
+    # from here on the chunk tables are read only for the few mixed contigs of the regional step: kept in a temporary
+    # file (memory-mapped, removed when the run ends) instead of memory, next to the model's own marginal copy
+    L_chunks = _spill(L_chunks, out)
     p_foreign = 1 - model.w
     _write(pl.DataFrame({"contig": [asm.names[i] for i in chunk_contig], "start": chunk_no * chunk_size,
                          "bin": [bins[b] for b in chunk_bin], "p_foreign": p_foreign}),
@@ -358,6 +449,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # comparable shares under the alternating scheme): its chunk calls and its contigs' scores are not reliable
     unconverged = model.robust_unconverged()
     two_share, two_group = model.two_state_share()
+    _log(f"two-state screen: {int((two_group >= 0).sum())} of {H} bins with a second methylation state in a motif group")
     if unconverged.any():
         _log(f"WARNING: robust host profile did not converge for {int(unconverged.sum())} of {H} bins "
              f"({', '.join(bins[b] for b in np.flatnonzero(unconverged)[:10])}{', ...' if unconverged.sum() > 10 else ''}): "
@@ -374,6 +466,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     refit_unknown = "prior-matched" in features
     all_lp_rows = refit_unknown or unknown_prior == "unbinned" or unlisted_genome or inclusion_support != "none"
     sc = model.score(L_t, lp_rows=None if all_lp_rows else [i for i, c in enumerate(targets) if c in host_set])
+    _log(f"scores: {len(targets)} contigs against {H} bins and an unbinned genome")
     if unknown_prior == "unbinned":
         # the unbinned-genome model draws each motif group's state at the frequency seen among the unbinned
         # contigs that get a decision, not among the bins (model.unbinned_state_frequencies)
@@ -397,6 +490,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # weight with variants of the same methyltransferase keeps the interval its own sites give it
     gw = (group_w.astype(np.float64)[None, :, None] if gate_unweighted and group_weights and (group_w < 1).any() else None)
     phi_obs = _batched_summary(grid, lambda sl: L_t[sl].astype(np.float64) / (1.0 if gw is None else gw), len(targets))
+    table_cells = L_t.shape[1] * L_t.shape[2]
+    # the contigs' tables are not read after this point (the leave-one-out scores use the kept marginal rows):
+    # freed before the evidence step, where the main process had its peak (6.3 GB on ZymoFecal)
+    del L_t
     diff = np.zeros(len(targets))
     llr_loo = np.zeros(len(chunk_bin))
     sole_contig = set()
@@ -405,6 +502,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     own_chunks: dict[int, list[int]] = {}
     for u, c in enumerate(chunk_contig):
         own_chunks.setdefault(int(c), []).append(u)
+
+    # leave-one-out scores of the binned contigs, LOO_BATCH contigs at a time in whole-array steps (each contig
+    # writes its own rows and chunks only: the batches run on threads)
+    jobs = []
     for i, c in enumerate(targets):
         if c not in host_set:
             continue
@@ -413,17 +514,35 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         if len(own) and len(own) == bin_chunks[b]:
             sole_contig.add(c)  # leave-one-out would empty the bin: not an independent test
             continue
-        prof = model.loo_profile(b, own)
-        A_loo = model.loo_rescore(sc, i, b, own, prof=prof)
+        jobs.append((i, b, own))
+
+    def leave_out(batch):
+        rows = np.array([i for i, _, _ in batch], np.int64)
+        bs = np.array([b for _, b, _ in batch], np.int64)
+        profs = model.loo_profiles(bs, [own for _, _, own in batch])
+        A_loo = model.loo_rescore_many(sc, rows, bs, profs)
         if refit_unknown:
-            loo[i] = (b, A_loo)
+            for k, i in enumerate(rows):
+                loo[int(i)] = (int(bs[k]), A_loo[k])
         if gate_leave_out == "contig":
             # distance between the two 95% intervals: the contig's and that of its bin without the contig
-            _, lo_b, hi_b, _ = grid.summarize(prof[0])
-            gap = np.maximum(np.maximum(phi_obs[1][i] - hi_b, lo_b - phi_obs[2][i]), 0.0)
-            diff[i] = np.where(n_sites_group[i] > 0, gap, 0.0).max()
-        if regional_leave_out == "contig" and len(own) >= 2:
-            llr_loo[own] = model.chunk_llr(own, prof)
+            _, lo_b, hi_b, _ = grid.summarize(profs)
+            gap = np.maximum(np.maximum(phi_obs[1][rows] - hi_b, lo_b - phi_obs[2][rows]), 0.0)
+            diff[rows] = np.where(n_sites_group[rows] > 0, gap, 0.0).max(1)
+        if regional_leave_out == "contig":
+            for k, (_, _, own) in enumerate(batch):
+                if len(own) >= 2:
+                    llr_loo[own] = model.chunk_llr(own, profs[k:k + 1])
+    batches = [jobs[s:s + LOO_BATCH] for s in range(0, len(jobs), LOO_BATCH)]
+    binned = [i for i, c in enumerate(targets) if c in host_set]
+    if table_cells < LOO_THREADS_MIN:  # small tables: Python-bound, threads only contend
+        for batch in batches:
+            leave_out(batch)
+    else:
+        with ThreadPoolExecutor(_n_threads()) as ex:
+            list(ex.map(leave_out, batches))
+    loo = dict(sorted(loo.items()))  # in contig order, as the loop filled it
+    _log(f"leave-one-out scores: {len(binned) - len(sole_contig)} binned contigs ({len(sole_contig)} sole contigs of their bin)")
 
     # bin refinement: contamination of binned contigs, inclusion of unbinned ones
     given = np.array([bin_idx[cb[c]] if c in cb else -1 for c in targets])
@@ -432,7 +551,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     best_bin = np.where(given >= 0, given, sc.S.argmax(1))
     evidence, _, coverage = contig_evidence(parts, {cid[c]: i for i, c in enumerate(targets)}, best_bin, model, det,
                                             grid, float(np.median(np.atleast_1d(temperature))), min_cov,
-                                            group_weights=group_w if group_weights else None, drop_groups=drop)
+                                            group_weights=group_w if group_weights else None, drop_groups=drop, log=_log)
     _log(f"methylation evidence: {int((np.nan_to_num(evidence, nan=0.0) < min_evidence).sum())} of {len(targets)} "
          f"contigs below {min_evidence:g} (expected log BF vs a community genome)")
     # contamination calls only on contigs with enough coverage: against Hi-C on ZymoFecal, flags were
@@ -649,8 +768,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         pu0 = min(max(ref.p_unknown, 1e-3), 1 - 1e-3)
         lbl = bins + ["unknown"]
 
-        def segment_map(L_rows, nos, i):
-            sc_ = model.score(L_rows)
+        def segment_map(L_rows, nos, i, sc_=None):
+            sc_ = model.score(L_rows) if sc_ is None else sc_
             lg = np.concatenate([sc_.S / T0 + np.log((1 - pu0) / H), (sc_.Su / T0 + np.log(pu0))[:, None]], 1)
             pr = np.exp(lg - lg.max(1, keepdims=True)); pr /= pr.sum(1, keepdims=True)
             best, pbest = pr.argmax(1), pr.max(1)
@@ -661,11 +780,19 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                     runs.append(f"{lo}-{hi}:{lbl[best[start]]}({pbest[start:k].mean():.2f})")
                     start = k
             return ";".join(runs)
-        for j, u in enumerate(long_u):
-            i = tidx[u]
-            if mixed[i]:
+        # the chunks of all mixed contigs scored in one call (one call per contig cost about a second each on
+        # ZymoFecal, mostly the profiles' exponentials and per-group products, for a few chunks)
+        mixed_u = [u for u in long_u if mixed[tidx[u]]]
+        if mixed_u:
+            all_ks = np.concatenate([np.asarray(by_contig[u], np.int64) for u in mixed_u])
+            sc_all = model.score(L_chunks[all_ks])
+            at = 0
+            for u in mixed_u:
                 ks = by_contig[u]
-                seg_bins[i] = segment_map(L_chunks[ks], chunk_no[ks], i)
+                rows = slice(at, at + len(ks))
+                at += len(ks)
+                seg_bins[tidx[u]] = segment_map(None, chunk_no[ks], tidx[u],
+                                                SimpleNamespace(S=sc_all.S[rows], Su=sc_all.Su[rows]))
         if len(win):
             for u, ks in by_win.items():
                 i = tidx.get(u)

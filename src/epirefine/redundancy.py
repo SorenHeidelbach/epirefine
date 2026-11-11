@@ -13,6 +13,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
+from .model import _cores
+
 K = 21
 SCALE = 50  # keep k-mers whose hash falls in the lowest 1/SCALE of the range
 _MASK = (1 << (2 * K)) - 1
@@ -82,6 +84,6 @@ def inclusion_redundancy(asm, candidates: list[tuple[int, int]], members: dict[i
             if out[i] < max_redundancy:
                 bin_sk = np.union1d(bin_sk, sk)
 
-    with ThreadPoolExecutor(min(16, os.cpu_count() or 1)) as ex:
+    with ThreadPoolExecutor(min(16, _cores())) as ex:
         list(ex.map(work, by_bin.items()))
     return out

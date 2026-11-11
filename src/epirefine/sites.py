@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
+from .model import _cores
 from .motifs import Motif, MotifMatcher, _CODE, canonical_index, group_sizes
 
 MOD_CODE = {"a": 0, "m": 1, "21839": 2, "h": 3}
@@ -600,7 +601,7 @@ def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: l
     """Run the pileup pass. Returns the Parquet part files (each holds whole contigs)."""
     out = Path(out_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    workers = workers or min(16, os.cpu_count() or 1)
+    workers = workers or min(16, _cores())
     ranges = split_pileup(pileup, workers * 4)
     cfg = {"asm_dir": asm.directory, "motifs": [(m.seq, m.mod_pos, m.mod_type) for m in motifs],
            "group_of": list(group_of), "motif_rank": list(motif_rank), "wanted": wanted,
@@ -686,29 +687,35 @@ def _unit_part(part: str, cfg: dict) -> dict:
     from .assignability import expected_tables
     from .detection import DetectionParams
     from .grid import Grid
-    from .model import unit_loglik
+    from .model import unit_loglik_arrays
 
     grid = Grid(cfg["grid_size"])
     det = {g: DetectionParams(*p) for g, p in cfg["det"].items()}
     M = cfg["n_groups"]
-    df = pl.read_parquet(part).filter((pl.col("n") >= cfg["min_cov"]) & ~pl.col("group").is_in(cfg.get("drop_groups", [])))
+    # (one block per column, so that the numpy arrays below are views of the table and not copies next to it)
+    df = (pl.read_parquet(part).filter((pl.col("n") >= cfg["min_cov"]) & ~pl.col("group").is_in(cfg.get("drop_groups", [])))
+          .rechunk())
     cid, pos = df["contig"].to_numpy(), df["pos"].to_numpy()
     grp, n, k = df["group"].to_numpy(), df["n"].to_numpy(), df["k"].to_numpy()
+    del df
 
     def tables(units, rows, with_h):
         ids, local = np.unique(units, return_inverse=True)
-        sub = pl.DataFrame({"unit": local, "group": grp[rows], "n": n[rows], "k": k[rows]})
-        res = {"ids": ids, "L": unit_loglik(sub, len(ids), M, det, grid, dtype=np.float32),
+        del units
+        local = local.astype(np.int32) if len(ids) < 2 ** 31 else local
+        g_, n_, k_ = (grp, n, k) if len(rows) == len(grp) and not with_h else (grp[rows], n[rows], k[rows])
+        res = {"ids": ids, "L": unit_loglik_arrays(local, g_, n_, k_, len(ids), M, det, grid, dtype=np.float32),
                "n_sites": np.bincount(local, minlength=len(ids))}
-        gs = sub.group_by("unit", "group").len()
-        res["n_sites_group"] = (ids[gs["unit"].to_numpy()], gs["group"].to_numpy(), gs["len"].to_numpy())
+        count = np.bincount(local.astype(np.int64) * M + g_, minlength=len(ids) * M)  # sites per (unit, group)
+        cell = np.flatnonzero(count)
+        res["n_sites_group"] = (ids[cell // M], (cell % M).astype(np.int32), count[cell].astype(np.uint32))
         if with_h:  # expected-evidence tables: calibration fragments only
             key = (cfg["grid_size"], tuple(sorted(cfg["det"].items())))
             if key not in _EXPECTED:
                 _EXPECTED.clear()  # another model: one table per process
                 _EXPECTED[key] = {}
-            res["H"] = expected_tables(sub.select("unit", "group", "n"), len(ids), M, det, grid, dtype=np.float32,
-                                       table=_EXPECTED[key])
+            res["H"] = expected_tables(pl.DataFrame({"unit": local, "group": g_, "n": n_}), len(ids), M, det, grid,
+                                       dtype=np.float32, table=_EXPECTED[key])
         return res
 
     out = {}
@@ -750,7 +757,7 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
            "L_frag": np.zeros((n_frags, n_groups, G), np.float32),
            "H_frag": (np.zeros((n_frags, n_groups, G), np.float32), np.zeros((n_frags, n_groups, G), np.float32)),
            "frag_sites": np.zeros(n_frags, np.int64)}
-    workers = workers or min(16, os.cpu_count() or 1)
+    workers = workers or min(16, _cores())
     env = {k: os.environ.get(k) for k in ("POLARS_MAX_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")}
     os.environ.update({k: "1" for k in env})
     try:

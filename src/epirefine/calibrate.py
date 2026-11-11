@@ -30,7 +30,9 @@ from dataclasses import dataclass, field
 from scipy.special import expit, logsumexp
 
 from .assignability import margin_vs_competitors
-from .model import FittedModel, posterior, summed_scores, unknown_logit, unknown_score
+from .model import LOO_BATCH, LOO_THREADS_MIN, FittedModel, _n_threads, posterior, summed_scores, unknown_logit, unknown_score
+
+from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_LENGTHS = (2_000, 5_000, 10_000, 20_000, 50_000, 100_000)
 DEFAULT_TAUS = (3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 1e4, float("inf"))
@@ -570,23 +572,52 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     # a fragment whose contig is its whole bin has no independent profile to be scored against
     has_rest = np.array([len(lo) < bin_chunks[b] for lo, b in zip(leave_out, fbin)])
 
+    loo_keys = {int(i): (int(fbin[i]), np.asarray(leave_out[i]).tobytes()) for i in np.flatnonzero(has_rest)}
+    loo_order = sorted(loo_keys, key=lambda i: (loo_keys[i], i))
+
     def own_and_scores(model):
         sc = model.score(L_frag)
         A_own = np.zeros(L_frag.shape[:2])
-        for i in np.flatnonzero(has_rest):
-            A_own[i] = model.loo_rescore(sc, i, fbin[i], leave_out[i])
+        # fragments of one contig leave the same chunks out of the same bin: one profile for all of them
+        # (it was rebuilt for each: 4,450 fragments from 1,359 contigs on ZymoFecal); the contigs are
+        # independent (each fragment writes its own rows) and run on threads
+        by_key: dict = {}
+        for i in loo_order:
+            by_key.setdefault(loo_keys[i], []).append(i)
+
+        groups = list(by_key.values())
+        batches = [groups[s:s + LOO_BATCH] for s in range(0, len(groups), LOO_BATCH)]
+
+        def one_batch(batch):  # LOO_BATCH contigs: their profiles, then all their fragments, in whole-array steps
+            profs = model.loo_profiles([fbin[frs[0]] for frs in batch], [leave_out[frs[0]] for frs in batch])
+            rows = np.array([i for frs in batch for i in frs], np.int64)
+            which = np.repeat(np.arange(len(batch)), [len(frs) for frs in batch])
+            A_own[rows] = model.loo_rescore_many(sc, rows, fbin[rows], profs, which)
+        if L_frag.shape[1] * L_frag.shape[2] < LOO_THREADS_MIN:  # small tables: Python-bound, threads only contend
+            for batch in batches:
+                one_batch(batch)
+        else:
+            with ThreadPoolExecutor(max(1, min(_n_threads(), len(batches)))) as ex:
+                list(ex.map(one_batch, batches))
         # fragments from chunks the robust model calls foreign to their bin carry a wrong label
         keep = has_rest & np.array([bool((model.w[ch] >= 0.5).all()) for ch in chunks_of])
         # the chunks' marginal tables (as large as L_chunks) were last needed by the leave-out profiles
         # above; dropped here, the best model so far no longer holds a second copy during the next fit
+        spare[:] = [model.Lp_chunks]  # (its memory is the next fit's marginal table: written over, not re-faulted)
         model.Lp_chunks = None
         return sc, A_own, keep
+
+    spare: list = []
+
+    def fit(tau_):
+        return FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau_, **warm, **model_kw,
+                           lp_out=spare.pop() if spare else None)
 
     base = next((k for k, t in enumerate(taus) if grid.is_point(t)), len(taus) - 1)
     if "common-tau" not in features:
         tau_rows, best, warm, group_ll, group_ll_bin = [], None, {}, [], []
         for tau in taus:
-            model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau, **warm, **model_kw)
+            model = fit(tau)
             warm = {"init_w": model.w, "init_pi": model.raw_pi}  # not the model: at most two are held at once
             sc, A_own, keep = own_and_scores(model)
             ll = float(sc.S[keep, fbin[keep]].sum())
@@ -603,7 +634,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         pick = _pick_tau(group_ll, group_ll_bin, base, tau_support)
         tau_g = np.array([taus[k] for k in pick], dtype=float)
         if len(np.unique(tau_g)) > 1:
-            model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau_g, **warm, **model_kw)
+            model = fit(tau_g)
             sc, A_own, keep_g = own_and_scores(model)
             ll = float(sc.S[keep_g, fbin[keep_g]].sum())
             tau_rows.append({"tau": float("nan"), "label": "per-group", "loo_loglik": ll, "n_fragments": int(keep_g.sum())})
@@ -621,7 +652,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         tau_rows, warm, own_ll, own_A, keeps = [], {}, [], [], []
         held = None
         for k, tau in enumerate(taus):
-            model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau, **warm, **model_kw)
+            model = fit(tau)
             warm = {"init_w": model.w, "init_pi": model.raw_pi}
             sc, A_own, keep = own_and_scores(model)
             own_ll.append(sc.S[np.arange(len(fbin)), fbin].copy())
@@ -638,7 +669,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         if held[0] == k_best:
             _, sc, A_own, model = held
         else:
-            model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, taus[k_best], **warm, **model_kw)
+            model = fit(taus[k_best])
             sc, A_own, _ = own_and_scores(model)
         del held
         best = (lls[k_best], taus[k_best], sc, A_own, model, common)
@@ -649,7 +680,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         pick = _pick_tau(group_ll, group_ll_bin, base, tau_support)
         tau_g = np.array([taus[k] for k in pick], dtype=float)
         if len(np.unique(tau_g)) > 1:
-            model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau_g, **warm, **model_kw)
+            model = fit(tau_g)
             sc, A_own, keep_g = own_and_scores(model)
             both = common & keep_g
             ll = float(sc.S[both, fbin[both]].sum())
@@ -661,6 +692,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             if ll > ll_single:
                 best = (ll, tau_g, sc, A_own, model, both)
             del model
+    spare.clear()  # no fit follows: the reused table is freed as before
     tau_groups = pl.DataFrame({"group": np.arange(len(tau_g)), "tau": tau_g,
                                "loo_loglik_gain_vs_no_variation": group_ll[pick, np.arange(len(pick))] - group_ll[base]})
     _, tau, sc_best, A_own_best, best_model, keep = best
@@ -692,9 +724,10 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     # "unknown" is never checked (overconfident host calls). Decidable = expected log BF of the true
     # bin over its nearest competitor (Asimov, from site positions and coverage only) >= decidable_bf.
     decidable = np.ones(len(fbin), bool)
+    margins = None  # expected log Bayes factors at temperature 1, reused for the assignability report below
     if H_frag is not None and H > 1:
-        m_exp, _, _ = margin_vs_competitors(best_model, *H_frag, fbin, 1.0)
-        decidable = m_exp >= decidable_bf
+        margins = margin_vs_competitors(best_model, *H_frag, fbin, 1.0)
+        decidable = margins[0] >= decidable_bf
     distinct = ~f_look & decidable
     log(f"  test B uses {int(distinct.sum())} of {len(fbin)} fragments (bin decidable from its nearest competitor)")
 
@@ -848,7 +881,11 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     if H_frag is not None:
         kk = np.searchsorted(rest, kidx)
         Pa = ff.posteriors(ff.temperature_of(first_fit, kk), eta, lam, p_unknown, kk)[0]
-        margin, nearest, vs_unk = margin_vs_competitors(best_model, *H_frag, fbin, temperature)
+        # the same tables, model and fragments as for test B above: the margins there (differences of scores
+        # divided by 1) divided by the temperature are the values a second pass would compute, bit for bit
+        if margins is None:
+            margins = margin_vs_competitors(best_model, *H_frag, fbin, 1.0)
+        margin, nearest, vs_unk = margins[0] / temperature, margins[1], margins[2] / temperature
         frag_extra = {"expected_log_bf_vs_nearest": margin, "expected_log_bf_vs_unknown": vs_unk,
                       "posterior_true": Pa[np.arange(len(fbin)), fbin], "map_correct": Pa.argmax(1) == fbin}
         edges = [-np.inf, 0.5, 1, 2, 3, 5, 10, np.inf]

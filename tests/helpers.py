@@ -115,3 +115,18 @@ def differing_files(a: Path, b: Path, files=INVARIANT_FILES) -> list[str]:
 def assert_same_outputs(a: Path, b: Path, files=INVARIANT_FILES):
     diff = differing_files(a, b, files)
     assert not diff, "outputs differ:\n" + "\n".join(diff)
+
+
+def assert_same_outputs_to_rounding(a: Path, b: Path, rel: float = 1e-9):
+    """Two runs that differ in the last bits of their arithmetic (the compiled model kernels against numpy):
+    every output table equal as written (four decimals), the numbers of params.json (written in full) to `rel`."""
+    import pytest
+    assert_same_outputs(a, b, [f for f in INVARIANT_FILES if f != "params.json"])
+    pa, pb = (json.loads((Path(d) / "params.json").read_text()) for d in (a, b))
+    for key in pa:
+        if key in RUN_SPECIFIC_PARAMS:
+            continue
+        if isinstance(pa[key], float):
+            assert pb[key] == pytest.approx(pa[key], rel=rel, abs=1e-12), key
+        else:
+            assert pa[key] == pb[key], key

@@ -256,11 +256,14 @@ def fit_detection_by_bin(counts: pl.DataFrame, group_modtype: dict[int, str], un
         mu1, k1, _ = _fit_meth(*arrays(o), mu0, k0) if o.height else (DEFAULT_PRIOR.mu1, DEFAULT_PRIOR.kappa1, 1.0)
         type_p0[mt], type_p1[mt] = _theta(mu0, k0, 0.0, 0.5), _theta(mu1, k1, 0.5, 1.0)
 
+    # the rows of each (group, label) taken out in one pass (a filter of the whole table per group and label was
+    # 1,420 scans on ZymoFecal)
+    parts = agg.partition_by("group", "label", as_dict=True)
     jobs = []
     for g, mt in group_modtype.items():
-        z = agg.filter((pl.col("group") == g) & (pl.col("label") == 0))
-        o = agg.filter((pl.col("group") == g) & (pl.col("label") == 1))
-        jobs.append((g, arrays(z) if z.height else None, arrays(o) if o.height else None, type_p0[mt], type_p1[mt]))
+        z, o = parts.get((g, 0)), parts.get((g, 1))
+        jobs.append((g, arrays(z) if z is not None and z.height else None, arrays(o) if o is not None and o.height else None,
+                     type_p0[mt], type_p1[mt]))
     fits = _map(_group_fit, jobs, workers)
     n_sites = dict(counts.group_by("group").agg(pl.col("w").sum()).iter_rows())
     meth_frac = dict(lab.group_by("group").agg(
