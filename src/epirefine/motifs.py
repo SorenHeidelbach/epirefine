@@ -203,10 +203,9 @@ class MotifMatcher:
         if len(bounds) <= 2:
             return find(codes)
         from concurrent.futures import ThreadPoolExecutor
-        # threads: no more than the cores this process may run on (more only added memory: each thread keeps its
-        # own allocator arena; ZymoOral on 4 cores, 16 threads: +0.2 GB at the grouping step and slower)
-        cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else _n_threads()
-        with ThreadPoolExecutor(max(1, min(_n_threads(), cores, SCAN_THREADS, len(bounds) - 1))) as ex:
+        # threads: at most SCAN_THREADS and the cores this process may run on (_n_threads; more only added memory:
+        # each thread keeps its own allocator arena; ZymoOral on 4 cores, 16 threads: +0.2 GB at the grouping step)
+        with ThreadPoolExecutor(max(1, min(_n_threads(), SCAN_THREADS, len(bounds) - 1))) as ex:
             recs = list(ex.map(lambda ab: find(codes[ab[0]:ab[1]]), zip(bounds[:-1], bounds[1:])))
         if getattr(self, "_shape_of", None) is None:
             self._shape_of = np.zeros((len(self.motifs), 2), np.int32)

@@ -476,3 +476,16 @@ def test_motif_scan_in_pieces_same_records(monkeypatch, rs):
     got = m._find_pieces(codes, offsets, min_piece=5_000)
     for k in whole:
         assert np.array_equal(whole[k], got[k]), k
+
+
+def test_threads_follow_cpu_affinity(monkeypatch):
+    """Thread and worker counts follow the cores the process may run on, not the machine's count."""
+    import os
+    from epirefine import runinfo
+    monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
+    monkeypatch.delenv("OPENBLAS_NUM_THREADS", raising=False)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: {0, 1, 2}, raising=False)
+    monkeypatch.setattr(os, "cpu_count", lambda: 64)
+    assert M._cores() == 3 and M._n_threads() == 3 and runinfo.n_workers(None) == 3
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(40)), raising=False)
+    assert M._n_threads() == 16

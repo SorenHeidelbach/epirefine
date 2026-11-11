@@ -74,7 +74,8 @@ def begin(args: dict, log=log) -> None:
 
 
 def n_workers(workers) -> int:
-    return workers or min(16, os.cpu_count() or 1)
+    from .model import _cores
+    return workers or min(16, _cores())
 
 
 def check_inputs(args: dict) -> None:

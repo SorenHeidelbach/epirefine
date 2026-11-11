@@ -81,11 +81,20 @@ def _rs(feature: str = "model_kernels"):
     return epirefine_rs if epirefine_rs.supports("api>=1") and epirefine_rs.supports(feature) else None
 
 
+def _cores() -> int:
+    """The cores this process may run on: its CPU affinity where the platform has one (a SLURM job, taskset), not
+    the machine's count (16 threads on a 4-core allocation only competed for the cores and held more memory)."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 1
+
+
 def _n_threads():
     """Threads for the passes of this module: the cores, at most 16, and no more than OMP_NUM_THREADS or
     OPENBLAS_NUM_THREADS allow when one is set (the worker processes of the unit-table pass run with both at
     1: each of them is one thread of that pass)."""
-    n = min(16, os.cpu_count() or 1)
+    n = min(16, _cores())
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         v = os.environ.get(var, "").strip()
         if v.isdigit() and int(v) > 0:
