@@ -533,17 +533,18 @@ def group_scores(Lp: np.ndarray, log_prof: np.ndarray) -> np.ndarray:
         bm = b.max(1, keepdims=True)                          # [M, 1]
         eb = _profile_exp(b)[:, :, None]                      # [M, G, 1]
 
-        def rows(sl):
-            for s in range(sl.start, sl.stop, 256):
-                a = Lp[s:min(s + 256, sl.stop)]
+        def rows(sl):  # 32 units at a time: about 20 MB of temporaries per thread
+            for s in range(sl.start, sl.stop, 32):
+                a = Lp[s:min(s + 32, sl.stop)]
                 am = a.max(2, keepdims=True)                  # [u, M, 1]
-                e = np.ascontiguousarray(np.exp(a - am).astype(np.float64).transpose(1, 0, 2))   # [M, u, G]
+                e = np.empty((a.shape[1], len(a), a.shape[2]))   # [M, u, G] float64
+                e[...] = np.exp(a - am).transpose(1, 0, 2)    # (float32 exp, as _group_term)
                 q = np.matmul(e, eb)[:, :, 0].T               # [u, M]
                 np.log(np.maximum(q, 1e-300, out=q), out=q)
                 q += am[:, :, 0]
                 q += bm[:, 0]
                 A[s:s + len(a), 0, :] = q
-        _on_threads(rows, U, 256)
+        _on_threads(rows, U, 32)
         return A
     for m in range(M):
         A[:, :, m] = _group_term(Lp[:, m, :], log_prof[:, m, :])
@@ -1239,12 +1240,13 @@ class FittedModel:
         lp = ell + self.log_pi[None, :, :]  # host_profiles' expression (its threaded form is for one large call)
         return lp - logsumexp(lp, axis=-1, keepdims=True)
 
-    def loo_rescore_many(self, sc: Scores, rows, bins, profs: np.ndarray) -> np.ndarray:
-        """loo_rescore for units rows[f] (distinct) of bins[f] against profiles profs[f] [F, M, G], in place on sc;
-        each unit's values as loo_rescore gives them. Returns A [F, M]."""
+    def loo_rescore_many(self, sc: Scores, rows, bins, profs: np.ndarray, which=None) -> np.ndarray:
+        """loo_rescore for units rows[f] (distinct) of bins[f] against profiles profs[which[f]] ([K, M, G]; which
+        None: profs[f]), in place on sc; each unit's values as loo_rescore gives them. Returns A [F, M]."""
         rows, bins = np.asarray(rows, np.int64), np.asarray(bins, np.int64)
+        which = np.arange(len(rows)) if which is None else np.asarray(which, np.int64)
         # 8 units at a time: their [8, M, G] float64 temporaries stay small on every thread
-        A = np.concatenate([logsumexp(sc.lp(rows[s:s + 8]).astype(np.float64) + profs[s:s + 8], -1)
+        A = np.concatenate([logsumexp(sc.lp(rows[s:s + 8]).astype(np.float64) + profs[which[s:s + 8]], -1)
                             for s in range(0, len(rows), 8)]) if len(rows) else np.zeros((0, profs.shape[1]))
         sc.S[rows, bins] = A.sum(1)
         eta = self.eta if self.eta else 0.05

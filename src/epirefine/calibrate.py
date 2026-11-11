@@ -584,7 +584,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             profs = model.loo_profiles([fbin[frs[0]] for frs in batch], [leave_out[frs[0]] for frs in batch])
             rows = np.array([i for frs in batch for i in frs], np.int64)
             which = np.repeat(np.arange(len(batch)), [len(frs) for frs in batch])
-            A_own[rows] = model.loo_rescore_many(sc, rows, fbin[rows], profs[which])
+            A_own[rows] = model.loo_rescore_many(sc, rows, fbin[rows], profs, which)
         if L_frag.shape[1] * L_frag.shape[2] < LOO_THREADS_MIN:  # small tables: Python-bound, threads only contend
             for batch in batches:
                 one_batch(batch)
