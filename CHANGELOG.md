@@ -27,6 +27,18 @@ below). The ZymoFecal comparison is recorded in the dev log (`proposals/2026-11-
   file cache): pileup pass 16 s -> 3.4 s, largest worker 0.79 -> 0.62 GB, all outputs byte-identical.
 - Six training scenarios on 4 cores (site caches reused, shared machine, one run each): 508 s -> 218 s in total, peak memory
   0.58-1.01 GB -> 0.63-0.98 GB.
+- Heavy steps of large samples (`perf/heavy-steps`): unit tables from packed integer keys; calibration and final
+  scoring run their leave-one-out loops in batches on threads and reuse the marginal-table buffer between fits;
+  the per-group tau marginal in one pass; contig evidence scores each contig against its own bin only, in batches;
+  two-state share, host profiles and the motif scan of the grouping step on threads; the site cache is read ahead
+  during motif grouping; threads and workers follow the CPU affinity of the process. With `epirefine-rs`, the
+  model fits and the grouping scan also use compiled kernels (optional as before; `EPIREFINE_RS=0` switches all
+  of them off). ZymoFecal (34,878 contigs, 490 bins, 710 motif groups; site cache reused, 12 workers, kernels on,
+  idle machine): 4,785 s -> 810 s, main-process peak 31.8 -> 25.5 GB; flagged and included contigs, tau and
+  temperature identical. Without the kernels the tables are equal as written on the training scenarios; with them
+  a few printed `expected_evidence` values of a large sample differ in the fourth decimal.
+- Six training scenarios after this work (4 workers, site caches reused): 15.9 s per scenario on average
+  (36.7 s in 0.10.1), peak 0.87 GB.
 
 ### Robustness
 - Inputs are checked before the assembly is read, with messages that name the problem: a missing, empty or
