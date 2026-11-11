@@ -525,6 +525,26 @@ def group_scores(Lp: np.ndarray, log_prof: np.ndarray) -> np.ndarray:
     """A[u, h, m] = log sum_g exp(Lp[u, m, g] + log_prof[h, m, g])."""
     U, M, G = Lp.shape
     A = np.empty((U, log_prof.shape[0], M))
+    if log_prof.shape[0] == 1 and U * M * G >= 1_000_000:
+        # one profile (the community prior): _group_term's steps for all groups of a block of units at once, the
+        # products as one stacked matmul (per group the same [units, G] x [G, 1] BLAS call: the same bits). The
+        # group-by-group loop made 710 small calls per scoring (33 s over a ZymoFecal run).
+        b = log_prof[0]                                       # [M, G]
+        bm = b.max(1, keepdims=True)                          # [M, 1]
+        eb = _profile_exp(b)[:, :, None]                      # [M, G, 1]
+
+        def rows(sl):
+            for s in range(sl.start, sl.stop, 256):
+                a = Lp[s:min(s + 256, sl.stop)]
+                am = a.max(2, keepdims=True)                  # [u, M, 1]
+                e = np.ascontiguousarray(np.exp(a - am).astype(np.float64).transpose(1, 0, 2))   # [M, u, G]
+                q = np.matmul(e, eb)[:, :, 0].T               # [u, M]
+                np.log(np.maximum(q, 1e-300, out=q), out=q)
+                q += am[:, :, 0]
+                q += bm[:, 0]
+                A[s:s + len(a), 0, :] = q
+        _on_threads(rows, U, 256)
+        return A
     for m in range(M):
         A[:, :, m] = _group_term(Lp[:, m, :], log_prof[:, m, :])
     return A
