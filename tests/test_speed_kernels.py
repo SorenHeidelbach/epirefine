@@ -175,6 +175,13 @@ def test_expected_tables_bits(monkeypatch, threads):
     for chunk_rows in (200_000, 300):
         got = A.expected_tables(sites, 60, 5, det, grid, dtype=np.float32, chunk_rows=chunk_rows)
         assert np.array_equal(got[0], ref[0]) and np.array_equal(got[1], ref[1])
+    # a second call on a filled table takes its rows from the table's arrays: the same tables
+    shared = {}
+    A.expected_tables(sites, 60, 5, det, grid, dtype=np.float32, table=shared)
+    again = A.expected_tables(sites[::2], 60, 5, det, grid, dtype=np.float32, table=shared)
+    assert A._ARRAYS in shared
+    want = _expected_tables_plain(sites[::2], 60, 5, det, grid, dtype=np.float32)
+    assert np.array_equal(again[0], want[0]) and np.array_equal(again[1], want[1])
     # in batches of units: the same tables (units 60..63 have no sites)
     parts = list(A.expected_tables(sites, 64, 5, det, grid, dtype=np.float32, unit_batch=7))
     assert [p[0] for p in parts] == list(range(0, 64, 7))

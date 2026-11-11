@@ -25,6 +25,9 @@ from concurrent.futures import ThreadPoolExecutor
 from .model import FittedModel, _cell_sums, _n_threads, _on_threads, _profile_exp, mix_log, score_units
 
 
+_ARRAYS = ("arrays",)  # key of expected_tables' table under which it keeps its rows as arrays
+
+
 def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int, DetectionParams],
                     grid: Grid, n_cap: int = 500, dtype=np.float64, table: dict | None = None,
                     chunk_rows: int = 200_000, unit_batch: int | None = None, out=None):
@@ -91,8 +94,20 @@ def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[
     else:
         with ThreadPoolExecutor(threads) as ex:
             list(ex.map(fill, tasks))
-    T1 = np.stack([table[k][0] for k in keys]) if keys else None
-    T0 = np.stack([table[k][1] for k in keys]) if keys else None
+    if keys and not tasks:
+        # nothing was missing: the rows come from the whole table as arrays, stacked once per table (stacking each
+        # call's rows from the dictionary took about a second per evidence part on ZymoFecal)
+        arr = table.get(_ARRAYS)
+        if arr is None or arr[3] != len(table) - 1 or arr[4] != n_cap:
+            ks = sorted(k for k in table if k != _ARRAYS)
+            arr = (np.array([g * (n_cap + 1) + n for g, n in ks], np.int64), np.stack([table[k][0] for k in ks]),
+                   np.stack([table[k][1] for k in ks]), len(ks), n_cap)
+            table[_ARRAYS] = arr
+        at = np.searchsorted(arr[0], codes)
+        T1, T0 = arr[1][at], arr[2][at]
+    else:
+        T1 = np.stack([table[k][0] for k in keys]) if keys else None
+        T0 = np.stack([table[k][1] for k in keys]) if keys else None
     starts = np.flatnonzero(np.r_[True, flat[1:] != flat[:-1]]) if len(flat) else np.zeros(0, np.int64)
     cell = flat[starts]
     bounds = np.r_[starts, len(flat)]
@@ -247,7 +262,7 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
     expected_tables(combos.with_columns(pl.lit(0).alias("unit")), 1, model.log_prof.shape[1], det, grid,
                     dtype=np.float32, table=shared)
     if log is not None:
-        log(f"  evidence: expectation table of {len(shared)} (group, coverage) combinations")
+        log(f"  evidence: expectation table of {len([k for k in shared if k != _ARRAYS])} (group, coverage) combinations")
 
     prof_exp, phi_h = profile_exps(model.log_prof), phi_means(model)   # once for all batches
     bufs: list = []
