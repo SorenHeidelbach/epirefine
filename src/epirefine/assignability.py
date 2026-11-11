@@ -71,8 +71,14 @@ def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[
         l1, l0 = bb_logpmf(k[None, :], n, mu1, k1), bb_logpmf(k[None, :], n, mu0, k0)
         p1, p0 = np.exp(logc[None, :] + l1), np.exp(logc[None, :] + l0)
         term = mix_log(l1.ravel(), l0.ravel(), grid).reshape(l1.shape + (grid.size,))
+        # the weights of every group of the block at once; the products as before, one vector-matrix product
+        # per group (the same BLAS call, the same bits)
+        w1 = p1 / p1.sum(1, keepdims=True)
+        w0 = p0 / p0.sum(1, keepdims=True)
+        e1 = np.matmul(w1[:, None, :], term)[:, 0, :]
+        e0 = np.matmul(w0[:, None, :], term)[:, 0, :]
         for i, g in enumerate(gs):
-            table[(g, n)] = (p1[i] / p1[i].sum()) @ term[i], (p0[i] / p0[i].sum()) @ term[i]
+            table[(g, n)] = e1[i], e0[i]
     # A combination is (n + 1) x G logaddexp evaluations, about 0.5 ms: 150-200 s on one thread, one combination
     # at a time, for the 300,000 combinations of a sample with 700 groups (the largest single item of the
     # evidence step). Blocks of groups at the same n are independent and run on threads (numpy releases the GIL
