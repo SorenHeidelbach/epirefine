@@ -692,9 +692,10 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     # "unknown" is never checked (overconfident host calls). Decidable = expected log BF of the true
     # bin over its nearest competitor (Asimov, from site positions and coverage only) >= decidable_bf.
     decidable = np.ones(len(fbin), bool)
+    margins = None  # expected log Bayes factors at temperature 1, reused for the assignability report below
     if H_frag is not None and H > 1:
-        m_exp, _, _ = margin_vs_competitors(best_model, *H_frag, fbin, 1.0)
-        decidable = m_exp >= decidable_bf
+        margins = margin_vs_competitors(best_model, *H_frag, fbin, 1.0)
+        decidable = margins[0] >= decidable_bf
     distinct = ~f_look & decidable
     log(f"  test B uses {int(distinct.sum())} of {len(fbin)} fragments (bin decidable from its nearest competitor)")
 
@@ -848,7 +849,11 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     if H_frag is not None:
         kk = np.searchsorted(rest, kidx)
         Pa = ff.posteriors(ff.temperature_of(first_fit, kk), eta, lam, p_unknown, kk)[0]
-        margin, nearest, vs_unk = margin_vs_competitors(best_model, *H_frag, fbin, temperature)
+        # the same tables, model and fragments as for test B above: the margins there (differences of scores
+        # divided by 1) divided by the temperature are the values a second pass would compute, bit for bit
+        if margins is None:
+            margins = margin_vs_competitors(best_model, *H_frag, fbin, 1.0)
+        margin, nearest, vs_unk = margins[0] / temperature, margins[1], margins[2] / temperature
         frag_extra = {"expected_log_bf_vs_nearest": margin, "expected_log_bf_vs_unknown": vs_unk,
                       "posterior_true": Pa[np.arange(len(fbin)), fbin], "map_correct": Pa.argmax(1) == fbin}
         edges = [-np.inf, 0.5, 1, 2, 3, 5, 10, np.inf]

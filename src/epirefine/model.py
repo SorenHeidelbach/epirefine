@@ -125,6 +125,33 @@ def unit_loglik(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int,
     return out.reshape(n_units, n_groups, grid.size)
 
 
+def _stack_product(e: np.ndarray, Tt: np.ndarray) -> np.ndarray:
+    """e @ Tt for e [units, groups, G], with the bits of numpy's stacked product (one [groups, G] x [G, G]
+    product per unit, one after another: 27 of the 30 s marginalize_unit took on 30,479 chunks x 710 groups).
+
+    One product over all rows at once runs on the BLAS threads, but a BLAS library may sum a product of small
+    matrices in another order than a large one (OpenBLAS does, below about a million multiplications): then
+    the rows of the two forms differ in their last bits. So the forms are compared on the first units (as many
+    as make the single product a large one); when they agree the single product is used, otherwise the
+    per-unit products, in unit slices on threads.
+    """
+    n, Mm, G = e.shape
+    k = min(n, max(3, -(-4_000_000 // max(1, Mm * G * Tt.shape[1]))))
+    head = e[:k] @ Tt
+    flat = (e[:k].reshape(-1, G) @ Tt).reshape(head.shape)
+    if k == n:
+        return head
+    if np.array_equal(head, flat):
+        return (e.reshape(-1, G) @ Tt).reshape(n, Mm, Tt.shape[1])
+    q = np.empty((n, Mm, Tt.shape[1]), np.result_type(e, Tt))
+    q[:k] = head
+
+    def rows(sl):
+        np.matmul(e[k:][sl], Tt, out=q[k:][sl])
+    _on_threads(rows, n - k, 8)
+    return q
+
+
 def marginalize_unit(L: np.ndarray, T, batch: int = 2048) -> np.ndarray:
     """Lp[..., i] = log sum_j T[i, j] exp(L[..., j]); keeps the dtype of L, works in unit batches.
 
@@ -132,10 +159,10 @@ def marginalize_unit(L: np.ndarray, T, batch: int = 2048) -> np.ndarray:
     groups have different between-unit variation (per-group tau).
 
     Per batch, the element-wise passes (max, exp before the product; floor, log, shift after it) run on
-    threads over row slices; the matrix product is the same single call over the whole batch as before, so
-    every value has the same bits. They were one thread's work for the whole table (1.4 billion cells for
-    30,479 chunks x 710 groups: 30 s of the 210 s each calibration model took). With an identity matrix (no
-    between-unit variation) the product returns its input and is skipped.
+    threads over row slices, and so does the matrix product (_stack_product). All of it was one thread's work
+    (1.4 billion cells for 30,479 chunks x 710 groups: 30 s of the 210 s each calibration model took), with
+    the same bits. With an identity matrix (no between-unit variation) the product returns its input and is
+    skipped.
     """
     out = np.empty_like(L)
     parts = [(slice(None), T)] if isinstance(T, np.ndarray) else T
@@ -153,7 +180,7 @@ def marginalize_unit(L: np.ndarray, T, batch: int = 2048) -> np.ndarray:
                 np.subtract(x[sl], mx[sl], out=e[sl])
                 np.exp(e[sl], out=e[sl])
             _on_threads(before, len(x), 16)
-            q = e if identity else e @ Tt
+            q = e if identity else _stack_product(e, Tt)
             dst = out[s:s + batch] if isinstance(ms, slice) else None
 
             def after(sl):
@@ -186,8 +213,8 @@ def bin_loglik(Lp_chunks: np.ndarray, chunk_bin: np.ndarray, n_bins: int, w: np.
 
     Bins are summed on threads (each bin is one product over its own chunks, as before: same bits), as many
     at once as keep the float64 copies of their chunks within BIN_BYTES (the largest bin sets the number)."""
-    ell = np.zeros((n_bins,) + Lp_chunks.shape[1:])
     w = np.ones(len(chunk_bin)) if w is None else w
+    ell = np.zeros((n_bins,) + Lp_chunks.shape[1:])
     order = np.argsort(chunk_bin, kind="stable")
     bounds = np.searchsorted(chunk_bin[order], np.arange(n_bins + 1))
 
@@ -207,21 +234,62 @@ def bin_loglik(Lp_chunks: np.ndarray, chunk_bin: np.ndarray, n_bins: int, w: np.
     return ell
 
 
-def npmle(ell: np.ndarray, iters: int = 300, tol: float = 1e-6, init: np.ndarray | None = None) -> np.ndarray:
+def npmle(ell: np.ndarray, iters: int = 300, tol: float = 1e-6, init: np.ndarray | None = None,
+          blocks: int | None = None, round_iters: int = 10) -> np.ndarray:
     """Grid NPMLE of pi[m, g] from ell[b, m, g] by EM, all groups at once.
 
     Stops when no cell moves by more than `tol`; `init` warm-starts from an earlier solution.
+
+    Groups do not interact, except through the stopping rule (the largest move over all groups). All groups
+    in one array were one thread's work (17 s per fit for 490 bins x 710 groups, 86 s of the 165 s a
+    calibration model took). The groups are therefore iterated in `blocks` blocks (default: 8),
+    on threads, `round_iters` iterations at a time; the largest move per iteration is collected over the
+    blocks after each round and the state of the first iteration that meets `tol` is returned: per group the
+    same products as before, the same stop, the same bits.
     """
     B, M, G = ell.shape
     lik = np.exp(ell - ell.max(-1, keepdims=True)).transpose(1, 0, 2).copy()  # M, B, G
     pi = np.full((M, G), 1.0 / G) if init is None else init.copy()
-    for _ in range(iters):
-        denom = np.maximum(np.matmul(lik, pi[:, :, None])[:, :, 0], 1e-300)  # [M, B]
-        new = np.maximum(pi * np.matmul((1.0 / denom)[:, None, :], lik)[:, 0, :] / B, 1e-300)
-        delta = np.abs(new - pi).max()
-        pi = new
-        if delta < tol:
-            break
+    n_blocks = min(8, _n_threads()) if blocks is None else blocks  # more threads than 8 wait for each other
+    if M * B * G < 200_000:  # small tables: the threads cost more than they save
+        n_blocks = 1
+    per_block = -(-M // max(1, min(n_blocks, M)))
+    blocks = [slice(s, s + per_block) for s in range(0, M, per_block)]
+    threads = min(_n_threads(), len(blocks))
+    if len(blocks) <= 1:
+        for _ in range(iters):
+            denom = np.maximum(np.matmul(lik, pi[:, :, None])[:, :, 0], 1e-300)  # [M, B]
+            new = np.maximum(pi * np.matmul((1.0 / denom)[:, None, :], lik)[:, 0, :] / B, 1e-300)
+            delta = np.abs(new - pi).max()
+            pi = new
+            if delta < tol:
+                break
+        return pi
+    snaps = np.empty((round_iters, M, G))
+    deltas = np.empty((len(blocks), round_iters))
+
+    def advance(j, n):
+        sl = blocks[j]
+        lk, p = lik[sl], pi[sl]
+        for i in range(n):
+            denom = np.maximum(np.matmul(lk, p[:, :, None])[:, :, 0], 1e-300)
+            new = np.maximum(p * np.matmul((1.0 / denom)[:, None, :], lk)[:, 0, :] / B, 1e-300)
+            deltas[j, i] = np.abs(new - p).max()
+            snaps[i, sl] = new
+            p = new
+
+    with ThreadPoolExecutor(max(1, threads)) as ex:
+        done = 0
+        while done < iters:
+            n = min(round_iters, iters - done)
+            list(ex.map(lambda j: advance(j, n), range(len(blocks))))
+            moved = deltas[:, :n].max(0)
+            hit = np.flatnonzero(moved < tol)
+            last = int(hit[0]) if len(hit) else n - 1
+            pi = snaps[last].copy()
+            if len(hit):
+                break
+            done += n
     return pi
 
 

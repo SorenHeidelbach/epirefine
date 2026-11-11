@@ -83,3 +83,41 @@ def test_outlier_responsibility_bits():
     m._s_out = None
     for batch in (None, 7):
         assert np.array_equal(m._outlier_responsibility(eps, batch=batch), ref)
+
+
+def _npmle_plain(ell, iters=300, tol=1e-6, init=None):
+    B, Mg, G = ell.shape
+    lik = np.exp(ell - ell.max(-1, keepdims=True)).transpose(1, 0, 2).copy()
+    pi = np.full((Mg, G), 1.0 / G) if init is None else init.copy()
+    for _ in range(iters):
+        denom = np.maximum(np.matmul(lik, pi[:, :, None])[:, :, 0], 1e-300)
+        new = np.maximum(pi * np.matmul((1.0 / denom)[:, None, :], lik)[:, 0, :] / B, 1e-300)
+        delta = np.abs(new - pi).max()
+        pi = new
+        if delta < tol:
+            break
+    return pi
+
+
+@pytest.mark.parametrize("tol", [1e-6, 1e-3, 1e-2])
+def test_npmle_blocks_bits(monkeypatch, tol):
+    """Blocks of groups on threads, with the stop taken over all groups: the bits of the single loop, whether
+    the fit stops inside a round, at its end, or at the iteration cap."""
+    rng = np.random.default_rng(5)
+    ell = -rng.gamma(2.0, 3.0, (100, 37, 64)) * rng.integers(1, 40, (100, 37, 1))
+    monkeypatch.setattr(M, "_n_threads", lambda: 4)
+    for iters in (300, 7):
+        for kw in (dict(blocks=37), dict(blocks=5, round_iters=3), dict(blocks=4), dict()):
+            ref = _npmle_plain(ell, iters, tol)
+            assert np.array_equal(M.npmle(ell, iters, tol, **kw), ref)
+            assert np.array_equal(M.npmle(ell * 1.1, iters, tol, init=ref, **kw), _npmle_plain(ell * 1.1, iters, tol, init=ref))
+
+
+@pytest.mark.parametrize("U,Mg", [(700, 11), (40, 300), (5, 1), (500, 1)])
+def test_stack_product_bits(U, Mg):
+    """The three ways _stack_product takes (all units in the comparison; one product over all rows; per-unit
+    products on threads) return numpy's stacked product."""
+    rng = np.random.default_rng(6)
+    e = np.exp(-rng.gamma(2.0, 5.0, (U, Mg, 64))).astype(np.float32)
+    Tt = Grid(64).transition(30.0).T.astype(np.float32)
+    assert np.array_equal(M._stack_product(e, Tt), e @ Tt)
