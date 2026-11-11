@@ -83,6 +83,21 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--min-jaccard", type=float, default=0.9,
                    help="merge motifs whose site sets overlap this much (Jaccard); positions shared by motifs "
                         "of different groups go to the most specific group")
+    g.add_argument("--noise-max-off-share", type=float, default=1.0,
+                   help="call a motif group noise only when at most this share of the bins that measure it leave it "
+                        "unmethylated (a real motif is off in most genomes, a caller leak in none; 1 = not used)")
+    g.add_argument("--shared-sites", choices=["sample", "motif"], default="sample",
+                   help="which group gets a position that motifs of several groups match: the group with the fewest "
+                        "occurrences in the sampled sequence (sample), or the one whose motif is least frequent in "
+                        "random sequence (motif; independent of the sample and the seed)")
+    g.add_argument("--complement-pairs", choices=["sequence", "position", "separate"], default="sequence",
+                   help="a motif and its reverse complement in the motif list: one two-strand site per occurrence, paired "
+                        "by sequence (sequence), paired only when each has a single modified position (position), or "
+                        "kept as two motifs with single-strand sites (separate)")
+    g.add_argument("--strand-sites", choices=["sum", "split", "auto"], default="sum",
+                   help="reads of the two strands at one occurrence of a palindrome or complement pair: summed into one "
+                        "site (sum), kept as one site per strand (split), or summed unless the strands can differ: "
+                        "complement pairs, and occurrences where one strand is also a site of another motif group (auto)")
     g.add_argument("--group-sample-mb", type=float, default=50,
                    help="Mb of sequence sampled to measure motif overlap for grouping")
 
@@ -146,7 +161,9 @@ def main(argv=None):
                 frags_per_bin=a.frags_per_bin, frag_budget=a.frag_budget, tau=a.tau, temperature=a.temperature,
                 contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, min_jaccard=a.min_jaccard,
                 variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
-                cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed)
+                cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed, shared_sites=a.shared_sites,
+                complement_pairs=a.complement_pairs, strand_sites=a.strand_sites,
+                noise_max_off_share=a.noise_max_off_share)
         except InputError as e:
             # a problem with the inputs or options: the message says what; no traceback needed
             log(f"ERROR: {e}")

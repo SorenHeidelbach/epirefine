@@ -399,10 +399,20 @@ class _Worker:
     def __init__(self, cfg: dict):
         self.asm = EncodedAssembly(cfg["asm_dir"])
         self.motifs = [Motif(*m) for m in cfg["motifs"]]
-        self.matcher = MotifMatcher(self.motifs)
+        self.matcher = MotifMatcher(self.motifs, cfg.get("pairing", "sequence"))
+        # strand_sites: "sum" = one site per occurrence of a palindrome or complement pair (strands summed);
+        # "split" = every record its own site; "auto" = summed unless the strands can differ for a known reason:
+        # the occurrence belongs to a complement pair (two motifs, possibly two enzymes), or its two records are
+        # matched by different numbers of groups (one strand is also another motif's site, e.g. the A of ATCGATC
+        # that Dam methylates on one strand only)
+        self.strand_sites = cfg.get("strand_sites", "sum")
+        canon = self.matcher.canon
+        paired = np.bincount(canon, minlength=len(self.motifs)) > 1
+        self.pair = paired[canon]  # motif is half of a complement pair
         self.group = np.array(cfg["group_of"], np.int32)
         self.rank = np.array(cfg["motif_rank"], np.int64)
-        self.gsize = np.array(group_sizes(cfg["group_of"], cfg["motif_rank"]), np.int64)
+        # order of the groups for shared positions: summed record counts, or the given ranks (motifs.specificity_ranks)
+        self.gsize = np.array(cfg.get("group_rank") or group_sizes(cfg["group_of"], cfg["motif_rank"]), np.int64)
         self.modc = np.array([MOD_CODE.get(m.mod_type, 3) for m in self.motifs], np.int64)
         self.wanted = cfg["wanted"]  # contig ids to keep (None = all)
         self.sep = int(max(len(m.seq) for m in self.motifs))
@@ -416,19 +426,34 @@ class _Worker:
             codes[o:o + len(s)] = s
         rec = self.matcher.find(codes)
         if not len(rec["pos"]):
-            return pl.DataFrame(schema={"key": pl.Int64, "group": pl.Int32, "site": pl.Int64})
+            return pl.DataFrame(schema={"key": pl.Int64, "group": pl.Int32, "site": pl.Int64, "half": pl.Boolean})
         cidx = np.searchsorted(offsets, rec["pos"], side="right") - 1
         pos = rec["pos"] - offsets[cidx]
         occ = rec["occ"] - 2 * offsets[cidx]
         mi = rec["motif"]
         key = (cidx.astype(np.int64) << 36) | (pos << 3) | (rec["strand"].astype(np.int64) << 2) | self.modc[mi]
         g = self.group[mi]
+        # a site is the occurrence of the canonical motif (both strands of a palindrome or of a complement pair), or
+        # the record itself (position, strand, modification type; bit 62 keeps the two kinds of id apart)
+        occ_site = (cidx.astype(np.int64) << 50) | (rec["occ_motif"].astype(np.int64) << 36) | occ
+        rec_site = (1 << 62) | (cidx.astype(np.int64) << 50) | (key & ((1 << 36) - 1))
         df = pl.DataFrame({"key": key, "group": g, "gsize": self.gsize[g], "rank": self.rank[mi], "motif": mi,
-                           "site": (cidx.astype(np.int64) << 50) | (rec["occ_motif"].astype(np.int64) << 36) | occ})
+                           "site": rec_site if self.strand_sites == "split" else occ_site})
+        if self.strand_sites == "auto":
+            df = df.with_columns(pl.Series("rec_site", rec_site), pl.Series("pair", self.pair[mi]),
+                                 pl.col("group").n_unique().over("key").alias("n_groups"))
         # same rules as motifs.assign_sites: most specific group, then its most general motif
-        return (df.sort(["key", "gsize", "group", "rank", "motif"], descending=[False, False, False, True, False])
-                .unique(subset="key", keep="first")
-                .select("key", "group", "site"))
+        df = (df.sort(["key", "gsize", "group", "rank", "motif"], descending=[False, False, False, True, False])
+              .unique(subset="key", keep="first", maintain_order=True))
+        if self.strand_sites == "auto":
+            uneven = pl.col("n_groups").min().over("site") != pl.col("n_groups").max().over("site")
+            # half: a single-strand site cut out of an occurrence that has a record on each strand
+            df = (df.with_columns((pl.col("pair") | uneven).alias("cut"), (pl.len().over("site") > 1).alias("two"))
+                  .with_columns(pl.when("cut").then(pl.col("rec_site")).otherwise(pl.col("site")).alias("site"),
+                                (pl.col("cut") & pl.col("two")).alias("half")))
+        else:
+            df = df.with_columns(pl.lit(False).alias("half"))
+        return df.select("key", "group", "site", "half")
 
     def process(self, pile: pl.DataFrame, seen: set) -> pl.DataFrame | None:
         names = pile["contig"].unique(maintain_order=True).to_list()
@@ -458,10 +483,16 @@ class _Worker:
         if not hit.height:
             return None
         agg = hit.group_by("site").agg(pl.col("group").first(), (pl.col("key") // 8).min().alias("pk"),
-                                       pl.col("n_valid").sum().alias("n"), pl.col("n_mod").sum().alias("k"))
-        cid = np.array(cids, np.int32)[(agg["site"].to_numpy() >> 50)]
-        return pl.DataFrame({"contig": cid, "group": agg["group"], "pos": agg["pk"].to_numpy() & ((1 << 33) - 1),
-                             "n": agg["n"], "k": agg["k"]}).cast(SITE_SCHEMA)
+                                       pl.col("n_valid").sum().alias("n"), pl.col("n_mod").sum().alias("k"),
+                                       pl.col("half").first())
+        cid = np.array(cids, np.int32)[(agg["site"].to_numpy() >> 50) & 0xFFF]
+        out = pl.DataFrame({"contig": cid, "group": agg["group"], "pos": agg["pk"].to_numpy() & ((1 << 33) - 1),
+                            "n": agg["n"], "k": agg["k"]}).cast(SITE_SCHEMA)
+        if self.strand_sites == "auto":
+            # one more column in this mode only: the site holds one strand of a two-strand occurrence, so that
+            # contig coverage (median reads per site) can still be counted per occurrence
+            out = out.with_columns(agg["half"].cast(pl.Int8).alias("half"))
+        return out
 
 
 def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, block: int, flush_rows: int):
@@ -514,14 +545,17 @@ def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, bloc
 
 def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: list[int], motif_rank,
                   out_dir, wanted: set[int] | None = None, workers: int | None = None,
-                  block: int = 128 << 20, flush_rows: int = 20_000_000, log=print) -> list[str]:
+                  block: int = 128 << 20, flush_rows: int = 20_000_000, log=print, group_rank=None,
+                  pairing: str = "sequence", strand_sites: str = "sum") -> list[str]:
     """Run the pileup pass. Returns the Parquet part files (each holds whole contigs)."""
     out = Path(out_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     workers = workers or min(16, os.cpu_count() or 1)
     ranges = split_pileup(pileup, workers * 4)
     cfg = {"asm_dir": asm.directory, "motifs": [(m.seq, m.mod_pos, m.mod_type) for m in motifs],
-           "group_of": list(group_of), "motif_rank": list(motif_rank), "wanted": wanted}
+           "group_of": list(group_of), "motif_rank": list(motif_rank), "wanted": wanted,
+           "group_rank": list(group_rank) if group_rank is not None else None,
+           "pairing": pairing, "strand_sites": strand_sites}
     log(f"  pileup pass: {len(ranges)} byte ranges on {min(workers, len(ranges))} workers")
     env_before = os.environ.get("POLARS_MAX_THREADS")
     os.environ["POLARS_MAX_THREADS"] = "1"
