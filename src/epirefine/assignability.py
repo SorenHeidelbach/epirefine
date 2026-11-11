@@ -147,14 +147,19 @@ def margin_vs_competitors(model: FittedModel, H1, H0, truth: np.ndarray, tempera
     return vs_bin, nearest, vs_unk
 
 
-def own_scores(Lp: np.ndarray, log_prof: np.ndarray, t: np.ndarray, batch: int = 64) -> np.ndarray:
+def profile_exps(log_prof: np.ndarray):
+    """(max over the grid [H, M], _profile_exp [H, M, G]) of a model's profiles, for own_scores: the same for every
+    call on one model (22 million exponentials on ZymoFecal, about 0.2 s, once per evidence batch before)."""
+    return log_prof.max(-1), _profile_exp(log_prof)
+
+
+def own_scores(Lp: np.ndarray, log_prof: np.ndarray, t: np.ndarray, batch: int = 64, prof_exp=None) -> np.ndarray:
     """score_units(Lp, log_prof)[u, t[u]] without scoring the other bins: the same terms per group,
     log(exp(a - max a) . exp(b - max b)) + max a + max b, with the dot product taken for the unit's own bin only
     (H times less work; the sums run in another order than in the matrix product, so the score agrees with
     score_units to rounding, about 1e-15 relative)."""
     U = len(Lp)
-    bm = log_prof.max(-1)                       # [H, M]
-    eb = _profile_exp(log_prof)                 # [H, M, G] (cells < 1e-250 as 0: see model._profile_exp)
+    bm, eb = profile_exps(log_prof) if prof_exp is None else prof_exp   # [H, M], [H, M, G] (cells < 1e-250 as 0)
     out = np.empty(U)
 
     def rows(sl):
@@ -171,18 +176,20 @@ def own_scores(Lp: np.ndarray, log_prof: np.ndarray, t: np.ndarray, batch: int =
     return out
 
 
-def margin_vs_unknown(model: FittedModel, H1, H0, truth: np.ndarray, temperature: float, batch: int = 2000):
+def margin_vs_unknown(model: FittedModel, H1, H0, truth: np.ndarray, temperature: float, batch: int = 2000,
+                      prof_exp=None, phi_h=None):
     """(b) of margin_vs_competitors alone: the expected log BF of the true bin over unknown, with only the true
     bin scored (own_scores) instead of every bin."""
     U = len(truth)
     vs_unk = np.zeros(U)
-    phi_h = phi_means(model)
+    phi_h = phi_means(model) if phi_h is None else phi_h
+    prof_exp = profile_exps(model.log_prof) if prof_exp is None else prof_exp
     for s in range(0, U, batch):
         sl = slice(s, s + batch)
         t = truth[sl]
         Lp = model.marginal(asimov(H1[sl], H0[sl], phi_h[t]))
         Su = score_units(Lp, model.log_pi[None])[:, 0]
-        vs_unk[sl] = (own_scores(Lp, model.log_prof, t) - Su) / temperature
+        vs_unk[sl] = (own_scores(Lp, model.log_prof, t, prof_exp=prof_exp) - Su) / temperature
     return vs_unk
 
 
@@ -228,6 +235,8 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
     if log is not None:
         log(f"  evidence: expectation table of {len(shared)} (group, coverage) combinations")
 
+    prof_exp, phi_h = profile_exps(model.log_prof), phi_means(model)   # once for all batches
+
     def evaluate(sites: pl.DataFrame):
         sites = sites.filter(pl.col("contig").is_in(want))
         if not sites.height:
@@ -255,7 +264,8 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
                 b, _, u = margin_vs_competitors(model, H1, H0, truth[ub], temperature, batch=EVIDENCE_BATCH)
                 vs_bin[ub], vs_unk[ub] = b, u   # each contig is evaluated in exactly one call
             else:
-                vs_unk[ub] = margin_vs_unknown(model, H1, H0, truth[ub], temperature, batch=EVIDENCE_BATCH)
+                vs_unk[ub] = margin_vs_unknown(model, H1, H0, truth[ub], temperature, batch=EVIDENCE_BATCH,
+                                               prof_exp=prof_exp, phi_h=phi_h)
             del H1, H0
 
     done = [0]
