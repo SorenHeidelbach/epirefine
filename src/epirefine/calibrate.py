@@ -69,10 +69,15 @@ FEATURES = {
 # act), prior-matched (same fits as prior-averaged, with a feedback loop between p_unknown and the fit),
 # conservative-temperature (useful without full-test-b; with it the rule only costs inclusions).
 COHERENT = ("temper-then-mix", "prior-averaged", "full-test-b", "common-tau", "em-priors")
+# The default since 0.11: the features of the proposal that change no decision on any development set and
+# correct confirmed defects of the 0.10 calibration (the order of tempering and mixing, tau compared over
+# different fragment sets, a flat prior on p_unknown, a contamination rate estimated before the gate).
+CONSISTENT = ("temper-then-mix", "common-tau", "em-priors")
 
 
 def parse_features(spec) -> frozenset:
-    """'legacy', 'coherent', or a comma-separated list of FEATURES (optionally added to 'coherent'/'legacy')."""
+    """'legacy' (the calibration of 0.10), 'consistent' (CONSISTENT, the default), 'coherent' (COHERENT), or a
+    comma-separated list of FEATURES, optionally after one of the three names ('-name' removes a feature)."""
     if spec is None:
         return frozenset()
     if not isinstance(spec, str):
@@ -83,12 +88,14 @@ def parse_features(spec) -> frozenset:
             continue
         if tok == "coherent":
             out |= set(COHERENT)
+        elif tok == "consistent":
+            out |= set(CONSISTENT)
         elif tok.startswith("-") and tok[1:] in FEATURES:
             out.discard(tok[1:])
         elif tok in FEATURES:
             out.add(tok)
         else:
-            raise ValueError(f"unknown calibration feature {tok!r}; choose from legacy, coherent, {', '.join(FEATURES)}")
+            raise ValueError(f"unknown calibration feature {tok!r}; choose from legacy, consistent, coherent, {', '.join(FEATURES)}")
     if {"prior-averaged", "prior-matched"} <= out:
         raise ValueError("prior-averaged and prior-matched exclude each other")
     return frozenset(out)

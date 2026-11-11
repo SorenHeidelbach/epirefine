@@ -95,9 +95,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         regional_tempered=False, gate_leave_out="none", gate_unweighted=False, eps_gated=False,
         redundancy_order="sequential", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all",
         unknown_prior="bins", unknown_prior_strength=5.0,
-        calibration="legacy"):
-    """calibration: 'legacy' (the calibration of 0.10), 'coherent', or a comma-separated list of
-    calibrate.FEATURES; see calibrate.parse_features."""
+        calibration="consistent"):
+    """calibration: 'consistent' (default), 'legacy' (the calibration of 0.10), 'coherent', or a comma-separated
+    list of calibrate.FEATURES; see calibrate.parse_features."""
     args = dict(locals())  # first statement: the options as given
     runinfo.begin(args, _log)  # first log lines (version, command, inputs) and option ranges, before any work
     # the inputs are checked before anything is read or written: a missing file or a wrong table must not
