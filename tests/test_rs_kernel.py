@@ -45,10 +45,11 @@ def _site_rows(run) -> pl.DataFrame:
 @needs_rs
 def test_kernel_and_python_pass_give_the_same_sites_and_outputs(community, tmp_path, monkeypatch, many_ranges):
     """Same site rows (values and types) and the same output files, on a pileup read in several ranges."""
+    kernel_sites = dict(shared_sites="sample", complement_pairs="sequence", strand_sites="sum")  # what it implements
     monkeypatch.setenv("EPIREFINE_RS", "0")
-    py = run_pipeline(**community.args(tmp_path / "py"), workers=2)
+    py = run_pipeline(**community.args(tmp_path / "py"), workers=2, **kernel_sites)
     monkeypatch.setenv("EPIREFINE_RS", "1")
-    rs = run_pipeline(**community.args(tmp_path / "rs"), workers=2)
+    rs = run_pipeline(**community.args(tmp_path / "rs"), workers=2, **kernel_sites)
     assert "epirefine-rs" in rs.log and "epirefine-rs" not in py.log
     a, b = _site_rows(py), _site_rows(rs)
     assert a.schema == b.schema and a.equals(b)
