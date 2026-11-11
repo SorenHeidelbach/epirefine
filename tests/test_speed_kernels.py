@@ -240,3 +240,23 @@ def test_batched_summary_threads_bits(monkeypatch):
         monkeypatch.setattr(P, "_n_threads", lambda: threads)
         got = P._batched_summary(grid, lambda sl: L[sl].astype(np.float64), len(L), batch=50)
         assert all(np.array_equal(a, b) for a, b in zip(got, whole))
+
+
+def test_lengths_and_sample_from_the_cached_assembly(community, base_run, tmp_path):
+    """With a site cache written from the same assembly file, contig lengths and the grouping sample come from
+    its encoding: the same lengths in the same order, the same motif records, and no cache for another file."""
+    import shutil
+    import epirefine.pipeline as P
+    from epirefine import io as pio
+    from epirefine.motifs import build_records
+    args = community.args("unused")
+    asm = P._cached_assembly(base_run.out / "cache", args["assembly"])
+    assert asm is not None
+    lengths = pio.fasta_lengths(args["assembly"])
+    assert list(zip(asm.names, asm.lengths.tolist())) == list(lengths.items())
+    names = list(lengths)[::2]
+    motifs = pio.read_motifs(args["motifs_path"])
+    assert build_records(P._decoded(asm, names), motifs).equals(build_records(pio.fasta_subset(args["assembly"], names), motifs))
+    other = shutil.copy(args["assembly"], tmp_path / "copy.fasta")          # another path: not this cache's file
+    assert P._cached_assembly(base_run.out / "cache", other) is None
+    assert P._cached_assembly(tmp_path / "no_cache", args["assembly"]) is None

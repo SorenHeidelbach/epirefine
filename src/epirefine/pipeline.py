@@ -67,6 +67,29 @@ def _manifest(**kw) -> dict:
     return json.loads(json.dumps(out, default=str))
 
 
+def _cached_assembly(cache: Path, assembly):
+    """The encoded assembly of a site cache that was written from this very file (the path, size and modification
+    time its manifest holds), or None. With it, contig lengths and the motif-grouping sample are taken from the
+    cache: reading the FASTA for them is two passes over the file (2.6 GB for ZymoFecal: 12 s each when the file
+    is in memory, 160 s from a cold disk), and the encoding holds the same names, lengths and bases."""
+    try:
+        cached = json.loads((cache / "manifest.json").read_text())
+        if cached["inputs"].get("assembly") != _manifest(assembly=assembly)["assembly"]:
+            return None
+        return EncodedAssembly(cache / "asm")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+_LETTERS = np.frombuffer(b"ACGTN", np.uint8)
+
+
+def _decoded(asm, names) -> dict[str, str]:
+    """Sequences of the named contigs from the encoded assembly (anything but A, C, G, T reads N, which is what
+    the motif scan makes of it)."""
+    return {c: _LETTERS[asm.seq(asm.index[c])].tobytes().decode("ascii") for c in names}
+
+
 def _same_partition(a, b) -> bool:
     """Same grouping of motifs, whatever the group numbers."""
     if len(a) != len(b):
@@ -126,7 +149,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     motifs = pio.read_motifs(motifs_path, log=_log)
     cb_given = pio.read_contig_bin(contig_bin, log=_log)
     pileup_first = runinfo.check_pileup_head(pileup)
-    lengths = pio.fasta_lengths(assembly)
+    asm_cached = _cached_assembly(cache, assembly)
+    lengths = (dict(zip(asm_cached.names, asm_cached.lengths.tolist())) if asm_cached is not None
+               else pio.fasta_lengths(assembly))
     cb = runinfo.match_contig_bin(cb_given, lengths, contig_bin, log=_log)
     if pileup_first not in lengths:
         _log(f"WARNING: the first contig of the pileup, {pileup_first!r}, is not in the assembly: was the pileup "
@@ -147,7 +172,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
 
     # motif groups, from the records of a random sample of the sequence
     relevant = sorted(host_set | set(targets))
-    sample = pio.fasta_subset(assembly, _sample_names(lengths, relevant, group_sample_bp, rng))
+    sample_names = _sample_names(lengths, relevant, group_sample_bp, rng)
+    sample = _decoded(asm_cached, sample_names) if asm_cached is not None else pio.fasta_subset(assembly, sample_names)
+    del asm_cached
     if strand_sites not in ("sum", "split", "auto"):
         raise ValueError(f"strand_sites must be 'sum', 'split' or 'auto', not {strand_sites!r}")
     records = build_records(sample, motifs, pairing=complement_pairs)
