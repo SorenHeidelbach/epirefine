@@ -6,9 +6,11 @@ Two kinds of double counting are removed here:
    site (same molecule, same MTase event) and their counts are summed. A motif and its reverse
    complement (e.g. Type I bipartite motif + its complement) are canonicalised so that their
    records at one occurrence also share a site.
-2. Nested/overlapping motifs (e.g. GATC and RGATCY). Motifs of the same mod type whose site
-   sets overlap strongly are merged into one *group*; every (contig, pos, strand, mod_type) record
-   is counted once. Groups are the features of the model.
+2. Overlapping motifs. Motifs of the same mod type whose site sets overlap strongly (Jaccard >=
+   min_jaccard, 0.9 by default: a motif and its complement, near-identical spellings) are merged into
+   one *group*. A motif nested in a more general one (RGATCY in GATC, Jaccard about 0.25) stays a
+   group of its own; every (contig, pos, strand, mod_type) record is counted once, in the most
+   specific group that matches it. Groups are the features of the model.
 
 Matching is done on a 2-bit encoded sequence, one vectorised pass per motif *shape* (the offsets
 of a motif's non-N bases) for all motifs and orientations sharing it, so the cost grows with the

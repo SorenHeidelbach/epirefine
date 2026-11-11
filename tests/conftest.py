@@ -3,6 +3,7 @@ are made once per test session."""
 import pytest
 
 import synth
+from small_community import write_community
 from helpers import Run, logged, run_pipeline
 
 
@@ -35,3 +36,9 @@ def cli_run(community, tmp_path_factory, many_ranges) -> Run:
     from epirefine.cli import main
     out = tmp_path_factory.mktemp("cli") / "out"
     return Run(out, logged(main, community.cli_args(out, "--workers", 3, "--motif-fit")))
+
+
+@pytest.fixture(scope="session")
+def small_community(tmp_path_factory):
+    """Paths of the three-genome community of tests/small_community.py (input, log and provenance tests)."""
+    return write_community(tmp_path_factory.mktemp("small_community"))

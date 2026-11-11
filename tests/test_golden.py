@@ -47,7 +47,10 @@ def _snapshot(run) -> list[str]:
 
 def _params(run) -> dict:
     p = json.loads((run.out / "params.json").read_text())
-    return {k: p[k] for k in PARAMS}
+
+    def number(v):  # params.json is strict JSON since 0.11: an infinite tau is the string "inf"
+        return [number(x) for x in v] if isinstance(v, list) else float(v) if v in ("inf", "-inf") else v
+    return {k: number(p[k]) for k in PARAMS}
 
 
 def _same_number(a: str, b: str) -> bool:

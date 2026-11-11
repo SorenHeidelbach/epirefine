@@ -60,25 +60,21 @@ def absent_contigs_run(community, base_run, tmp_path_factory):
     return run_pipeline(**{**community.args(copy_cache(base_run, d / "out")), "contig_bin": str(d / "contig_bin.tsv")})
 
 
-def test_contig_bin_rows_absent_from_the_assembly_are_ignored(base_run, absent_contigs_run):
-    """Current behaviour: such rows are dropped without a message, a bin made only of them does not exist for
-    the run, and every decision is the same as without them."""
+def test_contig_bin_rows_absent_from_the_assembly_change_no_decision(base_run, absent_contigs_run):
+    """Such rows are dropped (and reported, next test), a bin made only of them does not exist for the run, and
+    every decision is the same as without them."""
     run = absent_contigs_run
     assert_same_outputs(base_run.out, run.out, DECISION_FILES)
-    assert "56 contigs, 4 bins, 43 host contigs" in run.log and "nope" not in run.log
+    assert "56 contigs, 4 bins, 43 host contigs" in run.log
     for f in ("new_contig_bin.tsv", "decontaminated_contig_bin.tsv", "bin_evidence.tsv", "host_profiles.tsv"):
         text = (run.out / f).read_text()
         assert "nope_" not in text and "ghost" not in text, f
 
 
-@pytest.mark.xfail(strict=True, reason="pipeline.run drops contig_bin rows whose contig is not in the assembly without "
-                   "counting them in the log (review 01 finding 3)")
 def test_contig_bin_rows_absent_from_the_assembly_are_reported(absent_contigs_run):
     assert "3" in next(line for line in absent_contigs_run.log.splitlines() if "not in the assembly" in line)
 
 
-@pytest.mark.xfail(strict=True, reason="a contig_bin that matches no assembly contig (here: space-separated) gives zero "
-                   "bins and the run dies in the calibration with 'cannot concat empty list' (review 01 finding 3)")
 def test_contig_bin_matching_no_contig_gives_a_clear_error(community, base_run, tmp_path):
     spaces = tmp_path / "contig_bin.tsv"
     spaces.write_text("".join(f"{c} {b}\n" for c, b in community.given.items()))
@@ -88,9 +84,6 @@ def test_contig_bin_matching_no_contig_gives_a_clear_error(community, base_run, 
 
 # --- pileup and motif table that match nothing ---------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, reason="a pileup whose contig names match no assembly contig leaves the site cache empty "
-                   "and the run dies with polars' 'failed to retrieve first file schema (parquet): empty input' "
-                   "(review 01 finding 3)")
 def test_pileup_matching_no_contig_gives_a_clear_error(community, tmp_path):
     other = tmp_path / "pileup.bed"
     other.write_text("".join("x" + row for row in community.pileup.read_text().splitlines(keepends=True)))
@@ -112,7 +105,7 @@ def test_motif_table_without_motifs_is_an_error(community, tmp_path):
     """A header-only motif table stops at once with a ValueError that names the cause."""
     empty = tmp_path / "bin-motifs.tsv"
     empty.write_text(community.motifs.read_text().split("\n", 1)[0] + "\n")
-    with pytest.raises(ValueError, match="no motif occurrences found"):
+    with pytest.raises(ValueError, match="no valid motif"):
         run_pipeline(**{**community.args(tmp_path / "out"), "motifs_path": str(empty)})
     assert not (tmp_path / "out" / "cache" / "manifest.json").exists()  # stopped before the pileup pass
 

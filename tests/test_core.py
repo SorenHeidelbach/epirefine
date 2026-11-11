@@ -130,7 +130,7 @@ def test_cache_manifest_is_removed_before_a_rebuild(tmp_path, monkeypatch):
     fa.write_text("".join(f">c{i}\n{''.join(rng.choice(list('ACGT'), 3000))}\n" for i in range(3)))
     (tmp_path / "cb.tsv").write_text("c0\tb1\nc1\tb2\n")
     (tmp_path / "motifs.tsv").write_text("motif\tmod_type\tmod_position\nGATC\ta\t1\n")
-    (tmp_path / "p.bed").write_text("")
+    (tmp_path / "p.bed").write_text("c0\t10\t11\ta\t5\t+\t10\t11\t255,0,0\t5\t100.00\t5\t0\t0\t0\t0\t0\t0\n")
     cache = tmp_path / "cache"
     (cache / "sites").mkdir(parents=True)
     (cache / "sites" / "r0000_0000.parquet").write_bytes(b"old part")

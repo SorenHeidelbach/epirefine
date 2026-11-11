@@ -25,9 +25,11 @@ EpiRefine reads the modkit pileup once and keeps only the motif sites: each occu
 list, with the number of reads at it (*n*) and the number called modified (*k*). The two strands of a palindrome
 form one site. No site is turned into a yes/no call; the counts themselves are used.
 
-Motifs that cover almost the same sites (for example GATC and its variants) are merged into **motif groups**, and a
-site matched by several groups counts once, in the most specific one. Groups whose calls look like basecaller noise
-rather than methylation are dropped.
+Motifs that cover almost the same sites (at least 90% shared, `--min-jaccard`: for example a motif and its reverse
+complement, or two spellings of one motif) are merged into **motif groups**. A motif and a more specific variant of
+it, such as GATC and RGATCY, share too few sites for that and stay separate groups; a site matched by several groups
+counts once, in the most specific one (an RGATCY site counts for RGATCY, not for GATC). Groups whose calls look like
+basecaller noise rather than methylation are dropped.
 
 ## 2. Basecaller noise
 

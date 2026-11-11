@@ -1,96 +1,164 @@
 from __future__ import annotations
 
 import argparse
+import sys
+import traceback
 
 from .calibrate import DEFAULT_LENGTHS
 
 
-def main(argv=None):
+class _Help(argparse.HelpFormatter):
+    """Shows the default of every option that takes a value, unless its help text already states one
+    (options that are estimated or calibrated when not given say so in words)."""
+
+    def _get_help_string(self, action):
+        text = action.help or ""
+        if "default" in text or action.default in (None, argparse.SUPPRESS) or action.nargs == 0:
+            return text
+        d = action.default
+        return f"{text} (default: {','.join(map(str, d)) if isinstance(d, (tuple, list)) else d})"
+
+
+def build_parser() -> argparse.ArgumentParser:
     from . import __version__
     ap = argparse.ArgumentParser(prog="epirefine", description="Bin refinement from nanopore methylation: flags "
-                                 "contaminating contigs in bins and places unbinned contigs into bins")
+                                 "contaminating contigs in bins and places unbinned contigs into bins. "
+                                 "Run 'epirefine run --help' for the inputs and options.")
     ap.add_argument("--version", action="version", version=f"epirefine {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    r = sub.add_parser("run", help="refine bins: contamination detection and contig inclusion")
-    r.add_argument("--assembly", required=True)
-    r.add_argument("--pileup", required=True, help="modkit pileup bedMethyl (.bed or .bed.gz)")
-    r.add_argument("--contig-bin", required=True, help="contig<TAB>bin, no header")
-    r.add_argument("--motifs", required=True, help="Nanomotif bin-motifs.tsv (only the motif set is used)")
-    r.add_argument("--out", required=True)
-    r.add_argument("--contamination-threshold", type=float, default=0.5,
+    r = sub.add_parser("run", help="refine bins: contamination detection and contig inclusion", formatter_class=_Help,
+                       description="Refine bins: flag binned contigs whose methylation contradicts their bin and "
+                                   "place unbinned contigs into the bin their methylation fits. Progress is "
+                                   "written to standard output.")
+    g = r.add_argument_group("inputs and output")
+    g.add_argument("--assembly", required=True,
+                   help="assembly FASTA (.fasta or .fasta.gz); contig names are the first word of each header and "
+                        "must be those used in the pileup and the contig-bin table")
+    g.add_argument("--pileup", required=True, help="modkit pileup bedMethyl (.bed or .bed.gz) of reads mapped to the "
+                                                   "assembly, rows of each contig together, no header line")
+    g.add_argument("--contig-bin", required=True, help="contig<TAB>bin, tab-separated, no header")
+    g.add_argument("--motifs", required=True,
+                   help="Nanomotif bin-motifs.tsv, or any TSV with columns motif, mod_type (a = 6mA, m = 5mC, "
+                        "21839 = 4mC, h = 5hmC) and mod_position (0-based); only the motif set is used")
+    g.add_argument("--out", required=True, help="output directory (created; existing files in it are overwritten)")
+
+    g = r.add_argument_group("decisions")
+    g.add_argument("--contamination-threshold", type=float, default=0.5,
                    help="flag a binned contig as contamination when P(foreign) is at least this")
-    r.add_argument("--min-methylome-difference", type=float, default=0.4,
+    g.add_argument("--min-methylome-difference", type=float, default=0.4,
                    help="a contaminant's 95%% credible interval for the methylated fraction of some motif group "
                         "must lie at least this far from its bin's level (0 = no effect-size requirement)")
-    r.add_argument("--include-threshold", type=float, default=0.9,
+    g.add_argument("--include-threshold", type=float, default=0.9,
                    help="include a contig into a bin when that bin's posterior is at least this")
-    r.add_argument("--include-threshold-unmethylated", type=float, default=0.95,
+    g.add_argument("--include-threshold-unmethylated", type=float, default=0.95,
                    help="include a contig into a bin with no detected methylation only at this posterior (such a bin matches "
                         "any contig whose own motifs are not in the motif list)")
-    r.add_argument("--min-evidence", type=float, default=3.0,
-                   help="contigs whose expected methylation evidence (log BF of their bin vs a random community "
-                        "genome) is below this get status no_methylation_evidence instead of kept/unbinned")
-    r.add_argument("--min-contig-coverage", type=float, default=5.0,
-                   help="contigs whose median reads per motif site is below this get no decision (neither "
-                        "flagged nor included; status low_coverage) and give no calibration fragments; 0 decides all")
-    r.add_argument("--min-contig-length", type=int, default=1000,
-                   help="contigs shorter than this get no decision (status too_short); 0 decides all")
-    r.add_argument("--no-group-weights", action="store_true",
-                   help="count every motif group fully, even variants of one methyltransferase (default: groups that can "
-                        "share sites and are methylated in the same bins share one group's weight; see group_weights.tsv)")
-    r.add_argument("--no-motif-noise-filter", action="store_true",
-                   help="keep motif groups whose methylation is partial on many contigs of many bins (by default "
-                        "they are dropped as caller noise; see motif_noise.tsv)")
-    r.add_argument("--regional-inclusion", action="store_true",
-                   help="also include long unbinned contigs scored in 50 kb windows (a bin explaining most of the contig); "
-                        "experimental, no measured benefit (D40)")
-    r.add_argument("--no-regional-model", action="store_true",
-                   help="judge long binned contigs only as a whole (default: a contig that is partly its bin's and partly "
-                        "foreign along its length is reported as mixed, with its foreign segments, instead of flagged)")
-    r.add_argument("--max-redundancy", type=float, default=0.3,
+    g.add_argument("--max-redundancy", type=float, default=0.3,
                    help="don't include a contig when at least this share of its k-mers is already in the bin "
                         "(1 = no redundancy check)")
-    r.add_argument("--p-unknown", type=float, help="prior probability that an unbinned contig's genome has no bin "
+    g.add_argument("--p-unknown", type=float, help="prior probability that an unbinned contig's genome has no bin "
                                                   "(default: estimated from the unbinned contigs)")
-    r.add_argument("--variation", choices=["beta", "logit"], default="beta",
-                   help="how a contig's methylated fraction varies around its bin's: Beta(tau) or "
-                        "logit-normal(sigma); --tau then sets tau or sigma")
-    r.add_argument("--tau", type=float, help="override the calibrated variation parameter (tau or sigma)")
-    r.add_argument("--temperature", type=float, help="override the calibrated temperature")
-    r.add_argument("--allow-sharpening", action="store_true",
-                   help="use a fitted temperature < 1 (default: clip at 1, never sharpen posteriors)")
-    r.add_argument("--no-calibrate", action="store_true")
-    r.add_argument("--frag-lengths", type=lambda s: tuple(int(x) for x in s.split(",")), default=DEFAULT_LENGTHS)
-    r.add_argument("--frags-per-bin", type=int, default=30, help="cap on calibration fragments per bin and length")
-    r.add_argument("--frag-budget", type=int, default=6000,
-                   help="total calibration fragments; spread over bins and lengths (at most --frags-per-bin each)")
-    r.add_argument("--contam-eps", type=float, default=0.05, help="prior share of foreign chunks in a bin (0 = off)")
-    r.add_argument("--min-cov", type=int, default=1)
-    r.add_argument("--chunk-size", type=int, default=50_000, help="binned contigs are split into chunks of this size")
-    r.add_argument("--grid-size", type=int, default=64)
-    r.add_argument("--min-jaccard", type=float, default=0.9,
+
+    g = r.add_argument_group("which contigs are judged")
+    g.add_argument("--min-evidence", type=float, default=3.0,
+                   help="contigs whose expected methylation evidence (log Bayes factor of their bin against a random "
+                        "community genome) is below this get status no_methylation_evidence instead of kept/unbinned")
+    g.add_argument("--min-contig-coverage", type=float, default=5.0,
+                   help="contigs whose median reads per motif site is below this get no decision (neither "
+                        "flagged nor included; status low_coverage) and give no calibration fragments; 0 decides all")
+    g.add_argument("--min-contig-length", type=int, default=1000,
+                   help="contigs shorter than this get no decision (status too_short); 0 decides all")
+    g.add_argument("--min-cov", type=int, default=1,
+                   help="use a motif site only when it has at least this many reads (per site; not to be confused "
+                        "with --min-contig-coverage, the median over a contig's sites)")
+
+    g = r.add_argument_group("motifs")
+    g.add_argument("--no-group-weights", action="store_true",
+                   help="count every motif group fully, even variants of one methyltransferase (default: groups that can "
+                        "share sites and are methylated in the same bins share one group's weight; see group_weights.tsv)")
+    g.add_argument("--no-motif-noise-filter", action="store_true",
+                   help="keep motif groups whose methylation is partial on many contigs of many bins (by default "
+                        "they are dropped as caller noise; see motif_noise.tsv)")
+    g.add_argument("--min-jaccard", type=float, default=0.9,
                    help="merge motifs whose site sets overlap this much (Jaccard); positions shared by motifs "
                         "of different groups go to the most specific group")
-    r.add_argument("--group-sample-mb", type=float, default=50,
+    g.add_argument("--group-sample-mb", type=float, default=50,
                    help="Mb of sequence sampled to measure motif overlap for grouping")
-    r.add_argument("--workers", type=int, help="processes for the pileup and table passes (default: CPUs, max 16)")
-    r.add_argument("--cache-dir", help="site cache (default: <out>/cache); reused when inputs are unchanged")
-    r.add_argument("--motif-fit", action="store_true",
-                   help="also write motif_fit.tsv: each contig's methylated fraction per motif group next to its bin's")
-    r.add_argument("--seed", type=int, default=1)
 
-    a = ap.parse_args(argv)
+    g = r.add_argument_group("long contigs")
+    g.add_argument("--no-regional-model", action="store_true",
+                   help="judge long binned contigs only as a whole (default: a contig that is partly its bin's and partly "
+                        "foreign along its length is reported as mixed, with its foreign segments, instead of flagged)")
+    g.add_argument("--regional-inclusion", action="store_true",
+                   help="also include long unbinned contigs scored in windows of --chunk-size (a bin explaining most "
+                        "of the contig); experimental, no measured benefit; needs the regional model")
+    g.add_argument("--chunk-size", type=int, default=50_000, help="binned contigs are split into chunks of this size (bp)")
+
+    g = r.add_argument_group("model and calibration")
+    g.add_argument("--variation", choices=["beta", "logit"], default="beta",
+                   help="how a contig's methylated fraction varies around its bin's: Beta(tau) or "
+                        "logit-normal(sigma); --tau then sets tau or sigma")
+    g.add_argument("--tau", type=float, help="override the calibrated variation parameter: tau of --variation beta "
+                                            "(larger = less variation) or sigma of --variation logit (default: calibrated)")
+    g.add_argument("--temperature", type=float, help="override the calibrated temperature, the factor that divides all "
+                                                    "log-likelihoods (default: calibrated)")
+    g.add_argument("--allow-sharpening", action="store_true",
+                   help="use a fitted temperature < 1 (default: clip at 1, never sharpen posteriors)")
+    g.add_argument("--no-calibrate", action="store_true",
+                   help="skip the calibration on pieces cut from the bins: probabilities are then uncalibrated "
+                        "(temperature 1 and a fixed variation parameter unless --temperature / --tau are given)")
+    g.add_argument("--frag-lengths", type=lambda s: tuple(int(x) for x in s.split(",")), default=DEFAULT_LENGTHS,
+                   help="lengths (bp, comma-separated) of the pieces cut from binned contigs for calibration; at "
+                        "least one binned contig must be as long as the shortest")
+    g.add_argument("--frags-per-bin", type=int, default=30, help="cap on calibration fragments per bin and length")
+    g.add_argument("--frag-budget", type=int, default=6000,
+                   help="total calibration fragments; spread over bins and lengths (at most --frags-per-bin each)")
+    g.add_argument("--contam-eps", type=float, default=0.05,
+                   help="prior share of foreign chunks in a bin, used to keep contaminants out of the bin profiles "
+                        "(0 = no such down-weighting and no regional model; must be below 1)")
+    g.add_argument("--grid-size", type=int, default=64,
+                   help="number of grid points for the methylated fraction of a motif group (finer = slower)")
+    g.add_argument("--seed", type=int, default=1,
+                   help="random seed (motif-grouping sample, calibration pieces); the same inputs and seed give "
+                        "the same outputs")
+
+    g = r.add_argument_group("speed and extra output")
+    g.add_argument("--workers", type=int, help="processes for the pileup and table passes (default: CPUs, max 16)")
+    g.add_argument("--cache-dir", help="site cache (default: <out>/cache); reused when inputs are unchanged")
+    g.add_argument("--motif-fit", action="store_true",
+                   help="also write motif_fit.tsv: each contig's methylated fraction per motif group next to its bin's")
+    return ap
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
     if a.cmd == "run":
-        from .pipeline import run
-        run(a.assembly, a.pileup, a.contig_bin, a.motifs, a.out, min_cov=a.min_cov, chunk_size=a.chunk_size,
-            grid_size=a.grid_size, p_unknown=a.p_unknown, contamination_threshold=a.contamination_threshold,
-            include_threshold=a.include_threshold, min_methylome_difference=a.min_methylome_difference,
-            max_redundancy=a.max_redundancy, min_evidence=a.min_evidence, min_contig_coverage=a.min_contig_coverage, min_contig_length=a.min_contig_length, motif_noise_filter=not a.no_motif_noise_filter, group_weights=not a.no_group_weights, regional_model=not a.no_regional_model, regional_inclusion=a.regional_inclusion, include_threshold_unmethylated=a.include_threshold_unmethylated, do_calibrate=not a.no_calibrate, frag_lengths=a.frag_lengths,
-            frags_per_bin=a.frags_per_bin, frag_budget=a.frag_budget, tau=a.tau, temperature=a.temperature,
-            contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, min_jaccard=a.min_jaccard,
-            variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
-            cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed)
+        from . import pipeline
+        from .io import InputError
+        from .runinfo import log
+        try:
+            pipeline.run(
+                a.assembly, a.pileup, a.contig_bin, a.motifs, a.out, min_cov=a.min_cov, chunk_size=a.chunk_size,
+                grid_size=a.grid_size, p_unknown=a.p_unknown, contamination_threshold=a.contamination_threshold,
+                include_threshold=a.include_threshold, min_methylome_difference=a.min_methylome_difference,
+                max_redundancy=a.max_redundancy, min_evidence=a.min_evidence, min_contig_coverage=a.min_contig_coverage, min_contig_length=a.min_contig_length, motif_noise_filter=not a.no_motif_noise_filter, group_weights=not a.no_group_weights, regional_model=not a.no_regional_model, regional_inclusion=a.regional_inclusion, include_threshold_unmethylated=a.include_threshold_unmethylated, do_calibrate=not a.no_calibrate, frag_lengths=a.frag_lengths,
+                frags_per_bin=a.frags_per_bin, frag_budget=a.frag_budget, tau=a.tau, temperature=a.temperature,
+                contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, min_jaccard=a.min_jaccard,
+                variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
+                cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed)
+        except InputError as e:
+            # a problem with the inputs or options: the message says what; no traceback needed
+            log(f"ERROR: {e}")
+            print(f"epirefine: error: {e}", file=sys.stderr)
+            sys.exit(2)
+        except Exception as e:
+            # progress goes to standard output; the traceback follows it there, so that a captured log holds
+            # the error, and standard error gets one line
+            sys.stdout.flush()
+            log("ERROR: the run failed:\n" + traceback.format_exc().rstrip())
+            print(f"epirefine: error: {type(e).__name__}: {e} (traceback in the log on standard output)", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

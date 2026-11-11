@@ -14,7 +14,7 @@ truth and checked against Hi-C on a fecal sample; most users only set the inputs
 | `--assembly` | yes | Assembly FASTA (plain or gzipped). |
 | `--contig-bin` | yes | The bins to refine: `contig<TAB>bin`, no header. Contigs not listed are unbinned. |
 | `--pileup` | yes | `modkit pileup` bedMethyl (`.bed` or `.bed.gz`). Both the older space-separated and the all-tab formats work. The rows of each contig must be together, as modkit writes them. |
-| `--motifs` | yes | Nanomotif `bin-motifs.tsv` (or any TSV with `motif`, `mod_type`, `mod_position`). Only the list of motifs is used, plus their complements when given. |
+| `--motifs` | yes | Nanomotif `bin-motifs.tsv` (or any TSV with `motif`, `mod_type`, `mod_position`). Only the list of motifs is used, plus their complements when given. `mod_type` must be a modkit code (`a` = 6mA, `m` = 5mC, `21839` = 4mC, `h` = 5hmC), `mod_position` is 0-based; other mod types stop the run, invalid motifs are skipped and counted in the log. |
 | `--out` | yes | Output folder. |
 | `--motif-fit` | no | Also write `motif_fit.tsv`: each contig's methylated fraction per motif group next to its bin's. |
 | `--seed` | no (1) | Random seed; the same seed gives identical outputs. |
@@ -71,7 +71,7 @@ estimates. Leave them unset unless you are testing the model.
 | `--frag-lengths` | `2000,5000,10000,20000,50000,100000` | Lengths of the calibration pieces in bp, comma-separated. |
 | `--frag-budget` | 6000 | Total number of calibration pieces, spread over bins and lengths. |
 | `--frags-per-bin` | 30 | At most this many pieces per bin and length. |
-| `--contam-eps` | 0.05 | Prior share of foreign pieces in a bin when building its fingerprint (0 = trust every piece). |
+| `--contam-eps` | 0.05 | Prior share of foreign pieces in a bin when building its fingerprint (0 = trust every piece; the regional model for long contigs is then off too, and the log says so; must be below 1). |
 | `--grid-size` | 64 | Points on the grid of methylated fractions. |
 
 ## Speed and caching

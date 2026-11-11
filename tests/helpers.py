@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import re
 import shutil
 from dataclasses import dataclass
@@ -84,11 +85,26 @@ def copy_cache(src: Run, out) -> Path:
     return out
 
 
+# entries of params.json that describe the run and not its result (provenance, 0.11): they differ between two
+# runs by construction (start time, command line, paths, worker count, time and memory used)
+RUN_SPECIFIC_PARAMS = ("command_line", "start_time", "inputs", "out", "cache_dir", "workers", "python", "elapsed_s",
+                       "peak_rss_gb", "peak_rss_worker_gb",
+                       "write_motif_fit")  # an extra output file, asked for by the command-line test run only
+
+
+def _comparable_lines(path: Path) -> list[str]:
+    """The lines of an output file to compare; params.json without its run-specific entries."""
+    if path.name == "params.json":
+        params = json.loads(path.read_text())
+        return json.dumps({k: v for k, v in params.items() if k not in RUN_SPECIFIC_PARAMS}, indent=1).splitlines()
+    return path.read_text().splitlines()
+
+
 def differing_files(a: Path, b: Path, files=INVARIANT_FILES) -> list[str]:
-    """Names of the files whose bytes differ between two output directories, with the first differing line."""
+    """Names of the files whose content differs between two output directories, with the first differing line."""
     out = []
     for f in files:
-        x, y = (Path(a) / f).read_text().splitlines(), (Path(b) / f).read_text().splitlines()
+        x, y = _comparable_lines(Path(a) / f), _comparable_lines(Path(b) / f)
         if x != y:
             i = next((i for i, (p, q) in enumerate(zip(x, y)) if p != q), min(len(x), len(y)))
             out.append(f"{f} line {i + 1}:\n    {x[i] if i < len(x) else '<end>'}\n    {y[i] if i < len(y) else '<end>'}")

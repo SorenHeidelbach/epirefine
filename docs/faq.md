@@ -41,6 +41,15 @@ in parallel by `--workers` processes. The pileup is read only once per set of in
 
 ## Results
 
+### Can I run it on a single bin (an isolate or one MAG)?
+
+Yes, but only contig inclusion is done. A contaminant is recognised by fitting other bins, or a genome without a
+bin, better than its own bin, and both the contamination rate and the calibration are built on several bins. With
+one bin in the contig-bin table EpiRefine says so in the log (`WARNING: ... one bin only`), keeps every binned
+contig untested (`p_contaminant` is `NaN`, `best_alternative` is `unknown`, `bin_contamination.tsv` is empty) and
+writes `"contamination_detection": "skipped: one bin only"` and `"contamination_rate": null` to `params.json`.
+Unbinned contigs are still tested for inclusion into the bin.
+
 ### Why did so many contigs get no decision?
 
 EpiRefine declines rather than guesses. A contig gets no decision (`low_coverage`, `too_short` or
@@ -125,10 +134,27 @@ Yes. The same inputs and `--seed` (default 1) give identical outputs.
 
 ### Something went wrong
 
-Check the log first: each step reports what it read and fitted. Common causes:
+Check the log first (standard output): it starts with the version, the command line and the inputs, and each step
+reports what it read and fitted. Every line begins with the seconds since the start and the peak memory of the main
+process so far, e.g. `[  312.4s   2.1 GB]`; the last line also gives the peak memory of the largest worker process.
+Errors are written to the same stream (`ERROR: ...`, with the traceback for an unexpected failure) and in one line to
+standard error; the exit code is 2 for a problem with the inputs or options and 1 otherwise. Common causes:
 
-- **Few or no contigs have sites** (`n_sites` is 0): contig names in the pileup, the assembly and
-  `contig_bin.tsv` must match exactly, and the pileup must be made against the same assembly.
+- **Few contigs have sites** (`n_sites` is 0): contig names in the pileup, the assembly and
+  `contig_bin.tsv` must match exactly, and the pileup must be made against the same assembly. The inputs are
+  checked before the run starts its work: a missing or unreadable file, a contig-bin table that is not
+  `contig<TAB>bin` or shares no contig with the assembly, a motif table with an unknown `mod_type`, and a pileup
+  that is not a headerless bedMethyl table stop the run with a message naming the problem. Rows of the contig-bin
+  table whose contig is not in the assembly, and invalid motifs, are dropped with a `WARNING` line in the log that
+  gives their number.
+- **"no pileup row lies at a motif site of an assembly contig"**: the pileup's contig names differ from the
+  assembly's (the message shows one of each), or the pileup was made with other modification codes than
+  `a`, `m`, `h`, `21839`.
+- **"unknown mod_type"**: the motif table must use the modkit codes `a` (6mA), `m` (5mC), `21839` (4mC) or `h`
+  (5hmC), as Nanomotif writes them; `mod_position` is 0-based.
+- **"no calibration fragments"**: no binned contig has both enough coverage (`--min-contig-coverage`, 5) and the
+  length of the shortest calibration piece (`--frag-lengths`, 2 kb). Lower one of them, or run with
+  `--no-calibrate`.
 - **"pileup rows of contig … are not contiguous"**: the rows of each contig must be together, as `modkit pileup`
   writes them. Sort a re-ordered pileup by contig (`sort -k1,1 -k2,2n pileup.bed > sorted.bed`).
 

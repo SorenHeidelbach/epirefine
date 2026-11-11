@@ -15,8 +15,12 @@ Two mixtures, with their weights estimated from the data by EM (MAP with a Beta 
 Decisions:
   * contaminant  if P(foreign | data) >= contamination_threshold;
   * a contaminant or an unbinned contig is included into bin h if P(h | data, not its old bin)
-    >= include_threshold ("high_confidence"); 0.8 / 0.5 mark medium / low confidence, as in
-    Nanomotif's include_contigs, and are reported but not applied.
+    >= include_threshold (default 0.9; include_threshold_unmethylated, 0.95, for a bin without detected
+    methylation), unless the redundancy check drops it afterwards (pipeline.run).
+  * include_contigs.tsv lists the candidates with P >= 0.5 under Nanomotif's confidence labels (CONFIDENCE:
+    high >= 0.95, medium >= 0.8, low >= 0.5). The labels are not the decision rule: at the default threshold
+    an inclusion at 0.9-0.95 is applied and reads "medium_confidence". Applied inclusions are those in
+    new_contig_bin.tsv (status included / moved in contig_decisions.tsv).
 """
 from __future__ import annotations
 
@@ -29,6 +33,9 @@ from scipy.special import expit, logsumexp
 from .model import credible_set
 
 CONFIDENCE = ((0.95, "high_confidence"), (0.8, "medium_confidence"), (0.5, "low_confidence"))
+# include_contigs.tsv, column confidence: the candidate reached the inclusion threshold but the bin already
+# holds its sequence (redundancy check), so it was not added
+DROPPED_REDUNDANT = "dropped_redundant"
 
 
 def em_weight(l_in: np.ndarray, l_out: np.ndarray, a: float = 1.0, b: float = 1.0, iters: int = 500,
@@ -71,6 +78,8 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
            decidable: np.ndarray | None = None, unmethylated_bins: np.ndarray | None = None,
            include_threshold_unmethylated: float = 0.95) -> Refinement:
     """given[i] = bin index of contig i, -1 if unbinned; testable[i] = binned and scored leave-one-out.
+    With one bin only (H = 1) no binned contig is tested for contamination (eps is NaN); unbinned contigs are
+    still tested for inclusion into it.
     decidable[i] = False: no decision about contig i at all (e.g. coverage too low): it is neither
     flagged nor included and doesn't enter the estimates of p_unknown and the contamination rate.
 
@@ -108,7 +117,10 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     alt_logits[:, :H] = Z
     alt_logits[np.arange(N)[given >= 0], own[given >= 0]] = -np.inf  # exclude the own bin
     alt_logits[:, :H] += lpb
-    alt_logits[:, :H] -= np.log(n_alt)[:, None]
+    if H > 1:
+        alt_logits[:, :H] -= np.log(n_alt)[:, None]
+    # one bin only: a binned contig has no other bin to come from (n_alt = 0; -inf - log(0) made every
+    # probability NaN). Its row stays -inf here and is settled below; unbinned contigs have n_alt = 1.
     alt_logits[:, H] = Zu + lpu
     l_alt = logsumexp(alt_logits, axis=1)
     alt_logits -= l_alt[:, None]
@@ -116,10 +128,20 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     del alt_logits
     best_alt = p_alt.argmax(1)
     p_best_alt = p_alt.max(1)
+    if H == 1:
+        # Contamination detection is skipped: with a single bin "foreign" could only mean "a genome without a
+        # bin", and neither the contamination rate nor the calibration (which tests bins against each other)
+        # was built or measured for that question. Binned contigs are left untested (P(foreign) NaN like every
+        # untested contig, never flagged); the only alternative to their bin is "unknown", with probability 1.
+        b = given >= 0
+        testable = testable & ~b
+        best_alt[b], p_best_alt[b] = H, 1.0
 
     p_foreign = np.full(N, np.nan)
     t = testable & (given >= 0)
     eps, r = em_weight(Z[t, own[t]], l_alt[t], *eps_prior)
+    if H == 1:
+        eps = np.nan  # not estimated (params.json: null)
     p_foreign[t] = r
     contaminant = np.zeros(N, bool)
     contaminant[t] = r >= contamination_threshold
@@ -249,11 +271,17 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
     pl.DataFrame(kept, schema={"contig": pl.Utf8, "bin": pl.Utf8}, orient="row").sort("bin", "contig").write_csv(
         out / "decontaminated_contig_bin.tsv", separator="\t")
 
+    # candidates whose inclusion (or move) the redundancy check dropped: redundancy is measured only for
+    # contigs that reached the inclusion threshold, and their include_bin is reset to -1 afterwards
+    dropped = (np.zeros(len(contigs), bool) if redundancy is None
+               else ~np.isnan(redundancy) & (ref.include_bin < 0))
     rows = []
     for i in np.flatnonzero(ref.candidate & (ref.best_alt < H) & (ref.p_best_alt >= CONFIDENCE[-1][0])):
         p = float(ref.p_best_alt[i])
+        # a dropped candidate is not added to any bin, so it must not read as a high-confidence inclusion
         rows.append({"contig": contigs[i], "bin": given_lbl[i] or "unbinned", "assigned_bin": labels[ref.best_alt[i]],
-                     "method": "epirefine", "prob": p, "mean_prob": p, "confidence": confidence(p)})
+                     "method": "epirefine", "prob": p, "mean_prob": p,
+                     "confidence": DROPPED_REDUNDANT if dropped[i] else confidence(p)})
     pl.DataFrame(rows, schema={"contig": pl.Utf8, "bin": pl.Utf8, "assigned_bin": pl.Utf8, "method": pl.Utf8,
                                "prob": pl.Float64, "mean_prob": pl.Float64, "confidence": pl.Utf8}).sort(
         "confidence", "contig").write_csv(out / "include_contigs.tsv", separator="\t", float_precision=4)
@@ -267,8 +295,9 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
     for i, c in enumerate(contigs):
         if c in sole:
             status[i] = "sole_contig_of_bin"
-    if redundancy is not None:
-        status[~np.isnan(redundancy) & (ref.include_bin < 0)] = "redundant"
+    # an unbinned contig whose inclusion was dropped by the redundancy check. A flagged binned contig whose
+    # move was dropped stays "contaminant": it is removed from its bin and listed in bin_contamination.tsv
+    status[dropped & (given < 0)] = "redundant"
     status[(ref.include_bin >= 0) & (given < 0)] = "included"
     status[(ref.include_bin >= 0) & (given >= 0)] = "moved"
     if evidence is not None:

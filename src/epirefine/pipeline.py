@@ -17,6 +17,7 @@ import numpy as np
 import polars as pl
 
 from . import io as pio
+from . import runinfo
 from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate, contig_chunks, fragment_chunks,
                         fragments_per_bin, select_fragments)
 from .detection import detection_table, fit_detection_by_bin
@@ -30,8 +31,8 @@ from .sites import EncodedAssembly, extract_sites, unit_tables
 
 
 
-def _log(msg, t0=[time.time()]):
-    print(f"[{time.time() - t0[0]:7.1f}s] {msg}", flush=True)
+def _log(msg):
+    runinfo.log(msg)  # elapsed time since the start of the run, peak memory so far, message
 
 
 def _write(df: pl.DataFrame, path, precision=4):
@@ -86,15 +87,28 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1):
+    args = dict(locals())  # first statement: the options as given
+    runinfo.begin(args, _log)  # first log lines (version, command, inputs) and option ranges, before any work
+    # the inputs are checked before anything is read or written: a missing file or a wrong table must not
+    # cost the minutes (hours on a large sample) it takes to reach the place where it is used
+    runinfo.check_inputs(args)
+    provenance = runinfo.provenance(args)
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
+    runinfo.write_params(out / "params.json", provenance)  # a run that does not finish leaves its settings
     rng = np.random.default_rng(seed)
     cache = Path(cache_dir) if cache_dir else out / "cache"
 
     # the assembly is streamed (lengths, then the motif-grouping sample, then the encoded copy on disk): held
     # whole as Python strings it took about three times its size, 53 GB for an 18.9 GB soil assembly
+    motifs = pio.read_motifs(motifs_path, log=_log)
+    cb_given = pio.read_contig_bin(contig_bin, log=_log)
+    pileup_first = runinfo.check_pileup_head(pileup)
     lengths = pio.fasta_lengths(assembly)
-    cb = {c: b for c, b in pio.read_contig_bin(contig_bin).items() if c in lengths}
+    cb = runinfo.match_contig_bin(cb_given, lengths, contig_bin, log=_log)
+    if pileup_first not in lengths:
+        _log(f"WARNING: the first contig of the pileup, {pileup_first!r}, is not in the assembly: was the pileup "
+             f"made from reads mapped to this assembly?")
     bins = sorted(set(cb.values()))
     bin_idx = {b: i for i, b in enumerate(bins)}
     host_contigs = sorted(cb)
@@ -104,9 +118,12 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     targets = sorted(lengths)
     H = len(bins)
     _log(f"{len(lengths)} contigs, {H} bins, {len(host_contigs)} host contigs, {len(targets)} targets")
+    if H == 1:
+        _log("WARNING: the contig-bin table names one bin only: contamination detection is skipped (a contaminant is "
+             "recognised by fitting its own bin worse than other bins or a genome without a bin, which needs at "
+             "least two bins); binned contigs are kept untested, unbinned contigs are still tested for inclusion")
 
     # motif groups, from the records of a random sample of the sequence
-    motifs = pio.read_motifs(motifs_path)
     relevant = sorted(host_set | set(targets))
     sample = pio.fasta_subset(assembly, _sample_names(lengths, relevant, group_sample_bp, rng))
     records = build_records(sample, motifs)
@@ -145,6 +162,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     del sample
     cid = asm.index
 
+    if not parts:
+        raise runinfo.no_sites_error(pileup, pileup_first, lengths)
     # contig coverage (median reads per motif site, all sites): contigs below min_contig_coverage get
     # no decision at all (status low_coverage) and don't feed the calibration fragments. Against Hi-C
     # on ZymoFecal, flags on contigs below 5x were confirmed for 12.5% (81% at >= 10x).
@@ -219,6 +238,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         _log(f"calibration fragments from {len(hc_ok)} of {len(host_contigs)} host contigs with >= {min_contig_coverage:g}x")
         hc = pl.DataFrame({"contig": [cid[c] for c in hc_ok], "bin_idx": [bin_idx[cb[c]] for c in hc_ok],
                            "length": [lengths[c] for c in hc_ok]}, schema={"contig": pl.Int32, "bin_idx": pl.Int64, "length": pl.Int64})
+        runinfo.check_calibration_contigs([lengths[c] for c in hc_ok], len(host_contigs), min_contig_coverage, frag_lengths)
         per_bin = fragments_per_bin(frag_budget, len(frag_lengths), H, frags_per_bin)
         frags = select_fragments(hc, frag_lengths, per_bin, rng)
         _log(f"{frags.height} calibration fragments ({per_bin} per bin and length)")
@@ -250,7 +270,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         return int(remap[chunk_offset[contig_id] + c])
 
     p_cal = 0.1 if p_unknown is None else p_unknown  # prior used before p_unknown is estimated (refinement)
-    params = {"chunk_size": chunk_size, "grid_size": grid_size, "p_unknown": p_unknown, "min_cov": min_cov,
+    params = {**provenance, "chunk_size": chunk_size, "grid_size": grid_size, "p_unknown": p_unknown, "min_cov": min_cov,
               "contam_eps": contam_eps}
     model_kw = {"contam_eps": contam_eps}
     if do_calibrate:
@@ -359,7 +379,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # (chunk-level evidence from the robust host-profile fit; flags on mixed contigs are withdrawn and
     # their foreign segments reported)
     regional = None
-    if regional_model:
+    if regional_model and contam_eps > 0:  # at 0 the prior log-odds of a foreign chunk are infinite
         llr_chunk = (np.log(np.clip(p_foreign, 1e-12, 1 - 1e-12)) - np.log(np.clip(1 - p_foreign, 1e-12, None))
                      - np.log(contam_eps / (1 - contam_eps)))
         order = np.lexsort((chunk_no, chunk_contig))
@@ -486,7 +506,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         ref.include_bin[drop] = -1
         _log(f"redundancy: {len(drop)} of {len(inc)} inclusions dropped (>= {max_redundancy:g} of their k-mers already in the bin)")
     p_unknown = ref.p_unknown
-    params.update(p_unknown=p_unknown, contamination_rate=ref.eps)
+    params.update(p_unknown=p_unknown, contamination_rate=ref.eps,
+                  contamination_detection="skipped: one bin only" if H == 1 else "done")
     P = posterior(sc.S, sc.Su, p_unknown, temperature)
     write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff, redundancy,
                   evidence=evidence, min_evidence=min_evidence, coverage=coverage, low_coverage=low_cov, too_short=short,
@@ -515,6 +536,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         "bin": np.repeat(bins + ["_population_prior_"], n_groups), "group": np.tile(np.arange(n_groups), nb),
         "motifs": np.tile(group_label, nb), "phi_mean": mean.ravel(), "phi_lo95": lo.ravel(), "phi_hi95": hi.ravel(),
         "p_phi_gt_0.5": pp.ravel()}), out / "host_profiles.tsv")
-    (out / "params.json").write_text(json.dumps(params, indent=2, default=lambda o: o.tolist() if hasattr(o, "tolist") else float(o)))
-    _log(f"done -> {out}")
+    runinfo.write_params(out / "params.json", runinfo.finish(params))
+    _log(f"done -> {out}; peak memory {runinfo.peak_rss_gb():.2f} GB (main process), "
+         f"{runinfo.peak_rss_gb(children=True):.2f} GB (largest worker process)")
     return out

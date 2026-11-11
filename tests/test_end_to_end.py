@@ -144,10 +144,9 @@ def test_log_counts_agree_with_the_files(base_run):
     assert n["unbinned"] == sum(not r["given_bin"] for r in dec.values())
 
 
-@pytest.mark.xfail(strict=True, reason="refine.write_outputs: the `redundant` status overwrites `contaminant` for a "
-                   "flagged binned contig whose move to another bin was dropped by the redundancy check, so "
-                   "contaminant + moved statuses undercount bin_contamination.tsv (review 01 finding 5)")
 def test_flagged_statuses_agree_with_bin_contamination(base_run):
+    """A flagged contig whose move is dropped as redundant keeps the status `contaminant` (review 01 finding 5;
+    a strict xfail until 0.11, when `redundant` overwrote it)."""
     flagged = set(base_run.table("bin_contamination.tsv")["contig"])
     by_status = {c for c, r in base_run.decisions.items() if r["status"] in ("contaminant", "moved")}
     assert by_status == flagged
