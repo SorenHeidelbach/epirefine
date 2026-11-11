@@ -155,9 +155,9 @@ def test_rebuild_killed_during_the_pileup_pass_is_not_reused(community, base_run
 
 
 def test_pairing_rule_that_pairs_the_same_motifs_shares_the_cache(community, base_run, tmp_path):
-    """--complement-pairs position (default) and sequence (0.10) pair this motif list identically: the sites
+    """--complement-pairs position and sequence (the default) pair this motif list identically: the sites
     are the same, so the cache of one serves the other and the decisions do not change."""
     out = copy_cache(base_run, tmp_path / "out")
-    run = run_pipeline(**community.args(out), complement_pairs="sequence")
+    run = run_pipeline(**community.args(out), complement_pairs="position")
     assert run.reused_cache
     assert_same_outputs(base_run.out, run.out, DECISION_FILES)

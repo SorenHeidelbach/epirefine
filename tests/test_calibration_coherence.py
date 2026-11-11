@@ -122,7 +122,7 @@ def test_isotonic_and_temperature_curve():
 
 def test_parse_features():
     assert parse_features("legacy") == frozenset()
-    assert parse_features("consistent") == {"temper-then-mix", "common-tau", "em-priors"}   # the default since 0.11
+    assert parse_features("consistent") == {"temper-then-mix", "common-tau", "em-priors"}   # a named set, not the default
     assert parse_features("consistent,-em-priors") == {"temper-then-mix", "common-tau"}
     assert parse_features("coherent") == frozenset(COHERENT)
     assert parse_features("coherent,-common-tau") == frozenset(COHERENT) - {"common-tau"}

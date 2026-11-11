@@ -466,7 +466,8 @@ class FittedModel:
             target = 1.0 - self._outlier_responsibility(contam_eps)
             # convergence is judged on the full step, so a damped fit does not stop early
             self.robust_delta = np.abs(target - self.w)
-            self.w = self.w + alpha * (target - self.w)
+            # (alternating: the target itself, as in 0.10; w + 1.0 * (target - w) can differ from it in the last bit)
+            self.w = target if alpha == 1.0 else self.w + alpha * (target - self.w)
             self.robust_rounds = it + 1
             if self.robust_delta.max() < robust_tol:  # warm-started fits (e.g. the next tau) often need one or two rounds
                 raw = fit_profiles(raw)

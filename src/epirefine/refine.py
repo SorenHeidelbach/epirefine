@@ -282,6 +282,17 @@ def flagged_share_per_bin(given: np.ndarray, contaminant: np.ndarray, judged: np
     return np.divide(flag_bp, bin_bp, out=np.zeros(n_bins), where=bin_bp > 0)
 
 
+def suspected_merges(flagged_share: np.ndarray, max_flagged_share: float) -> np.ndarray:
+    """Per bin: True when the flags of the bin are not to be applied because its flagged contigs hold at least
+    max_flagged_share of its judged sequence (--max-flagged-share). At 1 or more the rule is off and no bin is
+    marked, also not a bin whose judged contigs are all flagged (share exactly 1): a diagnostic or an option at
+    its default must never withhold a flag."""
+    flagged_share = np.asarray(flagged_share, float)
+    if max_flagged_share >= 1:
+        return np.zeros(len(flagged_share), bool)
+    return flagged_share >= max_flagged_share
+
+
 def confidence(p: float) -> str:
     return next((name for lo, name in CONFIDENCE if p >= lo), "")
 

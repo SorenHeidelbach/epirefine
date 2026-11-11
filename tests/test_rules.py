@@ -130,3 +130,13 @@ def test_no_inclusion_into_a_bin_without_sites():
     kw = dict(given=np.full(N, -1), testable=np.zeros(N, bool), temperature=1.0, p_unknown=0.001)
     assert (refine(S, Su, **kw).include_bin == 1).all()
     assert (refine(S, Su, empty_bins=np.array([False, True]), **kw).include_bin == -1).all()
+
+
+def test_merged_bin_rule_is_off_at_its_default():
+    """--max-flagged-share 1 (default) withholds no flag, also in a bin whose judged contigs are all flagged
+    (share exactly 1: on ZymoFecal 4 bins with one or two judged contigs lost 5 flags to `>= 1`)."""
+    from epirefine.refine import suspected_merges
+    share = np.array([0.0, 0.3, 1.0])
+    assert not suspected_merges(share, 1.0).any()
+    assert suspected_merges(share, 0.5).tolist() == [False, False, True]
+    assert suspected_merges(share, 0.3).tolist() == [False, True, True]

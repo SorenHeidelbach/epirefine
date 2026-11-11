@@ -28,7 +28,8 @@ from .model import (FittedModel, logsumexp, posterior, summed_scores, unbinned_s
 from .motifs import (build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights,
                      specificity_ranks)
 from .redundancy import inclusion_redundancy
-from .refine import (bin_evidence_table, flagged_share_per_bin, refine, regional_pattern, withdraw_as_mixed,
+from .refine import (bin_evidence_table, flagged_share_per_bin, refine, regional_pattern, suspected_merges,
+                     withdraw_as_mixed,
                      write_outputs)
 from .sites import EncodedAssembly, extract_sites, same_pairs, unit_tables
 
@@ -90,13 +91,13 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1,
-        shared_sites="sample", complement_pairs="position", strand_sites="sum", noise_max_off_share=1.0,
+        shared_sites="sample", complement_pairs="sequence", strand_sites="sum", noise_max_off_share=1.0,
         robust_fit="alternating", max_flagged_share=1.0, regional_leave_out="chunk", regional_withdraw="vs_foreign",
         regional_tempered=False, gate_leave_out="none", gate_unweighted=False, eps_gated=False,
-        redundancy_order="sequential", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all",
+        redundancy_order="independent", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all",
         unknown_prior="bins", unknown_prior_strength=5.0,
-        calibration="consistent"):
-    """calibration: 'consistent' (default), 'legacy' (the calibration of 0.10), 'coherent', or a comma-separated
+        calibration="legacy", siteless_bin_guard=False):
+    """calibration: 'legacy' (default, the calibration of 0.10), 'consistent', 'coherent', or a comma-separated
     list of calibrate.FEATURES; see calibrate.parse_features."""
     args = dict(locals())  # first statement: the options as given
     runinfo.begin(args, _log)  # first log lines (version, command, inputs) and option ranges, before any work
@@ -467,7 +468,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     if fit is None:  # no calibration: one temperature, the unknown model as set
         fit = {"temperature": float(temperature), "eta": model.eta, "lam": model.lam, "curve": None}
     # options of the decision rules that both calibration paths pass on
-    rule_kw = dict(eps_gated=eps_gated, empty_bins=bin_chunks == 0,
+    rule_kw = dict(eps_gated=eps_gated, empty_bins=bin_chunks == 0 if siteless_bin_guard else None,
                    S_unlisted=model.unlisted_score(sc) if unlisted_genome else None)
     if unlisted_genome and new_path:
         raise ValueError("--unlisted-genome cannot be combined with the calibration features temper-then-mix, "
@@ -680,7 +681,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     L_arr = np.array([lengths[c] for c in targets], dtype=float)
     judged = testable & ~low_cov & ~short
     flagged_share = flagged_share_per_bin(given, ref.contaminant, judged, L_arr, H)
-    merged_bins = flagged_share >= max_flagged_share
+    # (only when asked for: at the default of 1 every flag is applied, as in 0.10. A share of exactly 1 is common
+    # on a metagenome, where one or two contigs of a bin have the coverage to be judged and are flagged.)
+    merged_bins = suspected_merges(flagged_share, max_flagged_share)
     if merged_bins.any():
         undo = ref.contaminant & merged_bins[np.maximum(given, 0)]
         ref.contaminant[undo] = False

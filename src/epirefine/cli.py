@@ -90,10 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="which group gets a position that motifs of several groups match: the group with the fewest "
                         "occurrences in the sampled sequence (sample), or the one whose motif is least frequent in "
                         "random sequence (motif; independent of the sample and the seed)")
-    g.add_argument("--complement-pairs", choices=["sequence", "position", "separate"], default="position",
+    g.add_argument("--complement-pairs", choices=["sequence", "position", "separate"], default="sequence",
                    help="a motif and its reverse complement in the motif list: one two-strand site per occurrence, paired "
-                        "only when each has a single modified position (position), paired by sequence alone "
-                        "(sequence, the behaviour up to 0.10), or kept as two motifs with single-strand sites (separate)")
+                        "by sequence (sequence), paired only when each has a single modified position (position), or "
+                        "kept as two motifs with single-strand sites (separate)")
     g.add_argument("--strand-sites", choices=["sum", "split", "auto"], default="sum",
                    help="reads of the two strands at one occurrence of a palindrome or complement pair: summed into one "
                         "site (sum), kept as one site per strand (split), or summed unless the strands can differ: "
@@ -123,13 +123,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--no-calibrate", action="store_true",
                    help="skip the calibration on pieces cut from the bins: probabilities are then uncalibrated "
                         "(temperature 1 and a fixed variation parameter unless --temperature / --tau are given)")
-    g.add_argument("--calibration", default="consistent",
-                   help="calibration design: 'consistent' (temper-then-mix, common-tau, em-priors: the 0.10 "
-                        "calibration with its confirmed defects corrected; same decisions on every development set), "
-                        "'legacy' (as in 0.10), 'coherent' (the full proposed design), or a comma-separated list of "
-                        "features (temper-then-mix, prior-averaged, prior-matched, conservative-temperature, "
-                        "full-test-b, unit-temperature, sites-temperature, common-tau, em-priors; '-name' removes "
-                        "one). See docs/development/method-notes.md")
+    g.add_argument("--calibration", default="legacy",
+                   help="calibration design: 'legacy' (as in 0.10), 'consistent' (temper-then-mix, common-tau, "
+                        "em-priors), 'coherent' (the full proposed design), or a comma-separated list of features "
+                        "(temper-then-mix, prior-averaged, prior-matched, conservative-temperature, full-test-b, "
+                        "unit-temperature, sites-temperature, common-tau, em-priors; '-name' removes one). "
+                        "See docs/development/method-notes.md")
     g.add_argument("--frag-lengths", type=lambda s: tuple(int(x) for x in s.split(",")), default=DEFAULT_LENGTHS,
                    help="lengths (bp, comma-separated) of the pieces cut from binned contigs for calibration; at "
                         "least one binned contig must be as long as the shortest")
@@ -157,8 +156,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how chunk weights and bin profiles are iterated: damped steps to convergence, or the fixed four "
                         "alternating rounds of 0.10.x (which end in the pooled profile when a bin holds two methylomes)")
     g.add_argument("--max-flagged-share", type=float, default=1.0,
-                   help="no flag of a bin is applied when its flagged contigs hold at least this share of the bin's "
-                        "sequence (the bin is reported as a suspected merge of genomes); 1 = always apply")
+                   help="below 1: no flag of a bin is applied when its flagged contigs hold at least this share of the "
+                        "bin's judged sequence (the bin is reported as a suspected merge of genomes); 1 = off, every "
+                        "flag is applied")
     g.add_argument("--regional-leave-out", choices=["contig", "chunk"], default="chunk",
                    help="bin profile the chunks of a long contig are compared with in the regional model: without the "
                         "whole contig (as for the contig's own score) or without the chunk only (0.10.x)")
@@ -189,10 +189,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="warn about a bin when, in some motif group, the smaller of two methylation states among its "
                         "chunks holds at least this share, or its flagged contigs hold at least this share of the "
                         "bin (bin_evidence.tsv, column warning; reporting only, no decision depends on it)")
-    g.add_argument("--redundancy-order", choices=["sequential", "independent"], default="sequential",
-                   help="compare each inclusion candidate with the bin plus the inclusions already accepted, in order "
-                        "of their probability (sequential), so that two unbinned copies of one sequence are not both "
-                        "included; or with the given bin only (independent, the behaviour up to 0.10)")
+    g.add_argument("--redundancy-order", choices=["sequential", "independent"], default="independent",
+                   help="compare each inclusion candidate with the given bin only (independent), or with the bin plus "
+                        "the inclusions already accepted, most probable first (sequential), so that two unbinned "
+                        "copies of one sequence are not both included")
+    g.add_argument("--siteless-bin-guard", action="store_true",
+                   help="include nothing into a bin without a single motif site (such a bin has no profile; its "
+                        "posterior is its prior share)")
     return ap
 
 
@@ -215,7 +218,7 @@ def main(argv=None):
                 cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed, shared_sites=a.shared_sites,
                 complement_pairs=a.complement_pairs, strand_sites=a.strand_sites,
                 noise_max_off_share=a.noise_max_off_share,
-                two_state_warning=a.two_state_warning,
+                two_state_warning=a.two_state_warning, siteless_bin_guard=a.siteless_bin_guard,
                 robust_fit=a.robust_fit,
                 max_flagged_share=a.max_flagged_share, regional_leave_out=a.regional_leave_out,
                 regional_withdraw=a.regional_withdraw, regional_tempered=a.regional_tempered,

@@ -69,14 +69,15 @@ FEATURES = {
 # act), prior-matched (same fits as prior-averaged, with a feedback loop between p_unknown and the fit),
 # conservative-temperature (useful without full-test-b; with it the rule only costs inclusions).
 COHERENT = ("temper-then-mix", "prior-averaged", "full-test-b", "common-tau", "em-priors")
-# The default since 0.11: the features of the proposal that change no decision on any development set and
+# A named set ('consistent'; not the default): the features of the proposal that change almost no decision on
+# the development sets and
 # correct confirmed defects of the 0.10 calibration (the order of tempering and mixing, tau compared over
 # different fragment sets, a flat prior on p_unknown, a contamination rate estimated before the gate).
 CONSISTENT = ("temper-then-mix", "common-tau", "em-priors")
 
 
 def parse_features(spec) -> frozenset:
-    """'legacy' (the calibration of 0.10), 'consistent' (CONSISTENT, the default), 'coherent' (COHERENT), or a
+    """'legacy' (the calibration of 0.10), 'consistent' (CONSISTENT), 'coherent' (COHERENT), or a
     comma-separated list of FEATURES, optionally after one of the three names ('-name' removes a feature)."""
     if spec is None:
         return frozenset()
