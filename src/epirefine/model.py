@@ -409,9 +409,17 @@ def fit_population_prior(ell: np.ndarray, group_modtype: list[str], lam: float =
 
 
 def host_profiles(ell: np.ndarray, log_pi: np.ndarray) -> np.ndarray:
-    """log posterior over phi_h per (bin, group)."""
+    """log posterior over phi_h per (bin, group). Large tables in row slices on threads (each (bin, group) row
+    from its own values: the same bits; 0.6 s a call on one thread for 490 bins x 710 groups, 5 calls a fit)."""
     lp = ell + log_pi[None, :, :]
-    return lp - logsumexp(lp, axis=-1, keepdims=True)
+    if lp.size < 1_000_000:
+        return lp - logsumexp(lp, axis=-1, keepdims=True)
+    flat = lp.reshape(-1, lp.shape[-1])
+
+    def rows(sl):
+        flat[sl] -= logsumexp(flat[sl], axis=-1, keepdims=True)
+    _on_threads(rows, len(flat), 64)
+    return lp
 
 
 def group_scores(Lp: np.ndarray, log_prof: np.ndarray) -> np.ndarray:

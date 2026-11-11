@@ -385,3 +385,14 @@ def test_profile_exp_flush_keeps_products():
         full = np.exp(b - b.max(1, keepdims=True))
         assert (full < M._TINY).any()
         np.testing.assert_array_equal(x @ M._profile_exp(b).T, x @ full.T)
+
+
+def test_host_profiles_threads_bits(monkeypatch):
+    """host_profiles on row slices on threads = the one-call expression, bit for bit."""
+    from scipy.special import logsumexp
+    monkeypatch.setenv("OMP_NUM_THREADS", "4")
+    rng = np.random.default_rng(9)
+    ell = -rng.gamma(2.0, 50.0, (40, 410, 64))
+    log_pi = np.log(rng.dirichlet(np.ones(64), 410))
+    lp = ell + log_pi[None]
+    assert np.array_equal(M.host_profiles(ell, log_pi), lp - logsumexp(lp, axis=-1, keepdims=True))
