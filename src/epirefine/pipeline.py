@@ -24,7 +24,7 @@ from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
-from .model import (FittedModel, _n_threads, logsumexp, posterior, summed_scores, unbinned_state_frequencies, unknown_logit,
+from .model import (LOO_THREADS_MIN, FittedModel, _n_threads, logsumexp, posterior, summed_scores, unbinned_state_frequencies, unknown_logit,
                     unknown_score)
 from .motifs import (build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights,
                      specificity_ranks)
@@ -460,8 +460,13 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
             diff[i] = np.where(n_sites_group[i] > 0, gap, 0.0).max()
         if regional_leave_out == "contig" and len(own) >= 2:
             llr_loo[own] = model.chunk_llr(own, prof)
-    with ThreadPoolExecutor(_n_threads()) as ex:
-        list(ex.map(leave_out, [i for i, c in enumerate(targets) if c in host_set]))
+    binned = [i for i, c in enumerate(targets) if c in host_set]
+    if L_t.shape[1] * L_t.shape[2] < LOO_THREADS_MIN:  # small tables: Python-bound, threads only contend
+        for i in binned:
+            leave_out(i)
+    else:
+        with ThreadPoolExecutor(_n_threads()) as ex:
+            list(ex.map(leave_out, binned))
     loo = dict(sorted(loo.items()))  # in contig order, as the loop filled it
 
     # bin refinement: contamination of binned contigs, inclusion of unbinned ones

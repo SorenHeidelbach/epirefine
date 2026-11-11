@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from scipy.special import expit, logsumexp
 
 from .assignability import margin_vs_competitors
-from .model import FittedModel, _n_threads, posterior, summed_scores, unknown_logit, unknown_score
+from .model import LOO_THREADS_MIN, FittedModel, _n_threads, posterior, summed_scores, unknown_logit, unknown_score
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -581,8 +581,12 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             prof = model.loo_profile(fbin[frs[0]], leave_out[frs[0]])
             for i in frs:
                 A_own[i] = model.loo_rescore(sc, i, fbin[i], leave_out[i], prof=prof)
-        with ThreadPoolExecutor(max(1, min(_n_threads(), len(by_key)))) as ex:
-            list(ex.map(one_contig, by_key.values()))
+        if L_frag.shape[1] * L_frag.shape[2] < LOO_THREADS_MIN:  # small tables: Python-bound, threads only contend
+            for frs in by_key.values():
+                one_contig(frs)
+        else:
+            with ThreadPoolExecutor(max(1, min(_n_threads(), len(by_key)))) as ex:
+                list(ex.map(one_contig, by_key.values()))
         # fragments from chunks the robust model calls foreign to their bin carry a wrong label
         keep = has_rest & np.array([bool((model.w[ch] >= 0.5).all()) for ch in chunks_of])
         # the chunks' marginal tables (as large as L_chunks) were last needed by the leave-out profiles

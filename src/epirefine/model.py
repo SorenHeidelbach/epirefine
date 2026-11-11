@@ -458,6 +458,8 @@ def _group_term(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return q
 
 
+LOO_THREADS_MIN = 16_384  # groups x grid cells from which the leave-one-out loops run on threads (ZymoOral, 34 x 64:
+                          # one thread was faster; ZymoFecal, 710 x 64: 1.6 ms of numpy work per contig)
 ROWS_MIN = 20_000_000   # unit x bin x group cells from which summed_scores takes the row form
 ROWS_STEP = 128         # units per row slice of the row form (a divisor of FittedModel.SCORE_BATCH)
 ROWS_GROUPS = 4         # groups per step of a row slice
