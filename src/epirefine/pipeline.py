@@ -24,7 +24,7 @@ from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
-from .model import (LOO_THREADS_MIN, FittedModel, _n_threads, logsumexp, posterior, summed_scores, unbinned_state_frequencies, unknown_logit,
+from .model import (LOO_THREADS_MIN, FittedModel, _cores, _n_threads, logsumexp, posterior, summed_scores, unbinned_state_frequencies, unknown_logit,
                     unknown_score)
 from .motifs import (build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights,
                      specificity_ranks)
@@ -287,7 +287,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         _log(f"redundant motif groups: {int((group_w < 1).sum())} groups in {wtab.filter(pl.col('cluster_size') > 1)['cluster'].n_unique()} "
              f"clusters down-weighted (effective groups {group_w.sum():.0f} of {n_groups})")
     det = fit_detection_by_bin(counts_bin, dict(enumerate(group_modtype)),
-                               workers=workers or min(16, os.cpu_count() or 1))
+                               workers=workers or min(16, _cores()))
     _write(detection_table(det), out / "detection_model.tsv")
     _log("detection model fitted")
 
@@ -415,6 +415,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # comparable shares under the alternating scheme): its chunk calls and its contigs' scores are not reliable
     unconverged = model.robust_unconverged()
     two_share, two_group = model.two_state_share()
+    _log(f"two-state screen: {int((two_group >= 0).sum())} of {H} bins with a second methylation state in a motif group")
     if unconverged.any():
         _log(f"WARNING: robust host profile did not converge for {int(unconverged.sum())} of {H} bins "
              f"({', '.join(bins[b] for b in np.flatnonzero(unconverged)[:10])}{', ...' if unconverged.sum() > 10 else ''}): "
@@ -431,6 +432,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     refit_unknown = "prior-matched" in features
     all_lp_rows = refit_unknown or unknown_prior == "unbinned" or unlisted_genome or inclusion_support != "none"
     sc = model.score(L_t, lp_rows=None if all_lp_rows else [i for i, c in enumerate(targets) if c in host_set])
+    _log(f"scores: {len(targets)} contigs against {H} bins and an unbinned genome")
     if unknown_prior == "unbinned":
         # the unbinned-genome model draws each motif group's state at the frequency seen among the unbinned
         # contigs that get a decision, not among the bins (model.unbinned_state_frequencies)
@@ -493,6 +495,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         with ThreadPoolExecutor(_n_threads()) as ex:
             list(ex.map(leave_out, binned))
     loo = dict(sorted(loo.items()))  # in contig order, as the loop filled it
+    _log(f"leave-one-out scores: {len(binned) - len(sole_contig)} binned contigs ({len(sole_contig)} sole contigs of their bin)")
 
     # bin refinement: contamination of binned contigs, inclusion of unbinned ones
     given = np.array([bin_idx[cb[c]] if c in cb else -1 for c in targets])
@@ -501,7 +504,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     best_bin = np.where(given >= 0, given, sc.S.argmax(1))
     evidence, _, coverage = contig_evidence(parts, {cid[c]: i for i, c in enumerate(targets)}, best_bin, model, det,
                                             grid, float(np.median(np.atleast_1d(temperature))), min_cov,
-                                            group_weights=group_w if group_weights else None, drop_groups=drop)
+                                            group_weights=group_w if group_weights else None, drop_groups=drop, log=_log)
     _log(f"methylation evidence: {int((np.nan_to_num(evidence, nan=0.0) < min_evidence).sum())} of {len(targets)} "
          f"contigs below {min_evidence:g} (expected log BF vs a community genome)")
     # contamination calls only on contigs with enough coverage: against Hi-C on ZymoFecal, flags were

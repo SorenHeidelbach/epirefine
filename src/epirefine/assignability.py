@@ -192,7 +192,7 @@ EVIDENCE_BATCH = 2000  # contigs per batch of the evidence tables and margins
 def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray, model: FittedModel,
                     det: dict[int, DetectionParams], grid: Grid, temperature: float, min_cov: int = 1,
                     workers: int = 1, group_weights: np.ndarray | None = None, drop_groups=(),
-                    nearest: bool = False):
+                    nearest: bool = False, log=None):
     """Expected methylation evidence and coverage per target contig.
 
     Evidence: the expected log BF (tempered) that the contig's sites would give for bin truth[u] over a
@@ -225,6 +225,8 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
               .unique().collect())
     expected_tables(combos.with_columns(pl.lit(0).alias("unit")), 1, model.log_prof.shape[1], det, grid,
                     dtype=np.float32, table=shared)
+    if log is not None:
+        log(f"  evidence: expectation table of {len(shared)} (group, coverage) combinations")
 
     def evaluate(sites: pl.DataFrame):
         sites = sites.filter(pl.col("contig").is_in(want))
@@ -256,6 +258,8 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
                 vs_unk[ub] = margin_vs_unknown(model, H1, H0, truth[ub], temperature, batch=EVIDENCE_BATCH)
             del H1, H0
 
+    done = [0]
+
     def one(f):
         d = pl.read_parquet(f, columns=["contig", "group", "n"])
         if split.len():
@@ -264,6 +268,9 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
         else:
             held = None
         evaluate(d)
+        done[0] += 1
+        if log is not None and done[0] % max(1, len(parts) // 4) == 0:
+            log(f"  evidence: {done[0]}/{len(parts)} parts")
         return held
 
     with ThreadPoolExecutor(max(1, workers)) as ex:
