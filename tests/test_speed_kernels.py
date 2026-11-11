@@ -260,3 +260,28 @@ def test_lengths_and_sample_from_the_cached_assembly(community, base_run, tmp_pa
     other = shutil.copy(args["assembly"], tmp_path / "copy.fasta")          # another path: not this cache's file
     assert P._cached_assembly(base_run.out / "cache", other) is None
     assert P._cached_assembly(tmp_path / "no_cache", args["assembly"]) is None
+
+
+@pytest.mark.parametrize("threads", ["1", "4"])
+def test_own_bin_scores_and_margin_vs_unknown(monkeypatch, threads):
+    """own_scores = score_units at the unit's own bin, margin_vs_unknown = the vs-unknown margin of
+    margin_vs_competitors, to rounding (the per-unit dot product sums in another order than the matrix product)."""
+    import epirefine.assignability as A
+    monkeypatch.setenv("OMP_NUM_THREADS", threads)
+    rng = np.random.default_rng(5)
+    grid = Grid(64)
+    U, Mg, H = 300, 13, 9
+    model = object.__new__(M.FittedModel)
+    lp = np.log(rng.dirichlet(np.ones(64) * 0.3, (H, Mg)))
+    model.grid, model.n_bins, model.log_prof = grid, H, lp
+    model.log_pi = np.log(np.exp(lp).mean(0))
+    model.T = M.transition_spec(grid, 100.0)
+    Lp = _tables(rng, U, Mg)
+    t = rng.integers(0, H, U)
+    full = A.score_units(Lp, lp)
+    np.testing.assert_allclose(A.own_scores(Lp, lp, t), full[np.arange(U), t], rtol=1e-13)
+    H1, H0 = (-rng.gamma(2.0, 3.0, (U, Mg, 64)).astype(np.float32) for _ in range(2))
+    H1[rng.random((U, Mg)) < 0.3] = 0.0
+    _, _, ref = A.margin_vs_competitors(model, H1, H0, t, 1.7, batch=128)
+    np.testing.assert_allclose(A.margin_vs_unknown(model, H1, H0, t, 1.7, batch=128), ref, rtol=1e-12, atol=1e-9)
+

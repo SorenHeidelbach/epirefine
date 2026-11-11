@@ -128,9 +128,49 @@ def margin_vs_competitors(model: FittedModel, H1, H0, truth: np.ndarray, tempera
     return vs_bin, nearest, vs_unk
 
 
+def own_scores(Lp: np.ndarray, log_prof: np.ndarray, t: np.ndarray, batch: int = 64) -> np.ndarray:
+    """score_units(Lp, log_prof)[u, t[u]] without scoring the other bins: the same terms per group,
+    log(exp(a - max a) . exp(b - max b)) + max a + max b, with the dot product taken for the unit's own bin only
+    (H times less work; the sums run in another order than in the matrix product, so the score agrees with
+    score_units to rounding, about 1e-15 relative)."""
+    U = len(Lp)
+    bm = log_prof.max(-1)                       # [H, M]
+    eb = np.exp(log_prof - bm[..., None])       # [H, M, G]
+    out = np.empty(U)
+
+    def rows(sl):
+        for s in range(sl.start, sl.stop, batch):
+            e_ = min(s + batch, sl.stop)
+            x, tt = Lp[s:e_], t[s:e_]
+            am = x.max(-1)
+            q = np.einsum("umg,umg->um", np.exp(x - am[..., None]).astype(np.float64), eb[tt])
+            np.log(np.maximum(q, 1e-300, out=q), out=q)
+            q += am
+            q += bm[tt]
+            out[s:e_] = q.sum(1)
+    _on_threads(rows, U)
+    return out
+
+
+def margin_vs_unknown(model: FittedModel, H1, H0, truth: np.ndarray, temperature: float, batch: int = 2000):
+    """(b) of margin_vs_competitors alone: the expected log BF of the true bin over unknown, with only the true
+    bin scored (own_scores) instead of every bin."""
+    U = len(truth)
+    vs_unk = np.zeros(U)
+    phi_h = phi_means(model)
+    for s in range(0, U, batch):
+        sl = slice(s, s + batch)
+        t = truth[sl]
+        Lp = model.marginal(asimov(H1[sl], H0[sl], phi_h[t]))
+        Su = score_units(Lp, model.log_pi[None])[:, 0]
+        vs_unk[sl] = (own_scores(Lp, model.log_prof, t) - Su) / temperature
+    return vs_unk
+
+
 def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray, model: FittedModel,
                     det: dict[int, DetectionParams], grid: Grid, temperature: float, min_cov: int = 1,
-                    workers: int = 1, group_weights: np.ndarray | None = None, drop_groups=()):
+                    workers: int = 1, group_weights: np.ndarray | None = None, drop_groups=(),
+                    nearest: bool = False):
     """Expected methylation evidence and coverage per target contig.
 
     Evidence: the expected log BF (tempered) that the contig's sites would give for bin truth[u] over a
@@ -140,7 +180,8 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
     sites, before min_cov).
 
     parts: site-cache parquet files (contig, group, pos, n, k); unit_of: cache contig id -> target
-    index. Parts are processed one after another (BLAS uses the cores inside each): running parts
+    index. nearest=False leaves vs_nearest_bin NaN and scores each contig against its true bin only (the
+    pipeline reads vs_unknown alone; scoring every bin was most of the step's time). Parts are processed one after another (BLAS uses the cores inside each): running parts
     on threads put 12 x 16 BLAS threads over OpenBLAS's limit and corrupted the heap (ZymoFecal,
     2026-10-27). Contigs split across parts are evaluated together at the end. Returns (vs_unknown [U], vs_nearest_bin [U], coverage [U]); NaN where truth < 0 or no sites.
     """
@@ -182,8 +223,11 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
         if group_weights is not None:
             gw = np.asarray(group_weights, np.float32)[None, :, None]
             H1, H0 = H1 * gw, H0 * gw
-        b, _, u = margin_vs_competitors(model, H1, H0, truth[units], temperature)
-        vs_bin[units], vs_unk[units] = b, u   # each contig is evaluated in exactly one call
+        if nearest:
+            b, _, u = margin_vs_competitors(model, H1, H0, truth[units], temperature)
+            vs_bin[units], vs_unk[units] = b, u   # each contig is evaluated in exactly one call
+        else:
+            vs_unk[units] = margin_vs_unknown(model, H1, H0, truth[units], temperature)
 
     def one(f):
         d = pl.read_parquet(f, columns=["contig", "group", "n"])
