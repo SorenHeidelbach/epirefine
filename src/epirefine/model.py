@@ -32,7 +32,7 @@ from .detection import DetectionParams, bb_logpmf
 from .grid import Grid
 
 
-def logsumexp(a: np.ndarray, axis: int = -1, keepdims: bool = False) -> np.ndarray:
+def logsumexp(a: np.ndarray, axis: int = -1, keepdims: bool = False, work: np.ndarray | None = None) -> np.ndarray:
     """log sum exp(a) along one axis: the arithmetic of scipy.special.logsumexp (1.15 and later) without
     its array-API layer, which cost 86 us per call and was 60% of calibration and scoring, called once per
     fragment and per contig.
@@ -41,13 +41,20 @@ def logsumexp(a: np.ndarray, axis: int = -1, keepdims: bool = False) -> np.ndarr
     exp(a - max) over the rest divided by m, result = log1p(s) + log(m) + max; rows whose result is not
     finite (all -inf, an inf, a nan) fall back to log(sum(exp(a))). Same operations on the same operands,
     so the same bits (test against scipy).
+
+    work: an array of the shape and dtype of `a` that may be overwritten (the exponentials are written
+    there instead of into two new arrays as large as `a`; same values).
     """
     a = np.asarray(a)
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
         a_max = a.max(axis=axis, keepdims=True)
         top = a == a_max
         m = top.sum(axis=axis, keepdims=True, dtype=a.dtype)
-        e = np.exp(a - a_max)
+        if work is None:
+            e = np.exp(a - a_max)
+        else:
+            e = np.subtract(a, a_max, out=work)
+            np.exp(e, out=e)
         e[top] = 0.0
         s = e.sum(axis=axis, keepdims=True)
         s = np.where(s == 0, s, s / m)
@@ -56,6 +63,23 @@ def logsumexp(a: np.ndarray, axis: int = -1, keepdims: bool = False) -> np.ndarr
         if not finite.all():
             out = np.where(finite, out, np.log(np.exp(a).sum(axis=axis, keepdims=True)))
     return out if keepdims else out.squeeze(axis)
+
+
+def _n_threads():
+    return min(16, os.cpu_count() or 1)
+
+
+def _on_threads(fn, n: int, min_step: int = 1) -> None:
+    """fn(slice) over [0, n) in contiguous pieces, one per thread (numpy releases the GIL in its loops).
+    For work in which every row is computed from its own values only: the pieces do not change a result."""
+    step = max(min_step, -(-n // _n_threads()))
+    slices = [slice(s, min(s + step, n)) for s in range(0, n, step)]
+    if len(slices) <= 1:
+        for sl in slices:
+            fn(sl)
+        return
+    with ThreadPoolExecutor(len(slices)) as ex:
+        list(ex.map(fn, slices))
 
 
 def site_terms(keys: pl.DataFrame, det: dict[int, DetectionParams], grid: Grid, block: int = 65_536) -> np.ndarray:
@@ -106,17 +130,43 @@ def marginalize_unit(L: np.ndarray, T, batch: int = 2048) -> np.ndarray:
 
     T is one [G, G] matrix for all groups, or a list of (group indices, [G, G] matrix) pairs when
     groups have different between-unit variation (per-group tau).
+
+    Per batch, the element-wise passes (max, exp before the product; floor, log, shift after it) run on
+    threads over row slices; the matrix product is the same single call over the whole batch as before, so
+    every value has the same bits. They were one thread's work for the whole table (1.4 billion cells for
+    30,479 chunks x 710 groups: 30 s of the 210 s each calibration model took). With an identity matrix (no
+    between-unit variation) the product returns its input and is skipped.
     """
     out = np.empty_like(L)
     parts = [(slice(None), T)] if isinstance(T, np.ndarray) else T
     tiny = np.finfo(L.dtype).tiny
     for ms, Tm in parts:
         Tt = Tm.T.astype(L.dtype)
+        identity = Tm.shape[0] == Tm.shape[1] and np.array_equal(Tm, np.eye(Tm.shape[0]))
         for s in range(0, L.shape[0], batch):
             x = L[s:s + batch, ms]
-            mx = x.max(-1, keepdims=True)
-            q = np.exp(x - mx) @ Tt
-            out[s:s + batch, ms] = np.log(np.maximum(q, tiny)) + mx
+            mx = np.empty(x.shape[:-1] + (1,), L.dtype)
+            e = np.empty(x.shape, L.dtype)
+
+            def before(sl):
+                np.max(x[sl], axis=-1, keepdims=True, out=mx[sl])
+                np.subtract(x[sl], mx[sl], out=e[sl])
+                np.exp(e[sl], out=e[sl])
+            _on_threads(before, len(x), 16)
+            q = e if identity else e @ Tt
+            dst = out[s:s + batch] if isinstance(ms, slice) else None
+
+            def after(sl):
+                r = q[sl]
+                np.maximum(r, tiny, out=r)
+                np.log(r, out=r)
+                if dst is not None:
+                    np.add(r, mx[sl], out=dst[sl])
+                else:
+                    r += mx[sl]
+            _on_threads(after, len(x), 16)
+            if dst is None:
+                out[s:s + batch, ms] = q
     return out
 
 
@@ -128,16 +178,32 @@ def transition_spec(grid: Grid, tau, delta: float = 1.0):
     return [(np.flatnonzero(tau == t), grid.transition(float(t), delta)) for t in np.unique(tau)]
 
 
+BIN_BYTES = 2 << 30  # memory bin_loglik may use for the float64 copies of the bins its threads are summing
+
+
 def bin_loglik(Lp_chunks: np.ndarray, chunk_bin: np.ndarray, n_bins: int, w: np.ndarray | None = None) -> np.ndarray:
-    """ell[h] = sum of w * Lp over the chunks of bin h (float64)."""
+    """ell[h] = sum of w * Lp over the chunks of bin h (float64).
+
+    Bins are summed on threads (each bin is one product over its own chunks, as before: same bits), as many
+    at once as keep the float64 copies of their chunks within BIN_BYTES (the largest bin sets the number)."""
     ell = np.zeros((n_bins,) + Lp_chunks.shape[1:])
     w = np.ones(len(chunk_bin)) if w is None else w
     order = np.argsort(chunk_bin, kind="stable")
     bounds = np.searchsorted(chunk_bin[order], np.arange(n_bins + 1))
-    for h in range(n_bins):
+
+    def one(h):
         idx = order[bounds[h]:bounds[h + 1]]
         if len(idx):
             ell[h] = np.tensordot(w[idx], Lp_chunks[idx].astype(np.float64), 1)
+    largest = int(np.diff(bounds).max()) if n_bins else 0
+    per_bin = largest * int(np.prod(Lp_chunks.shape[1:])) * (8 + Lp_chunks.dtype.itemsize)
+    threads = int(max(1, min(_n_threads(), n_bins, BIN_BYTES // max(per_bin, 1))))
+    if threads <= 1:
+        for h in range(n_bins):
+            one(h)
+    else:
+        with ThreadPoolExecutor(threads) as ex:
+            list(ex.map(one, range(n_bins)))
     return ell
 
 
@@ -202,10 +268,6 @@ def _group_term(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     q += am
     q += bm.T
     return q
-
-
-def _n_threads():
-    return min(16, os.cpu_count() or 1)
 
 
 SCORE_BYTES = 4 << 30  # memory summed_scores may use for the [U, H] work arrays of its threads
@@ -551,14 +613,24 @@ class FittedModel:
             self._s_out = np.empty(len(self.chunk_bin))
 
             def out_term(sl):
-                self._s_out[sl] = logsumexp(self.Lp_chunks[sl].astype(np.float64) + self.log_pi[None], -1).sum(-1)
+                a = self.Lp_chunks[sl].astype(np.float64)
+                np.add(a, self.log_pi[None], out=a)
+                self._s_out[sl] = logsumexp(a, -1, work=np.empty_like(a)).sum(-1)
             self._batched(out_term, batch)
         r = np.empty(len(self.chunk_bin))
 
         def work(sl):
+            # the same operations on the same operands as
+            #     ell_loo = ell[bin] - w * Lp;  s_in = logsumexp(Lp + host_profiles(ell_loo, log_pi)).sum()
+            # written into three [batch, M, G] arrays instead of eleven (the time went into filling them)
             Lp = self.Lp_chunks[sl].astype(np.float64)
-            ell_loo = self.ell[self.chunk_bin[sl]] - self.w[sl, None, None] * Lp
-            s_in = logsumexp(Lp + host_profiles(ell_loo, self.log_pi), -1).sum(-1)
+            a = self.ell[self.chunk_bin[sl]]
+            t = np.multiply(self.w[sl, None, None], Lp)
+            np.subtract(a, t, out=a)
+            np.add(a, self.log_pi[None, :, :], out=a)
+            np.subtract(a, logsumexp(a, axis=-1, keepdims=True, work=t), out=a)
+            np.add(Lp, a, out=a)
+            s_in = logsumexp(a, -1, work=t).sum(-1)
             r[sl] = expit(np.log(eps) - np.log1p(-eps) + self._s_out[sl] - s_in)
         self._batched(work, batch)
         return r

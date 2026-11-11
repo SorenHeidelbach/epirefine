@@ -562,11 +562,19 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     # a fragment whose contig is its whole bin has no independent profile to be scored against
     has_rest = np.array([len(lo) < bin_chunks[b] for lo, b in zip(leave_out, fbin)])
 
+    loo_keys = {int(i): (int(fbin[i]), np.asarray(leave_out[i]).tobytes()) for i in np.flatnonzero(has_rest)}
+    loo_order = sorted(loo_keys, key=lambda i: (loo_keys[i], i))
+
     def own_and_scores(model):
         sc = model.score(L_frag)
         A_own = np.zeros(L_frag.shape[:2])
-        for i in np.flatnonzero(has_rest):
-            A_own[i] = model.loo_rescore(sc, i, fbin[i], leave_out[i])
+        prof_key, prof = None, None
+        for i in loo_order:
+            # fragments of one contig leave the same chunks out of the same bin: one profile for all of them
+            # (it was rebuilt for each: 4,450 fragments from 1,359 contigs on ZymoFecal)
+            if loo_keys[i] != prof_key:
+                prof_key, prof = loo_keys[i], model.loo_profile(fbin[i], leave_out[i])
+            A_own[i] = model.loo_rescore(sc, i, fbin[i], leave_out[i], prof=prof)
         # fragments from chunks the robust model calls foreign to their bin carry a wrong label
         keep = has_rest & np.array([bool((model.w[ch] >= 0.5).all()) for ch in chunks_of])
         # the chunks' marginal tables (as large as L_chunks) were last needed by the leave-out profiles
