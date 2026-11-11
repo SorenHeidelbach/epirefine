@@ -318,7 +318,8 @@ def test_site_terms_blocks_are_bit_identical():
         assert np.array_equal(site_terms(keys, det, grid, block=block), whole)
 
 
-def test_summed_scores_same_bits_whatever_the_memory_budget():
+def test_summed_scores_same_bits_whatever_the_memory_budget(monkeypatch):
+    monkeypatch.setenv("EPIREFINE_RS", "0")  # the numpy sums (the kernel of epirefine-rs: tests/test_rs_model.py)
     """Scores don't depend on how many group blocks run at once, and equal the block-wise sums they replace."""
     from epirefine import model as md
     rng = np.random.default_rng(11)

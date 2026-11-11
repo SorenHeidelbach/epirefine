@@ -458,6 +458,31 @@ def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None
     H = log_prof.shape[0]
     if rel is not None:
         le1, le0 = np.log1p(-rel[0]), np.log(rel[0]) + rel[1]
+    rs = _rs("score_sums") if U * H * M >= 100_000 else None
+    if rs is not None:
+        # The kernel of epirefine-rs does the sums; the exponentials stay numpy's (the float32 exp of the unit
+        # tables decides the eighth digit of a score). Groups are added in ascending order there, in blocks of
+        # groups here: scores agree to about 1e-14 relative.
+        bm = log_prof.max(-1)                                                          # [H, M]
+        eb = np.ascontiguousarray(np.exp(log_prof - bm[..., None]).transpose(1, 2, 0))  # [M, G, H]
+        bm = np.ascontiguousarray(bm.T)
+        S = np.empty((U, H))
+        R = np.empty((U, H)) if rel is not None else None
+        step = int(max(32, min(4096, (256 << 20) // max(1, M * Lp.shape[2] * 8))))  # e of a batch: about 256 MB
+        for s in range(0, U, step):
+            x = Lp[s:s + step]
+            am = np.empty(x.shape[:2], Lp.dtype)
+            e = np.empty(x.shape, np.float64)
+
+            def fill(sl):
+                np.max(x[sl], axis=-1, out=am[sl])
+                e[sl] = np.exp(x[sl] - am[sl][..., None])
+            _on_threads(fill, len(x))
+            S[s:s + step], r = rs.score_sums(e, am.astype(np.float64), eb, bm, le1 if rel is not None else 0.0,
+                                             le0[s:s + step] if rel is not None else None, threads=_n_threads())
+            if rel is not None:
+                R[s:s + step] = r
+        return (S, R) if rel is not None else S
 
     def work(ms):
         acc = np.zeros((U, H))

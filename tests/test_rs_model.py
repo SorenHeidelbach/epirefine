@@ -104,3 +104,21 @@ def test_motif_grouping_scan_gives_the_same_records(monkeypatch, community):
     monkeypatch.delenv("EPIREFINE_RS")
     got = build_records(contigs, motifs)
     assert ref.height > 0 and ref.schema == got.schema and ref.equals(got)
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_summed_scores(monkeypatch, dtype):
+    """The scoring sums with the kernel: equal to the numpy sums to rounding (the exponentials are numpy's in both)."""
+    if not rs.supports("score_sums"):
+        pytest.skip("epirefine-rs without score_sums")
+    rng = np.random.default_rng(6)
+    grid = Grid(64)
+    L, cb = _tables(rng, U=300, Mg=9), rng.integers(0, 5, 300)
+    monkeypatch.setenv("EPIREFINE_RS", "0")
+    m = M.FittedModel(L, cb, 5, ["a"] * 9, grid, 100.0)
+    Lp = m.marginal(_tables(rng, U=130, Mg=9)).astype(dtype)
+    Au = M.group_scores(Lp, m.log_pi[None])[:, 0, :]
+    ref, got = _both(monkeypatch, lambda: M.summed_scores(Lp, m.log_prof, rel=(0.05, Au)))
+    assert np.allclose(got[0], ref[0], rtol=1e-12, atol=0) and np.allclose(got[1], ref[1], rtol=1e-12, atol=0)
+    ref, got = _both(monkeypatch, lambda: M.summed_scores(Lp, m.log_prof))
+    assert np.allclose(got, ref, rtol=1e-12, atol=0)
