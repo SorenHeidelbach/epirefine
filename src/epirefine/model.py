@@ -526,25 +526,28 @@ def group_scores(Lp: np.ndarray, log_prof: np.ndarray) -> np.ndarray:
     U, M, G = Lp.shape
     A = np.empty((U, log_prof.shape[0], M))
     if log_prof.shape[0] == 1 and U * M * G >= 1_000_000:
-        # one profile (the community prior): _group_term's steps for all groups of a block of units at once, the
-        # products as one stacked matmul (per group the same [units, G] x [G, 1] BLAS call: the same bits). The
-        # group-by-group loop made 710 small calls per scoring (33 s over a ZymoFecal run).
+        # one profile (the community prior): _group_term's steps for a few groups at a time over all units, the
+        # products as one stacked matmul whose items are the [units, G] x [G, 1] products of the group-by-group loop
+        # (the same BLAS call on the same operands: the same bits; the loop's 710 small calls per scoring and their
+        # element-wise steps took 33 s over a ZymoFecal run)
         b = log_prof[0]                                       # [M, G]
         bm = b.max(1, keepdims=True)                          # [M, 1]
         eb = _profile_exp(b)[:, :, None]                      # [M, G, 1]
+        k = max(1, (32 << 20) // max(1, U * G * 8))           # groups per step: about 32 MB of exponentials
 
-        def rows(sl):  # 32 units at a time: about 20 MB of temporaries per thread
-            for s in range(sl.start, sl.stop, 32):
-                a = Lp[s:min(s + 32, sl.stop)]
-                am = a.max(2, keepdims=True)                  # [u, M, 1]
-                e = np.empty((a.shape[1], len(a), a.shape[2]))   # [M, u, G] float64
+        def groups(sl):
+            for m0 in range(sl.start, sl.stop, k):
+                ms = slice(m0, min(m0 + k, sl.stop))
+                a = Lp[:, ms, :]                              # [U, k, G]
+                am = a.max(2, keepdims=True)
+                e = np.empty((ms.stop - m0, U, G))
                 e[...] = np.exp(a - am).transpose(1, 0, 2)    # (float32 exp, as _group_term)
-                q = np.matmul(e, eb)[:, :, 0].T               # [u, M]
+                q = np.matmul(e, eb[ms])[:, :, 0].T           # [U, k]
                 np.log(np.maximum(q, 1e-300, out=q), out=q)
                 q += am[:, :, 0]
-                q += bm[:, 0]
-                A[s:s + len(a), 0, :] = q
-        _on_threads(rows, U, 32)
+                q += bm[ms, 0]
+                A[:, 0, ms] = q
+        _on_threads(groups, M)
         return A
     for m in range(M):
         A[:, :, m] = _group_term(Lp[:, m, :], log_prof[:, m, :])

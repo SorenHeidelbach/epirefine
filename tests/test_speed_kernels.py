@@ -541,10 +541,10 @@ def test_loo_batched_equals_one_by_one():
 def test_group_scores_one_profile_bits():
     """group_scores against one profile (the community prior): the stacked form = the group-by-group loop."""
     rng = np.random.default_rng(15)
-    Lp = _tables(rng, 700, 31)
+    Lp = _tables(rng, 4451, 31)
     lp = np.log(rng.dirichlet(np.ones(64) * 0.05, (1, 31)))
     lp[0, 3, :20] = -900.0
-    want = np.empty((700, 1, 31))
+    want = np.empty((4451, 1, 31))
     for m in range(31):
         want[:, :, m] = M._group_term(Lp[:, m, :], lp[:, m, :])
     assert np.array_equal(M.group_scores(Lp, lp), want)
