@@ -557,7 +557,7 @@ def _group_term(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 LOO_THREADS_MIN = 16_384  # groups x grid cells from which the leave-one-out loops run on threads (ZymoOral, 34 x 64:
                           # one thread was faster; ZymoFecal, 710 x 64: 1.6 ms of numpy work per contig)
-LOO_BATCH = 32  # contigs per batch of the leave-one-out loops (loo_profiles / loo_rescore_many)
+LOO_BATCH = 16  # contigs per batch of the leave-one-out loops (loo_profiles / loo_rescore_many)
 ROWS_MIN = 20_000_000   # unit x bin x group cells from which summed_scores takes the row form
 ROWS_STEP = 128         # units per row slice of the row form (a divisor of FittedModel.SCORE_BATCH)
 ROWS_GROUPS = 4         # groups per step of a row slice
@@ -1208,30 +1208,22 @@ class FittedModel:
 
     def loo_profiles(self, bins, chunk_lists) -> np.ndarray:
         """loo_profile of many (bin, chunks) pairs at once: [K, M, G], row k the values loo_profile(bins[k],
-        chunk_lists[k])[0] gives (the chunks' weighted tables summed in the same order by reduceat, the profiles row
-        by row). One profile per call held the GIL for most of its time: on ZymoFecal the leave-one-out loops' 16
+        chunk_lists[k])[0] gives (the chunk sums contig by contig, the profiles for all rows in one step). One profile per call held the GIL for most of its time: on ZymoFecal the leave-one-out loops' 16
         threads spent 820 thread-seconds in 50,000 such calls."""
         ell = self.ell[np.asarray(bins, np.int64)]
-        lens = np.array([len(c) for c in chunk_lists], np.int64)
-        has = np.flatnonzero(lens)
-        if len(has):
-            # the chunk terms added one chunk position at a time over all contigs, as .sum(0) adds them (reduceat
-            # adds in another order)
-            cat = np.concatenate([np.asarray(chunk_lists[k], np.int64) for k in has])
-            starts = np.concatenate([[0], np.cumsum(lens[has])[:-1]])
-            terms = self.w[cat, None, None] * self.Lp_chunks[cat]
-            sums = np.zeros((len(has),) + terms.shape[1:])
-            for j in range(int(lens[has].max())):
-                at = np.flatnonzero(lens[has] > j)
-                sums[at] += terms[starts[at] + j]
-            ell[has] -= sums
-        return host_profiles(ell, self.log_pi)
+        for k, ch in enumerate(chunk_lists):  # (per contig, as loo_profile: no more chunk terms in memory than it held)
+            if len(ch):
+                ell[k] -= (self.w[ch, None, None] * self.Lp_chunks[ch]).sum(0)
+        lp = ell + self.log_pi[None, :, :]  # host_profiles' expression (its threaded form is for one large call)
+        return lp - logsumexp(lp, axis=-1, keepdims=True)
 
     def loo_rescore_many(self, sc: Scores, rows, bins, profs: np.ndarray) -> np.ndarray:
         """loo_rescore for units rows[f] (distinct) of bins[f] against profiles profs[f] [F, M, G], in place on sc;
         each unit's values as loo_rescore gives them. Returns A [F, M]."""
         rows, bins = np.asarray(rows, np.int64), np.asarray(bins, np.int64)
-        A = logsumexp(sc.lp(rows).astype(np.float64) + profs, -1)
+        # 8 units at a time: their [8, M, G] float64 temporaries stay small on every thread
+        A = np.concatenate([logsumexp(sc.lp(rows[s:s + 8]).astype(np.float64) + profs[s:s + 8], -1)
+                            for s in range(0, len(rows), 8)]) if len(rows) else np.zeros((0, profs.shape[1]))
         sc.S[rows, bins] = A.sum(1)
         eta = self.eta if self.eta else 0.05
         sc.R[rows, bins] = np.logaddexp(np.log1p(-eta) + A, np.log(eta) + sc.Au[rows]).sum(1)

@@ -536,3 +536,4 @@ def test_loo_batched_equals_one_by_one():
     assert np.array_equal(np.array(A1), A2)
     for f in ("S", "R", "Su"):
         assert np.array_equal(getattr(sc1, f), getattr(sc2, f)), f
+
