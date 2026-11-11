@@ -19,6 +19,7 @@ number of shapes rather than the number of motifs.
 from __future__ import annotations
 
 import itertools
+import os
 import re
 from dataclasses import dataclass
 
@@ -79,6 +80,8 @@ class MotifMatcher:
 
     def __init__(self, motifs: list[Motif], pairing: str = "sequence"):
         self.motifs = motifs
+        self.pairing = pairing
+        self._compiled = False  # the scanner of epirefine-rs for these motifs, or None (set on first use)
         canon = canonical_index(motifs, pairing)
         self.canon = np.array(canon, np.int32)
         self.flip = np.array([canon[i] != i for i in range(len(motifs))])
@@ -169,6 +172,21 @@ class MotifMatcher:
         occ[flip] = (occ[flip] // 2) * 2 + (1 - occ[flip] % 2)
         return {"pos": pos, "strand": orient, "motif": mi, "occ_motif": self.canon[mi], "occ": occ}
 
+    def _scanner(self):
+        """The compiled motif scan of the optional package epirefine-rs for these motifs (the same records in
+        the same order as find, tested there and in tests/test_rs_model.py), or None: package not installed,
+        switched off with EPIREFINE_RS=0, or a pairing of complements it does not implement."""
+        if self._compiled is False:
+            self._compiled = None
+            if self.pairing == "sequence" and os.environ.get("EPIREFINE_RS", "1").strip().lower() not in ("0", "false", "no", "off"):
+                try:
+                    import epirefine_rs
+                    if epirefine_rs.supports("api>=1") and epirefine_rs.supports("motif_scan"):
+                        self._compiled = epirefine_rs.MotifScanner([(m.seq, m.mod_pos, m.mod_type) for m in self.motifs])
+                except ImportError:
+                    pass
+        return self._compiled
+
     def find_many(self, contigs: dict[str, str], batch_bp: int = 20_000_000):
         """Yield (contig names, contig index per record, record dict) for batches of contigs.
 
@@ -182,7 +200,9 @@ class MotifMatcher:
             names.append(name); seqs.append(seq); size += len(seq) + sep
             if size >= batch_bp or i == len(items) - 1:
                 offsets = np.cumsum([0] + [len(x) + sep for x in seqs])[:-1]
-                rec = self.find(encode(("N" * sep).join(seqs)))
+                codes = encode(("N" * sep).join(seqs))
+                scanner = self._scanner()
+                rec = self.find(codes) if scanner is None else scanner.find(codes)
                 cidx = np.searchsorted(offsets, rec["pos"], side="right") - 1
                 rec["pos"] = rec["pos"] - offsets[cidx]
                 rec["occ"] = rec["occ"] - 2 * offsets[cidx]

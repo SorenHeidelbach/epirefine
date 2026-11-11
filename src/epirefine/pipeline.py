@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -23,7 +24,7 @@ from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
-from .model import (FittedModel, logsumexp, posterior, summed_scores, unbinned_state_frequencies, unknown_logit,
+from .model import (FittedModel, _n_threads, logsumexp, posterior, summed_scores, unbinned_state_frequencies, unknown_logit,
                     unknown_score)
 from .motifs import (build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights,
                      specificity_ranks)
@@ -81,7 +82,16 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
     [b, M, G] arrays are alive at once: 4.7 GB for 913 groups at 2000 units)."""
     if n:
         batch = min(batch, max(1, 200_000 // logp_fn(slice(0, 1)).shape[1]))
-    parts = [grid.summarize(logp_fn(slice(s, s + batch))) for s in range(0, n, batch)]
+    # every unit is summarised from its own row, so the batches run on threads, each a share of `batch` (together
+    # they hold what one batch held); it was one thread's pass over the tables of all contigs
+    threads = _n_threads()
+    step = max(1, batch // threads)
+    slices = [slice(s, s + step) for s in range(0, n, step)]
+    if threads <= 1 or len(slices) <= 1:
+        parts = [grid.summarize(logp_fn(sl)) for sl in slices]
+    else:
+        with ThreadPoolExecutor(threads) as ex:
+            parts = list(ex.map(lambda sl: grid.summarize(logp_fn(sl)), slices))
     return [np.concatenate([p[i] for p in parts]) for i in range(4)]
 
 

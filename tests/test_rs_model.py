@@ -88,3 +88,19 @@ def test_cell_sums_returns_numpys_bits(monkeypatch):
     starts = np.unique(np.r_[0, rng.integers(1, 100_000, 9_000), 100_000, 100_300])
     ref, got = _both(monkeypatch, lambda: M._cell_sums(table, r, w, starts))
     assert np.array_equal(got, ref) and np.array_equal(ref, np.add.reduceat(table[r] * w[:, None], starts, axis=0))
+
+
+def test_motif_grouping_scan_gives_the_same_records(monkeypatch, community):
+    """build_records (the scan behind the motif groups) with the compiled scanner: the same table, row for row."""
+    if not rs.supports("motif_scan"):
+        pytest.skip("epirefine-rs without the motif scan")
+    from epirefine import io as pio
+    from epirefine.motifs import build_records
+    args = community.args("unused")
+    motifs = pio.read_motifs(args["motifs_path"])
+    contigs = dict(pio.iter_fasta(args["assembly"]))
+    monkeypatch.setenv("EPIREFINE_RS", "0")
+    ref = build_records(contigs, motifs)
+    monkeypatch.delenv("EPIREFINE_RS")
+    got = build_records(contigs, motifs)
+    assert ref.height > 0 and ref.schema == got.schema and ref.equals(got)

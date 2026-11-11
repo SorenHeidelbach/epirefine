@@ -228,3 +228,15 @@ def test_unit_loglik_is_defined_by_its_cells():
     import polars as pl
     df = pl.DataFrame({"unit": unit[p], "group": group[p], "n": n[p], "k": k[p]})
     assert np.array_equal(M.unit_loglik(df, 50, 4, det, grid, dtype=np.float32), ref)
+
+
+def test_batched_summary_threads_bits(monkeypatch):
+    import epirefine.pipeline as P
+    rng = np.random.default_rng(10)
+    grid = Grid(64)
+    L = _tables(rng, U=300, Mg=40)
+    whole = grid.summarize(L.astype(np.float64))
+    for threads in (1, 7):
+        monkeypatch.setattr(P, "_n_threads", lambda: threads)
+        got = P._batched_summary(grid, lambda sl: L[sl].astype(np.float64), len(L), batch=50)
+        assert all(np.array_equal(a, b) for a, b in zip(got, whole))
