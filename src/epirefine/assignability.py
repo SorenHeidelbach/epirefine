@@ -27,10 +27,11 @@ from .model import FittedModel, _cell_sums, _n_threads, _on_threads, _profile_ex
 
 def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[int, DetectionParams],
                     grid: Grid, n_cap: int = 500, dtype=np.float64, table: dict | None = None,
-                    chunk_rows: int = 200_000, unit_batch: int | None = None):
+                    chunk_rows: int = 200_000, unit_batch: int | None = None, out=None):
     """sites: integer columns unit, group, n (optional count w). Returns H1, H0 with shape [U, M, G], or with
     unit_batch an iterator of (first unit, H1, H0) over consecutive batches of that many units (the same values;
-    only one batch's tables are held).
+    only one batch's tables are held). out: (H1, H0) buffers of unit_batch rows that the batches are written into
+    (each batch overwrites the previous one: use it before taking the next).
 
     table: a dict reused across calls (the per-(group, n) expectations depend only on the caller
     model and the grid), so streaming many batches doesn't recompute them in Python each time.
@@ -91,16 +92,21 @@ def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[
     bounds = np.r_[starts, len(flat)]
 
     def tables(u0, u1):
-        H1 = np.zeros((u1 - u0, n_groups, grid.size), dtype)
-        H0 = np.zeros_like(H1)
+        if out is not None and len(out[0]) >= u1 - u0:  # the caller's buffers (one batch at a time), cleared
+            H1, H0 = out[0][:u1 - u0], out[1][:u1 - u0]
+            H1[...] = 0
+            H0[...] = 0
+        else:
+            H1 = np.zeros((u1 - u0, n_groups, grid.size), dtype)
+            H0 = np.zeros_like(H1)
         c0, c1 = np.searchsorted(cell, [u0 * n_groups, u1 * n_groups])
         if c1 > c0:
             lo, hi = bounds[c0], bounds[c1]
             # reduced in blocks of whole (unit, group) cells of about chunk_rows rows: T[r] * w in one piece is
             # 8 G bytes per distinct (unit, group, n) row, 3.4 GB for the 6.6 million rows of one part of contigs
-            for T, out in ((T1, H1), (T0, H0)):
-                out.reshape(-1, grid.size)[cell[c0:c1] - u0 * n_groups] = _cell_sums(T, r[lo:hi], w[lo:hi],
-                                                                                     starts[c0:c1] - lo, chunk_rows)
+            for T, Ht in ((T1, H1), (T0, H0)):
+                Ht.reshape(-1, grid.size)[cell[c0:c1] - u0 * n_groups] = _cell_sums(T, r[lo:hi], w[lo:hi],
+                                                                                    starts[c0:c1] - lo, chunk_rows)
         return H1, H0
 
     if unit_batch is None:
@@ -108,11 +114,13 @@ def expected_tables(sites: pl.DataFrame, n_units: int, n_groups: int, det: dict[
     return ((u0, *tables(u0, min(u0 + unit_batch, n_units))) for u0 in range(0, n_units, unit_batch))
 
 
-def asimov(H1, H0, phi):
-    """phi: [U, M] true methylation level per unit and group."""
+def asimov(H1, H0, phi, out=None):
+    """phi: [U, M] true methylation level per unit and group. out: a buffer of at least len(H1) rows to write into
+    (a fresh 0.7 GB array per batch of the evidence step otherwise)."""
     if H1.ndim != 3 or H1.size < 1_000_000:
         return phi[..., None] * H1 + (1 - phi[..., None]) * H0
-    out = np.empty(H1.shape, np.result_type(H1, phi))
+    dt = np.result_type(H1, phi)
+    out = np.empty(H1.shape, dt) if out is None or out.dtype != dt or len(out) < len(H1) else out[:len(H1)]
 
     def rows(sl):  # the same expression on unit slices (element-wise), on threads
         out[sl] = phi[sl, :, None] * H1[sl] + (1 - phi[sl, :, None]) * H0[sl]
@@ -177,7 +185,7 @@ def own_scores(Lp: np.ndarray, log_prof: np.ndarray, t: np.ndarray, batch: int =
 
 
 def margin_vs_unknown(model: FittedModel, H1, H0, truth: np.ndarray, temperature: float, batch: int = 2000,
-                      prof_exp=None, phi_h=None):
+                      prof_exp=None, phi_h=None, buf=None):
     """(b) of margin_vs_competitors alone: the expected log BF of the true bin over unknown, with only the true
     bin scored (own_scores) instead of every bin."""
     U = len(truth)
@@ -187,7 +195,7 @@ def margin_vs_unknown(model: FittedModel, H1, H0, truth: np.ndarray, temperature
     for s in range(0, U, batch):
         sl = slice(s, s + batch)
         t = truth[sl]
-        Lp = model.marginal(asimov(H1[sl], H0[sl], phi_h[t]))
+        Lp = model.marginal(asimov(H1[sl], H0[sl], phi_h[t], out=buf))
         Su = score_units(Lp, model.log_pi[None])[:, 0]
         vs_unk[sl] = (own_scores(Lp, model.log_prof, t, prof_exp=prof_exp) - Su) / temperature
     return vs_unk
@@ -236,6 +244,7 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
         log(f"  evidence: expectation table of {len(shared)} (group, coverage) combinations")
 
     prof_exp, phi_h = profile_exps(model.log_prof), phi_means(model)   # once for all batches
+    bufs: list = []
 
     def evaluate(sites: pl.DataFrame):
         sites = sites.filter(pl.col("contig").is_in(want))
@@ -254,18 +263,22 @@ def contig_evidence(parts: list[str], unit_of: dict[int, int], truth: np.ndarray
              .select(pl.col("contig").replace_strict(inv, return_dtype=pl.Int64).alias("unit"), "group", "n"))
         # the tables of 2,000 contigs at a time (the batch of the margins), not of the whole part (1.5 GB for the
         # 4,125 contigs of a ZymoFecal part, held while the main process is at its peak)
+        if not bufs:  # tables, Asimov table and their weights: reused by every batch (fresh 0.4-0.7 GB arrays before)
+            shape = (EVIDENCE_BATCH, model.log_prof.shape[1], grid.size)
+            bufs.extend([np.empty(shape, np.float32), np.empty(shape, np.float32), np.empty(shape, np.float64)])
         for u0, H1, H0 in expected_tables(s, len(units), model.log_prof.shape[1], det, grid, dtype=np.float32,
-                                          table=shared, unit_batch=EVIDENCE_BATCH):
+                                          table=shared, unit_batch=EVIDENCE_BATCH, out=(bufs[0], bufs[1])):
             if group_weights is not None:
                 gw = np.asarray(group_weights, np.float32)[None, :, None]
-                H1, H0 = H1 * gw, H0 * gw
+                H1 *= gw   # (in place: the same float32 products)
+                H0 *= gw
             ub = units[u0:u0 + len(H1)]
             if nearest:
                 b, _, u = margin_vs_competitors(model, H1, H0, truth[ub], temperature, batch=EVIDENCE_BATCH)
                 vs_bin[ub], vs_unk[ub] = b, u   # each contig is evaluated in exactly one call
             else:
                 vs_unk[ub] = margin_vs_unknown(model, H1, H0, truth[ub], temperature, batch=EVIDENCE_BATCH,
-                                               prof_exp=prof_exp, phi_h=phi_h)
+                                               prof_exp=prof_exp, phi_h=phi_h, buf=bufs[2])
             del H1, H0
 
     done = [0]
