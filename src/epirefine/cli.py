@@ -186,9 +186,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="warn about a bin when, in some motif group, the smaller of two methylation states among its "
                         "chunks holds at least this share, or its flagged contigs hold at least this share of the "
                         "bin (bin_evidence.tsv, column warning; reporting only, no decision depends on it)")
-    g.add_argument("--redundancy-order", choices=["sequential", "independent"], default="independent",
-                   help="compare each inclusion candidate with the bin plus the inclusions already accepted, or with "
-                        "the given bin only (0.10.x)")
+    g.add_argument("--redundancy-order", choices=["sequential", "independent"], default="sequential",
+                   help="compare each inclusion candidate with the bin plus the inclusions already accepted, in order "
+                        "of their probability (sequential), so that two unbinned copies of one sequence are not both "
+                        "included; or with the given bin only (independent, the behaviour up to 0.10)")
     return ap
 
 

@@ -93,7 +93,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         shared_sites="sample", complement_pairs="sequence", strand_sites="sum", noise_max_off_share=1.0,
         robust_fit="alternating", max_flagged_share=1.0, regional_leave_out="chunk", regional_withdraw="vs_foreign",
         regional_tempered=False, gate_leave_out="none", gate_unweighted=False, eps_gated=False,
-        redundancy_order="independent", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all",
+        redundancy_order="sequential", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all",
         unknown_prior="bins", unknown_prior_strength=5.0,
         calibration="legacy"):
     """calibration: 'legacy' (the calibration of 0.10), 'coherent', or a comma-separated list of
