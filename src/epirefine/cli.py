@@ -94,11 +94,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="a motif and its reverse complement in the motif list: one two-strand site per occurrence, paired "
                         "only when each has a single modified position (position), paired by sequence alone "
                         "(sequence, the behaviour up to 0.10), or kept as two motifs with single-strand sites (separate)")
-    g.add_argument("--strand-sites", choices=["sum", "split", "auto"], default="auto",
+    g.add_argument("--strand-sites", choices=["sum", "split", "auto"], default="sum",
                    help="reads of the two strands at one occurrence of a palindrome or complement pair: summed into one "
-                        "site unless the strands can differ, i.e. for complement pairs and for occurrences where one "
-                        "strand is also a site of another motif group (auto); always summed (sum, the behaviour up to "
-                        "0.10); or one site per strand (split)")
+                        "site (sum), kept as one site per strand (split), or summed unless the strands can differ: "
+                        "complement pairs, and occurrences where one strand is also a site of another motif group (auto)")
     g.add_argument("--group-sample-mb", type=float, default=50,
                    help="Mb of sequence sampled to measure motif overlap for grouping")
 
