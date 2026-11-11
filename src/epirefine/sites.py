@@ -495,7 +495,44 @@ class _Worker:
         return out
 
 
+def _rs(cfg: dict | None = None):
+    """The optional compiled kernels (package epirefine-rs), or None when they are not installed, are switched
+    off (EPIREFINE_RS=0), do not provide the interface this code was written for, or (cfg given) do not
+    implement the site definition of the run: the kernel builds the sites of 0.10 (complement pairs by
+    sequence, strands summed, shared positions by the motifs' record counts), so any other setting of
+    --complement-pairs, --strand-sites or --shared-sites is read by the Python pass, which is the reference."""
+    if os.environ.get("EPIREFINE_RS", "1").strip().lower() in ("0", "false", "no", "off"):
+        return None
+    if cfg is not None and (cfg.get("group_rank") is not None or cfg.get("pairing", "sequence") != "sequence"
+                            or cfg.get("strand_sites", "sum") != "sum"):
+        return None
+    try:
+        import epirefine_rs
+    except ImportError:
+        return None
+    return epirefine_rs if epirefine_rs.supports("api>=1") and epirefine_rs.supports("pileup_reader") else None
+
+
+def _run_range_rs(rs, cfg: dict, path: str, start: int, end: int, out_prefix: str, flush_rows: int):
+    """_run_range with the compiled reader: the same site rows, part files of whole contigs and bookkeeping."""
+    asm = EncodedAssembly(cfg["asm_dir"])
+    reader = rs.PileupReader(path, start, end, names=asm.names, offsets=asm.offsets, lengths=asm.lengths,
+                             codes=asm.codes, motifs=cfg["motifs"], group_of=cfg["group_of"],
+                             motif_rank=cfg["motif_rank"], wanted=cfg["wanted"])
+    parts = []
+    for batch in reader.batches(flush_rows):
+        f = f"{out_prefix}_{len(parts):04d}.parquet"
+        pl.DataFrame(batch, schema=SITE_SCHEMA).sort("contig", "pos").write_parquet(f, compression="zstd")
+        parts.append(f)
+    names = reader.contigs
+    return {"parts": parts, "contigs": sorted(names), "first": names[0] if names else None,
+            "last": names[-1] if names else None}
+
+
 def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, block: int, flush_rows: int):
+    rs = _rs(cfg)
+    if rs is not None:
+        return _run_range_rs(rs, cfg, path, start, end, out_prefix, flush_rows)
     w = _Worker(cfg)
     seen: set = set()
     parts, buf, n_buf = [], [], 0
@@ -556,7 +593,9 @@ def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: l
            "group_of": list(group_of), "motif_rank": list(motif_rank), "wanted": wanted,
            "group_rank": list(group_rank) if group_rank is not None else None,
            "pairing": pairing, "strand_sites": strand_sites}
-    log(f"  pileup pass: {len(ranges)} byte ranges on {min(workers, len(ranges))} workers")
+    rs = _rs(cfg)
+    log(f"  pileup pass: {len(ranges)} byte ranges on {min(workers, len(ranges))} workers"
+        + (f" (epirefine-rs {rs.__version__} reader)" if rs is not None else ""))
     env_before = os.environ.get("POLARS_MAX_THREADS")
     os.environ["POLARS_MAX_THREADS"] = "1"
     try:
