@@ -81,6 +81,36 @@ def _cached_assembly(cache: Path, assembly):
         return None
 
 
+def _prefetch_cache(cache: Path):
+    """Read the site-cache parts of a manifest in a background thread, so that they are in the page cache when the
+    first pass over them (the motif noise filter) starts: on ZymoFecal that pass took 27 s from a cold disk and 10 s
+    from memory, and motif grouping before it leaves the disk idle for 15-40 s. Only reads (nothing is kept by this
+    process), and only when the parts fit in half the available memory. Returns the thread or None."""
+    import threading
+    try:
+        files = [cache / "sites" / Path(f).name for f in json.loads((cache / "manifest.json").read_text())["parts"]]
+        size = sum(f.stat().st_size for f in files)
+        with open("/proc/meminfo") as fh:
+            avail = next(int(ln.split()[1]) * 1024 for ln in fh if ln.startswith("MemAvailable:"))
+    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+        return None
+    if size > avail // 2:
+        return None
+
+    def read():
+        buf = bytearray(1 << 24)
+        for f in files:
+            try:
+                with open(f, "rb", buffering=0) as fh:
+                    while fh.readinto(buf):
+                        pass
+            except OSError:
+                pass
+    th = threading.Thread(target=read, daemon=True)
+    th.start()
+    return th
+
+
 _LETTERS = np.frombuffer(b"ACGTN", np.uint8)
 
 
@@ -168,6 +198,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     cb_given = pio.read_contig_bin(contig_bin, log=_log)
     pileup_first = runinfo.check_pileup_head(pileup)
     asm_cached = _cached_assembly(cache, assembly)
+    if asm_cached is not None:
+        _prefetch_cache(cache)
     lengths = (dict(zip(asm_cached.names, asm_cached.lengths.tolist())) if asm_cached is not None
                else pio.fasta_lengths(assembly))
     cb = runinfo.match_contig_bin(cb_given, lengths, contig_bin, log=_log)

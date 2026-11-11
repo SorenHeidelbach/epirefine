@@ -489,3 +489,16 @@ def test_threads_follow_cpu_affinity(monkeypatch):
     assert M._cores() == 3 and M._n_threads() == 3 and runinfo.n_workers(None) == 3
     monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(40)), raising=False)
     assert M._n_threads() == 16
+
+
+def test_prefetch_cache_reads_parts(tmp_path):
+    import json
+    import epirefine.pipeline as P
+    assert P._prefetch_cache(tmp_path) is None  # no manifest
+    (tmp_path / "sites").mkdir()
+    for i in range(3):
+        (tmp_path / "sites" / f"p{i}.parquet").write_bytes(b"x" * 1000)
+    (tmp_path / "manifest.json").write_text(json.dumps({"parts": [f"elsewhere/sites/p{i}.parquet" for i in range(3)]}))
+    th = P._prefetch_cache(tmp_path)
+    th.join(10)
+    assert not th.is_alive()
