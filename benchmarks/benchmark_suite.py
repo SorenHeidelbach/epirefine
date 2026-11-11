@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -82,7 +83,7 @@ def version() -> str:
     return m.group(1) if m else "unknown"
 
 
-def run_scenario(sc: dict, out_root: Path, workers: int = 16) -> dict:
+def run_scenario(sc: dict, out_root: Path, workers: int = 16, run_args: list[str] | None = None) -> dict:
     out = out_root / sc["name"]
     out.mkdir(parents=True, exist_ok=True)
     cmd = ["/usr/bin/time", "-v", str(REPO / ".venv/bin/epirefine"), "run", "--assembly", sc["assembly"], "--pileup", sc["pileup"],
@@ -90,6 +91,7 @@ def run_scenario(sc: dict, out_root: Path, workers: int = 16) -> dict:
     if sc.get("cache"):
         cmd += ["--cache-dir", sc["cache"]]
     cmd += [str(x) for x in sc.get("args", [])]  # extra epirefine options of a suite variant
+    cmd += run_args or []
     t0 = time.time()
     p = subprocess.run(cmd, capture_output=True, text=True)
     wall = time.time() - t0
@@ -123,6 +125,9 @@ def main():
     ap.add_argument("--all", action="store_true", help="include optional scenarios")
     ap.add_argument("--only", nargs="+", help="run only these scenario names")
     ap.add_argument("--note", default="", help="what changed, stored with the history row")
+    ap.add_argument("--run-args", default="",
+                    help="extra options passed to every `epirefine run` (quoted), to benchmark a non-default setting, "
+                         "e.g. --run-args='--calibration legacy'")
     ap.add_argument("--jobs", type=int, default=1,
                     help="scenarios run at once (faster; timings then aren't comparable with jobs=1 records)")
     ap.add_argument("--workers", type=int, default=None,
@@ -141,7 +146,7 @@ def main():
 
     def one(sc):
         print(f"[{datetime.now():%H:%M:%S}] {sc['name']} ...", flush=True)
-        r = run_scenario(sc, out_root, workers)
+        r = run_scenario(sc, out_root, workers, shlex.split(a.run_args))
         print(f"    {sc['name']}: {r['status']}, {r['wall_s']} s, {r['peak_rss_gb']} GB" +
               (f", contaminants found {r['contam_recall']:.3f}, put back {r['inclusion_recall']:.3f}, "
                f"wrongly placed {r['placed_wrongly']}" if "contam_recall" in r else ""), flush=True)

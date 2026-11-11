@@ -19,11 +19,11 @@ import polars as pl
 from . import io as pio
 from . import runinfo
 from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate, contig_chunks, fragment_chunks,
-                        fragments_per_bin, select_fragments)
+                        fragments_per_bin, parse_features, select_fragments)
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
-from .model import FittedModel, posterior
+from .model import FittedModel, posterior, unknown_logit
 from .motifs import (build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights,
                      specificity_ranks)
 from .redundancy import inclusion_redundancy
@@ -88,13 +88,17 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1,
-        shared_sites="sample", complement_pairs="sequence", strand_sites="sum", noise_max_off_share=1.0):
+        shared_sites="sample", complement_pairs="sequence", strand_sites="sum", noise_max_off_share=1.0,
+        calibration="legacy"):
+    """calibration: 'legacy' (the calibration of 0.10), 'coherent', or a comma-separated list of
+    calibrate.FEATURES; see calibrate.parse_features."""
     args = dict(locals())  # first statement: the options as given
     runinfo.begin(args, _log)  # first log lines (version, command, inputs) and option ranges, before any work
     # the inputs are checked before anything is read or written: a missing file or a wrong table must not
     # cost the minutes (hours on a large sample) it takes to reach the place where it is used
     runinfo.check_inputs(args)
     provenance = runinfo.provenance(args)
+    features = parse_features(calibration)
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     runinfo.write_params(out / "params.json", provenance)  # a run that does not finish leaves its settings
@@ -290,9 +294,14 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
             return -1
         return int(remap[chunk_offset[contig_id] + c])
 
-    p_cal = 0.1 if p_unknown is None else p_unknown  # prior used before p_unknown is estimated (refinement)
+    # prior used by the calibration before p_unknown is estimated: 0.1 in the legacy calibration; with
+    # prior-matched a neutral 0.5 (the fit is redone at the estimate); prior-averaged does not use it
+    p_cal = (0.5 if "prior-matched" in features else 0.1) if p_unknown is None else p_unknown
+    # (provenance holds --calibration as given; calibration_features the features it stands for)
     params = {**provenance, "chunk_size": chunk_size, "grid_size": grid_size, "p_unknown": p_unknown, "min_cov": min_cov,
-              "contam_eps": contam_eps}
+              "contam_eps": contam_eps, "calibration_features": sorted(features) or ["legacy"]}
+    ffit = fit = None
+    user_temperature = temperature
     model_kw = {"contam_eps": contam_eps}
     if do_calibrate:
         _log("calibration with pseudo-contigs")
@@ -301,7 +310,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                         p_cal, H_frag=tabs["H_frag"], allow_sharpening=allow_sharpening,
                         leave_out=contig_chunks(frags["contig"].to_numpy(), chunk_contig),
                         taus=DEFAULT_TAUS if variation == "beta" else DEFAULT_SIGMAS, n_sites_frag=tabs["frag_sites"],
-                        log=_log, **model_kw)
+                        log=_log, features=features, **model_kw)
+        ffit, fit = cal["fragment_fit"], cal["fit"]
         names = dict(enumerate(bins))
         cal["lookalikes"] = cal["lookalikes"].select(
             pl.col("bin_idx").replace_strict(names, return_dtype=pl.Utf8).alias("bin"),
@@ -314,6 +324,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                      "assignability", "fragments"):
             _write(cal[name], out / "calibration" / f"{name}.tsv")
         tau = cal["tau"] if tau is None else tau
+        if temperature is not None:  # a temperature given by the user overrides the fit, and any curve
+            fit = dict(fit, temperature=float(temperature), curve=None)
         temperature = cal["temperature"] if temperature is None else temperature
         params["fitted_temperature"] = cal["fitted_temperature"]
         params["n_fragments"] = frags.height
@@ -340,9 +352,13 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
 
     # score every contig against every bin; binned contigs leave-one-out, so their own bin's profile
     # is built without them
-    # (their Lp rows are the only ones the leave-one-out scores read: the rest is not kept)
-    sc = model.score(L_t, lp_rows=[i for i, c in enumerate(targets) if c in host_set])
+    # (their Lp rows are the only ones the leave-one-out scores read: the rest is not kept, unless the
+    # calibration can be refitted at another eta after the decisions (prior-matched), which rebuilds the
+    # relatives' scores of every contig from Lp and the leave-out terms)
+    refit_unknown = "prior-matched" in features
+    sc = model.score(L_t, lp_rows=None if refit_unknown else [i for i, c in enumerate(targets) if c in host_set])
     sole_contig = set()
+    loo: dict[int, tuple] = {}  # contig -> (own bin, per-group leave-out terms); filled for refit_unknown only
     bin_chunks = np.bincount(chunk_bin, minlength=H)
     own_chunks: dict[int, list[int]] = {}
     for u, c in enumerate(chunk_contig):
@@ -355,7 +371,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         if len(own) and len(own) == bin_chunks[b]:
             sole_contig.add(c)  # leave-one-out would empty the bin: not an independent test
             continue
-        model.loo_rescore(sc, i, b, own)
+        A_loo = model.loo_rescore(sc, i, b, own)
+        if refit_unknown:
+            loo[i] = (b, A_loo)
 
     # bin refinement: contamination of binned contigs, inclusion of unbinned ones
     given = np.array([bin_idx[cb[c]] if c in cb else -1 for c in targets])
@@ -393,9 +411,56 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     diff[has] = np.where(n_sites_group[has] > 0, gap, 0.0).max(1)
     bin_ev = bin_evidence_table(bins, grid.summarize(model.log_prof), n_sites_group, given)
     unmeth_bins = (bin_ev["status"] == "no_methylation_detected").to_numpy()
-    ref = refine(sc.S, sc.Su, given, testable, temperature, contamination_threshold, include_threshold,
-                 methylome_difference=diff, min_difference=min_methylome_difference,
-                 p_unknown=p_unknown, decidable=~low_cov & ~short, unmethylated_bins=unmeth_bins, include_threshold_unmethylated=include_threshold_unmethylated)
+    new_path = bool(features & {"temper-then-mix", "sites-temperature", "prior-matched", "prior-averaged", "unit-temperature"})
+    em_kw = dict(p_unknown_prior=(2.0, 2.0), eps_after_gate=True) if "em-priors" in features else {}
+    if fit is None:  # no calibration: one temperature, the unknown model as set
+        fit = {"temperature": float(temperature), "eta": model.eta, "lam": model.lam, "curve": None}
+    T_contig, Zu = temperature, None
+
+    def decide(fit):
+        """Decisions under one calibration fit: the temperature (per contig when it depends on the number of
+        sites) and the unknown hypothesis' tempered score under the fit's unknown model."""
+        T = fit["curve"](n_sites) if fit.get("curve") is not None else fit["temperature"]
+        R = None
+        if fit["lam"] < 1 and fit["eta"]:
+            R = sc.R if fit["eta"] == (model.eta if model.eta else 0.05) else model.relatives(sc, fit["eta"], loo)
+        zu = unknown_logit(R, sc.Su_comm, fit["eta"], fit["lam"], T, temper_then_mix="temper-then-mix" in features)
+        r = refine(sc.S, None, given, testable, T, contamination_threshold, include_threshold,
+                   methylome_difference=diff, min_difference=min_methylome_difference,
+                   p_unknown=p_unknown, decidable=~low_cov & ~short, unmethylated_bins=unmeth_bins,
+                   include_threshold_unmethylated=include_threshold_unmethylated, Zu=zu, **em_kw)
+        return r, T, zu
+
+    if not new_path:
+        ref = refine(sc.S, sc.Su, given, testable, temperature, contamination_threshold, include_threshold,
+                     methylome_difference=diff, min_difference=min_methylome_difference,
+                     p_unknown=p_unknown, decidable=~low_cov & ~short, unmethylated_bins=unmeth_bins,
+                     include_threshold_unmethylated=include_threshold_unmethylated, **em_kw)
+    else:
+        ref, T_contig, Zu = decide(fit)
+        if "prior-matched" in features and ffit is not None and p_unknown is None:
+            # the calibration prior must be the prior of the decisions: refit (T, eta, lam) at the estimated
+            # p_unknown and re-estimate, until the fit no longer changes (it lives on a grid, so it does, or cycles)
+            key = lambda f: (f["temperature"], f["eta"], f["lam"], None if f.get("curve") is None else tuple(f["curve"].log_T))
+            seen = [key(fit)]
+            for it in range(5):
+                new = ffit.fit(ref.p_unknown, log=_log)
+                if user_temperature is not None:
+                    new = dict(new, temperature=float(user_temperature), curve=None)
+                _log(f"calibration at the estimated p_unknown={ref.p_unknown:.3f}: temperature={new['temperature']:g}, "
+                     f"eta={new['eta']:g}, lam={new['lam']:g}")
+                if key(new) == key(fit):
+                    break
+                cycle = key(new) in seen
+                fit = new
+                seen.append(key(fit))
+                ref, T_contig, Zu = decide(fit)
+                if cycle:
+                    _log("calibration and p_unknown do not settle (cycle); keeping the last fit")
+                    break
+        temperature = fit["temperature"]
+        params.update(temperature=temperature, unknown_eta=fit["eta"], unknown_lam=fit["lam"],
+                      temperature_by_sites=fit["curve"].table() if fit.get("curve") is not None else None)
     # long binned contigs: whole contig foreign, or partly the bin's and partly foreign along its length?
     # (chunk-level evidence from the robust host-profile fit; flags on mixed contigs are withdrawn and
     # their foreign segments reported)
@@ -529,7 +594,16 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     p_unknown = ref.p_unknown
     params.update(p_unknown=p_unknown, contamination_rate=ref.eps,
                   contamination_detection="skipped: one bin only" if H == 1 else "done")
-    P = posterior(sc.S, sc.Su, p_unknown, temperature)
+    P = posterior(sc.S, sc.Su, p_unknown, temperature) if Zu is None else posterior(sc.S, None, p_unknown, T_contig, Zu=Zu)
+    if ffit is not None:
+        # how the deployed posteriors behave on the calibration fragments (true members scored without their
+        # contig): false-flag rate per length, and reliability at the priors and temperature actually used
+        dfit = dict(fit, eta=fit["eta"] if fit["eta"] else 0.05)
+        if not new_path:
+            dfit = dict(dfit, temperature=float(np.median(np.atleast_1d(temperature))), curve=None)
+        _write(pl.DataFrame(ffit.false_flags(dfit, p_unknown, ref.eps, contamination_threshold, min_methylome_difference)),
+               out / "calibration" / "false_flag_rate.tsv")
+        _write(pl.DataFrame(ffit.deployed_reliability(dfit, p_unknown, ref.eps)), out / "calibration" / "reliability_deployed.tsv")
     write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff, redundancy,
                   evidence=evidence, min_evidence=min_evidence, coverage=coverage, low_coverage=low_cov, too_short=short,
                   regional=regional)

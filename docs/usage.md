@@ -72,6 +72,7 @@ estimates. Leave them unset unless you are testing the model.
 | `--variation` | beta | How a contig's methylated fraction varies around its bin's: `beta` or `logit` (logit-normal). |
 | `--tau` | calibrated | The variation parameter (beta concentration, or logit-normal sigma). |
 | `--no-calibrate` | off | Skip calibration: temperature 1 and a fixed variation (beta concentration 100) unless set. Probabilities are then overconfident; for testing only. |
+| `--calibration` | `legacy` | Calibration design: `legacy` (as in 0.10), `coherent`, or a comma-separated list of features; see `docs/development/method-notes.md` §7.6. |
 | `--frag-lengths` | `2000,5000,10000,20000,50000,100000` | Lengths of the calibration pieces in bp, comma-separated. |
 | `--frag-budget` | 6000 | Total number of calibration pieces, spread over bins and lengths. |
 | `--frags-per-bin` | 30 | At most this many pieces per bin and length. |
