@@ -595,14 +595,21 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         keep = has_rest & np.array([bool((model.w[ch] >= 0.5).all()) for ch in chunks_of])
         # the chunks' marginal tables (as large as L_chunks) were last needed by the leave-out profiles
         # above; dropped here, the best model so far no longer holds a second copy during the next fit
+        spare[:] = [model.Lp_chunks]  # (its memory is the next fit's marginal table: written over, not re-faulted)
         model.Lp_chunks = None
         return sc, A_own, keep
+
+    spare: list = []
+
+    def fit(tau_):
+        return FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau_, **warm, **model_kw,
+                           lp_out=spare.pop() if spare else None)
 
     base = next((k for k, t in enumerate(taus) if grid.is_point(t)), len(taus) - 1)
     if "common-tau" not in features:
         tau_rows, best, warm, group_ll, group_ll_bin = [], None, {}, [], []
         for tau in taus:
-            model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau, **warm, **model_kw)
+            model = fit(tau)
             warm = {"init_w": model.w, "init_pi": model.raw_pi}  # not the model: at most two are held at once
             sc, A_own, keep = own_and_scores(model)
             ll = float(sc.S[keep, fbin[keep]].sum())
@@ -619,7 +626,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         pick = _pick_tau(group_ll, group_ll_bin, base, tau_support)
         tau_g = np.array([taus[k] for k in pick], dtype=float)
         if len(np.unique(tau_g)) > 1:
-            model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau_g, **warm, **model_kw)
+            model = fit(tau_g)
             sc, A_own, keep_g = own_and_scores(model)
             ll = float(sc.S[keep_g, fbin[keep_g]].sum())
             tau_rows.append({"tau": float("nan"), "label": "per-group", "loo_loglik": ll, "n_fragments": int(keep_g.sum())})
@@ -637,7 +644,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         tau_rows, warm, own_ll, own_A, keeps = [], {}, [], [], []
         held = None
         for k, tau in enumerate(taus):
-            model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau, **warm, **model_kw)
+            model = fit(tau)
             warm = {"init_w": model.w, "init_pi": model.raw_pi}
             sc, A_own, keep = own_and_scores(model)
             own_ll.append(sc.S[np.arange(len(fbin)), fbin].copy())
@@ -654,7 +661,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         if held[0] == k_best:
             _, sc, A_own, model = held
         else:
-            model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, taus[k_best], **warm, **model_kw)
+            model = fit(taus[k_best])
             sc, A_own, _ = own_and_scores(model)
         del held
         best = (lls[k_best], taus[k_best], sc, A_own, model, common)
@@ -665,7 +672,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         pick = _pick_tau(group_ll, group_ll_bin, base, tau_support)
         tau_g = np.array([taus[k] for k in pick], dtype=float)
         if len(np.unique(tau_g)) > 1:
-            model = FittedModel(L_chunks, chunk_bin, n_bins, group_modtype, grid, tau_g, **warm, **model_kw)
+            model = fit(tau_g)
             sc, A_own, keep_g = own_and_scores(model)
             both = common & keep_g
             ll = float(sc.S[both, fbin[both]].sum())
@@ -677,6 +684,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             if ll > ll_single:
                 best = (ll, tau_g, sc, A_own, model, both)
             del model
+    spare.clear()  # no fit follows: the reused table is freed as before
     tau_groups = pl.DataFrame({"group": np.arange(len(tau_g)), "tau": tau_g,
                                "loo_loglik_gain_vs_no_variation": group_ll[pick, np.arange(len(pick))] - group_ll[base]})
     _, tau, sc_best, A_own_best, best_model, keep = best

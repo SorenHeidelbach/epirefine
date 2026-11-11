@@ -303,7 +303,7 @@ def _stack_product(e: np.ndarray, Tt: np.ndarray) -> np.ndarray:
     return q
 
 
-def marginalize_unit(L: np.ndarray, T, batch: int = 2048) -> np.ndarray:
+def marginalize_unit(L: np.ndarray, T, batch: int = 2048, out: np.ndarray | None = None) -> np.ndarray:
     """Lp[..., i] = log sum_j T[i, j] exp(L[..., j]); keeps the dtype of L, works in unit batches.
 
     T is one [G, G] matrix for all groups, or a list of (group indices, [G, G] matrix) pairs when
@@ -315,7 +315,9 @@ def marginalize_unit(L: np.ndarray, T, batch: int = 2048) -> np.ndarray:
     the same bits. With an identity matrix (no between-unit variation) the product returns its input and is
     skipped.
     """
-    out = np.empty_like(L)
+    # out: a buffer of L's shape and dtype to write into (the calibration reuses one across its fits: a fresh 5.5 GB
+    # table per fit is 5.5 GB of page faults)
+    out = np.empty_like(L) if out is None or out.shape != L.shape or out.dtype != L.dtype else out
     parts = [(slice(None), T)] if isinstance(T, np.ndarray) else T
     tiny = np.finfo(L.dtype).tiny
     if not isinstance(T, np.ndarray):
@@ -929,7 +931,7 @@ class FittedModel:
 
     def __init__(self, L_chunks, chunk_bin, n_bins, group_modtype, grid: Grid, tau, prior_lam=5.0,
                  prior_floor=0.02, contam_eps=0.05, robust_iters=None, init_w=None, init_pi=None,
-                 robust_fit="alternating", robust_damping=0.5, robust_tol=1e-3):
+                 robust_fit="alternating", robust_damping=0.5, robust_tol=1e-3, lp_out=None):
         """robust_fit: how the chunk weights w = 1 - P(chunk foreign to its bin) and the bin profiles are
         brought into agreement.
 
@@ -946,7 +948,7 @@ class FittedModel:
         """
         self.grid, self.tau, self.n_bins = grid, tau, n_bins
         self.T = transition_spec(grid, tau)
-        self.Lp_chunks = marginalize_unit(L_chunks, self.T)
+        self.Lp_chunks = marginalize_unit(L_chunks, self.T, out=lp_out)
         self.chunk_bin = chunk_bin
         self._s_out = None
         self.w = np.ones(len(chunk_bin)) if init_w is None else init_w.copy()
