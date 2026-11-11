@@ -187,6 +187,38 @@ class MotifMatcher:
                     pass
         return self._compiled
 
+    def _find_pieces(self, codes: np.ndarray, starts: np.ndarray, min_piece: int = 1_000_000) -> dict[str, np.ndarray]:
+        """find(codes) with the sequence cut at contig starts into pieces scanned on threads (the scan is one
+        thread's work: 38 s for the 50 Mb grouping sample of ZymoFecal with the compiled scanner). A match cannot
+        cross a contig start (the separator of Ns is as long as the longest motif), so the pieces hold the same
+        records; find orders them by shape, then start, then entry, which a stable sort of the pieces' records,
+        concatenated in sequence order, by the shape of their (motif, orientation) restores."""
+        from .model import _n_threads
+        n_pieces = min(_n_threads(), max(1, len(codes) // min_piece))
+        idx = np.searchsorted(starts, np.linspace(0, len(codes), n_pieces + 1)[1:-1])
+        cuts = np.unique(starts[idx[idx < len(starts)]]) if n_pieces > 1 else []
+        bounds = [0, *[int(c) for c in cuts if 0 < c < len(codes)], len(codes)]
+        scanner = self._scanner()
+        find = self.find if scanner is None else scanner.find
+        if len(bounds) <= 2:
+            return find(codes)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(len(bounds) - 1) as ex:
+            recs = list(ex.map(lambda ab: find(codes[ab[0]:ab[1]]), zip(bounds[:-1], bounds[1:])))
+        rec = {}
+        for k in recs[0]:
+            parts = []
+            for a, r in zip(bounds[:-1], recs):
+                v = r[k]
+                parts.append(v + a if k == "pos" else v + 2 * a if k == "occ" else v)
+            rec[k] = np.concatenate(parts)
+        if getattr(self, "_shape_of", None) is None:
+            self._shape_of = np.zeros((len(self.motifs), 2), np.int64)
+            for si, sh in enumerate(self.shapes):
+                self._shape_of[sh["mi"], sh["orient"]] = si
+        order = np.argsort(self._shape_of[rec["motif"], rec["strand"]], kind="stable")
+        return {k: v[order] for k, v in rec.items()}
+
     def find_many(self, contigs: dict[str, str], batch_bp: int = 20_000_000):
         """Yield (contig names, contig index per record, record dict) for batches of contigs.
 
@@ -201,8 +233,7 @@ class MotifMatcher:
             if size >= batch_bp or i == len(items) - 1:
                 offsets = np.cumsum([0] + [len(x) + sep for x in seqs])[:-1]
                 codes = encode(("N" * sep).join(seqs))
-                scanner = self._scanner()
-                rec = self.find(codes) if scanner is None else scanner.find(codes)
+                rec = self._find_pieces(codes, offsets)
                 cidx = np.searchsorted(offsets, rec["pos"], side="right") - 1
                 rec["pos"] = rec["pos"] - offsets[cidx]
                 rec["occ"] = rec["occ"] - 2 * offsets[cidx]

@@ -452,3 +452,27 @@ def test_spilled_chunk_tables_same_outputs(community, base_run, tmp_path, monkey
     run = run_pipeline(**community.args(copy_cache(base_run, tmp_path / "out")))
     for f in sorted(base_run.out.glob("*.tsv")):
         assert filecmp.cmp(f, run.out / f.name, shallow=False), f.name
+
+
+@pytest.mark.parametrize("rs", ["0", "1"])
+def test_motif_scan_in_pieces_same_records(monkeypatch, rs):
+    """find_many with each batch cut into pieces at contig starts, scanned on threads: the records of one scan,
+    in the same order."""
+    monkeypatch.setenv("EPIREFINE_RS", rs)
+    monkeypatch.setenv("OMP_NUM_THREADS", "4")
+    from epirefine.motifs import Motif, MotifMatcher, encode
+    rng = np.random.default_rng(13)
+    motifs = [Motif("GATC", 1, "a"), Motif("CCWGG", 1, "m"), Motif("GANTC", 1, "a"), Motif("TCGA", 3, "a"),
+              Motif("CAGNNNNNNCTG", 1, "a"), Motif("RGATCY", 2, "a")]
+    contigs = {f"c{i}": "".join(rng.choice(list("ACGT"), int(rng.integers(5, 3000)))) for i in range(300)}
+    contigs["c7"] = "GATC" * 50 + "N" * 7 + "GATC"
+    m = MotifMatcher(motifs)
+    sep = int(m.length.max())
+    seqs = list(contigs.values())
+    codes = encode(("N" * sep).join(seqs))
+    offsets = np.cumsum([0] + [len(x) + sep for x in seqs])[:-1]
+    scanner = m._scanner()
+    whole = (m.find if scanner is None else scanner.find)(codes)
+    got = m._find_pieces(codes, offsets, min_piece=5_000)
+    for k in whole:
+        assert np.array_equal(whole[k], got[k]), k
