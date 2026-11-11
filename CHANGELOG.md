@@ -26,7 +26,7 @@ below). The ZymoFecal comparison is recorded in the dev log (`proposals/2026-11-
   and is used for any site option the reader does not implement. mono_train_1 (5.5 GB pileup, 4 workers, warm
   file cache): pileup pass 16 s -> 3.4 s, largest worker 0.79 -> 0.62 GB, all outputs byte-identical.
 - Six training scenarios on 4 cores (site caches reused, shared machine, one run each): 508 s -> 218 s in total, peak memory
-  0.58-1.01 GB -> 0.62-1.00 GB.
+  0.58-1.01 GB -> 0.63-0.98 GB.
 
 ### Robustness
 - Inputs are checked before the assembly is read, with messages that name the problem: a missing, empty or
