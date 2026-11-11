@@ -3,6 +3,80 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.11.0 (2026-11-11): performance and robustness; model options are opt-in
+
+**Results are those of 0.10.2.** A run without new options adds and removes the same contigs. Checked on the six
+monoculture training scenarios (`new_contig_bin.tsv`, `decontaminated_contig_bin.tsv` and `bin_contamination.tsv`
+byte-identical to 0.10.2; `contig_decisions.tsv` and `include_contigs.tsv` identical except the two label changes
+below). The ZymoFecal comparison is recorded in the dev log (`proposals/2026-11-11/release_0.11_integration.md`).
+
+### Performance (outputs unchanged)
+- Scoring keeps the marginal tables of binned contigs only and bounds the [contigs x bins] work arrays (synthetic
+  60,000 x 300 x 64: peak 13.9 -> 6.2 GB, 35.7 -> 18.6 s); the refinement and posterior tables are built in place;
+  calibration holds one model's chunk tables at a time; evidence tables are reduced in blocks (synthetic: peak
+  4.95 -> 1.30 GB); unit tables keep the expectation table per worker, take results as they complete, and size
+  their batches by the number of motif groups.
+- Pileup pass: BGZF ranges are inflated block by block with CRC and length checks (inflate 2.4x faster than
+  `gzip.GzipFile`); a contig spanning many blocks is joined once; contig names, modification codes and strand
+  are read as text (a contig named with digits, or a block of 4mC rows only, no longer fails).
+- `logsumexp` without scipy's array-API layer (299 -> 111 us per call, bit-identical); no process pool for small
+  detection fits.
+- Optional compiled pileup reader: when the package `epirefine-rs` can be imported, the pileup pass uses its
+  reader; `EPIREFINE_RS=0` switches it off. Not a dependency; the Python pass is the reference and the fallback,
+  and is used for any site option the reader does not implement. mono_train_1 (5.5 GB pileup, 4 workers, warm
+  file cache): pileup pass 16 s -> 3.4 s, largest worker 0.79 -> 0.62 GB, all outputs byte-identical.
+- Six training scenarios on 4 cores (site caches reused, shared machine, one run each): 508 s -> 218 s in total, peak memory
+  0.58-1.01 GB -> 0.62-1.00 GB.
+
+### Robustness
+- Inputs are checked before the assembly is read, with messages that name the problem: a missing, empty or
+  wrongly compressed file, an unknown `mod_type`, a contig-bin table or a pileup that matches no contig; contig-bin
+  rows naming contigs absent from the assembly are counted in the log; a repeated contig name in the assembly is
+  an error.
+- The site cache's manifest is deleted before a rebuild starts, so an interrupted rebuild is never reused.
+- A run with one bin skips contamination detection with a warning instead of writing NaN.
+- `params.json` is strict JSON (an infinite `tau` is `"inf"`) with the version, command line, inputs, seed and
+  every option; it is written when the run starts and completed at the end.
+- The log starts with the version and the inputs and carries peak memory on every line; errors go to the progress
+  stream; a source checkout reports the version of its own `pyproject.toml`; `--help` shows defaults in option
+  groups.
+- **Label changes (no contig is added or removed differently):** a flagged contig whose move to another bin is
+  dropped as redundant keeps status `contaminant` (was `redundant`), and `include_contigs.tsv` marks candidates
+  dropped by the redundancy check `dropped_redundant`.
+- New report columns and files, none of which changes a decision: `bin_evidence.tsv` gains `robust_fit`,
+  `flagged_share`, `two_state_share`, `two_state_group` and `warning` (a warning never withholds a flag);
+  `motif_noise.tsv` gains `off_bin_share`; `calibration/false_flag_rate.tsv` and
+  `calibration/reliability_deployed.tsv` are new.
+
+### Tests and tooling
+- Tests 39 -> 169 (plus 2 expected failures that state what is not supported: contamination detection with one
+  bin, and a pileup replaced by one of the same size and modification time): a synthetic community with
+  end-to-end, golden-snapshot, invariance (workers, cache state, BGZF, row order), cache and edge-case tests, the
+  production site path, the calibration features, the rule options, and the compiled reader against the Python
+  pass.
+- Evidence tooling: `benchmarks/run_evidence.py` (trivial baselines, harder planted contamination, rule ablations,
+  per-contig metrics with fixed denominators).
+- Benchmark suite: `--extra-args`, `--workers`, `--label`, and per-scenario `args` in a suite file.
+
+### Model options: opt-in, not validated
+Each is off by default and reproduces 0.10.2 when left alone. They were measured on development data only
+(monoculture training communities and sets built from them); none has been confirmed on a metagenome or on
+held-out data. Numbers and verdicts: dev log, `proposals/2026-11-10/` and
+`proposals/2026-11-11/release_0.11_integration.md`.
+- Sites: `--shared-sites motif`, `--complement-pairs position | separate`, `--strand-sites auto | split`,
+  `--noise-max-off-share`.
+- Calibration: `--calibration` with `consistent`, `coherent`, or single features (`temper-then-mix`,
+  `prior-averaged`, `prior-matched`, `conservative-temperature`, `full-test-b`, `unit-temperature`,
+  `sites-temperature`, `common-tau`, `em-priors`).
+- Rules: `--redundancy-order sequential`, `--unknown-prior unbinned` (`--unknown-prior-strength`),
+  `--robust-fit damped`, `--max-flagged-share` below 1, `--siteless-bin-guard`, `--regional-leave-out`,
+  `--regional-withdraw`, `--regional-tempered`, `--gate-leave-out`, `--gate-unweighted`, `--eps-gated`,
+  `--tau-support leave_bin_out`, `--unlisted-genome`, `--inclusion-support`; `--two-state-warning` sets the level
+  of the bin warning.
+
+**Benchmark effect:** accuracy unchanged by construction (mono-train: contaminants found 0.948, precision 1, put
+back 0.893, as 0.10.2). No benchmark row is recorded with this entry; it is added when the release is made.
+
 ## 0.10.2 (2026-11-10): no machine paths in the repository
 
 No change to results.
