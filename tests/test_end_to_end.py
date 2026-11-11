@@ -196,3 +196,16 @@ def test_command_line_defaults_and_switches(monkeypatch):
     assert changed == {"group_weights": False, "motif_noise_filter": False, "regional_model": False,
                        "do_calibrate": False, "regional_inclusion": True, "allow_sharpening": True,
                        "write_motif_fit": True, "group_sample_bp": 2e6, "frag_lengths": (2000, 5000)}
+
+
+def test_reporting_columns_are_written_by_default(base_run):
+    """The diagnostics of 0.11 need no option: per-bin flagged and two-state shares with a warning column, the
+    share of bins where a motif group is unmethylated, and the false-flag rate of member pieces."""
+    assert {"robust_fit", "flagged_share", "two_state_share", "two_state_group", "warning"} <= set(
+        base_run.table("bin_evidence.tsv").columns)
+    assert "off_bin_share" in base_run.table("motif_noise.tsv").columns
+    ff = base_run.table("calibration/false_flag_rate.tsv")
+    assert {"length", "fragments", "false_flag_rate", "false_flags"} <= set(ff.columns)
+    kept = ff.filter((ff["length"].cast(str) == "all") & (ff["fragments"] == "kept"))
+    assert kept.height == 1 and 0.0 <= kept["false_flag_rate"][0] <= 0.05
+    assert base_run.table("calibration/reliability_deployed.tsv").height > 0
