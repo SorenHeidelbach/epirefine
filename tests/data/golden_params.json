@@ -1,9 +1,22 @@
 {
- "tau": Infinity,
+ "tau": [
+  30.0,
+  Infinity,
+  Infinity,
+  Infinity,
+  Infinity,
+  Infinity,
+  Infinity,
+  3.0,
+  Infinity,
+  Infinity,
+  Infinity,
+  10.0
+ ],
  "temperature": 1.082,
  "fitted_temperature": 0.2,
- "p_unknown": 0.4175887006716541,
- "contamination_rate": 0.10177681338296772,
+ "p_unknown": 0.41763188375272303,
+ "contamination_rate": 0.10176842172757969,
  "unknown_eta": 0.02,
  "unknown_lam": 1.0,
  "n_fragments": 306

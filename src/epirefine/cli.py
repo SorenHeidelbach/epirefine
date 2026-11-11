@@ -86,10 +86,10 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--noise-max-off-share", type=float, default=1.0,
                    help="call a motif group noise only when at most this share of the bins that measure it leave it "
                         "unmethylated (a real motif is off in most genomes, a caller leak in none; 1 = not used)")
-    g.add_argument("--shared-sites", choices=["sample", "motif"], default="motif",
-                   help="which group gets a position that motifs of several groups match: the one whose motif is least "
-                        "frequent in random sequence (motif; independent of the sample and the seed), or the group "
-                        "with the fewest occurrences in the sampled sequence (sample, the behaviour up to 0.10)")
+    g.add_argument("--shared-sites", choices=["sample", "motif"], default="sample",
+                   help="which group gets a position that motifs of several groups match: the group with the fewest "
+                        "occurrences in the sampled sequence (sample), or the one whose motif is least frequent in "
+                        "random sequence (motif; independent of the sample and the seed)")
     g.add_argument("--complement-pairs", choices=["sequence", "position", "separate"], default="position",
                    help="a motif and its reverse complement in the motif list: one two-strand site per occurrence, paired "
                         "only when each has a single modified position (position), paired by sequence alone "

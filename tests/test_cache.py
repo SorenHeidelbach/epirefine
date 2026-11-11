@@ -152,3 +152,12 @@ def test_rebuild_killed_during_the_pileup_pass_is_not_reused(community, base_run
     _interrupted_rebuild(community, out, monkeypatch, tmp_path, after_parts=False)
     assert not list((out / "cache" / "sites").glob("*.parquet"))
     _rerun_is_safe(community, base_run, out)
+
+
+def test_pairing_rule_that_pairs_the_same_motifs_shares_the_cache(community, base_run, tmp_path):
+    """--complement-pairs position (default) and sequence (0.10) pair this motif list identically: the sites
+    are the same, so the cache of one serves the other and the decisions do not change."""
+    out = copy_cache(base_run, tmp_path / "out")
+    run = run_pipeline(**community.args(out), complement_pairs="sequence")
+    assert run.reused_cache
+    assert_same_outputs(base_run.out, run.out, DECISION_FILES)

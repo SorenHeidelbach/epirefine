@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from .motifs import Motif, MotifMatcher, _CODE, group_sizes
+from .motifs import Motif, MotifMatcher, _CODE, canonical_index, group_sizes
 
 MOD_CODE = {"a": 0, "m": 1, "21839": 2, "h": 3}
 SITE_SCHEMA = {"contig": pl.Int32, "group": pl.Int32, "pos": pl.Int64, "n": pl.Int32, "k": pl.Int32}
@@ -495,17 +495,30 @@ class _Worker:
         return out
 
 
+def same_pairs(motifs, pairing: str) -> bool:
+    """True when `pairing` pairs this motif list exactly as "sequence" does (always, unless a sequence is listed
+    with several modified positions or a palindrome twice): the sites are then those of 0.10, so its site
+    caches and the compiled reader remain valid. motifs: Motif objects or (seq, mod_pos, mod_type) tuples."""
+    if pairing == "sequence":
+        return True
+    ms = [m if isinstance(m, Motif) else Motif(*m) for m in motifs]
+    return canonical_index(ms, pairing) == canonical_index(ms, "sequence")
+
+
 def _rs(cfg: dict | None = None):
     """The optional compiled kernels (package epirefine-rs), or None when they are not installed, are switched
     off (EPIREFINE_RS=0), do not provide the interface this code was written for, or (cfg given) do not
     implement the site definition of the run: the kernel builds the sites of 0.10 (complement pairs by
-    sequence, strands summed, shared positions by the motifs' record counts), so any other setting of
-    --complement-pairs, --strand-sites or --shared-sites is read by the Python pass, which is the reference."""
+    sequence, strands summed, shared positions by the motifs' record counts), so --shared-sites motif,
+    --strand-sites auto or split, and a --complement-pairs rule that pairs this motif list differently are read
+    by the Python pass, which is the reference."""
     if os.environ.get("EPIREFINE_RS", "1").strip().lower() in ("0", "false", "no", "off"):
         return None
-    if cfg is not None and (cfg.get("group_rank") is not None or cfg.get("pairing", "sequence") != "sequence"
-                            or cfg.get("strand_sites", "sum") != "sum"):
-        return None
+    if cfg is not None:
+        if cfg.get("group_rank") is not None or cfg.get("strand_sites", "sum") != "sum":
+            return None
+        if not same_pairs(cfg["motifs"], cfg.get("pairing", "sequence")):
+            return None
     try:
         import epirefine_rs
     except ImportError:

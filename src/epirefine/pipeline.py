@@ -30,7 +30,7 @@ from .motifs import (build_records, describe_groups, group_motifs, noisy_groups,
 from .redundancy import inclusion_redundancy
 from .refine import (bin_evidence_table, flagged_share_per_bin, refine, regional_pattern, withdraw_as_mixed,
                      write_outputs)
-from .sites import EncodedAssembly, extract_sites, unit_tables
+from .sites import EncodedAssembly, extract_sites, same_pairs, unit_tables
 
 
 
@@ -90,7 +90,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1,
-        shared_sites="motif", complement_pairs="position", strand_sites="sum", noise_max_off_share=1.0,
+        shared_sites="sample", complement_pairs="position", strand_sites="sum", noise_max_off_share=1.0,
         robust_fit="alternating", max_flagged_share=1.0, regional_leave_out="chunk", regional_withdraw="vs_foreign",
         regional_tempered=False, gate_leave_out="none", gate_unweighted=False, eps_gated=False,
         redundancy_order="sequential", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all",
@@ -167,7 +167,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                     motif_rank=motif_rank, relevant=len(relevant), shared_sites="most_specific_group")
     if group_rank is not None:  # (keys are added only for non-default rules, so existing caches stay valid)
         man.update(shared_sites="motif_frequency", group_rank=group_rank)
-    if complement_pairs != "sequence":
+    if not same_pairs(motifs, complement_pairs):  # a rule that pairs this motif list as "sequence" does gives the same sites
         man.update(complement_pairs=complement_pairs)
     if strand_sites != "sum":
         man.update(strand_sites=strand_sites + ("+half" if strand_sites == "auto" else ""))
