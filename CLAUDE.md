@@ -24,10 +24,12 @@ stricter than this file, it wins.
 
 ## Before changing anything
 
-1. Read the development log: the state note at the top of `README.md`, `MISSION.md` if there is one, the
-   newest entries of `DECISIONS.md`, and the newest files under `reviews/` and `proposals/`. Every model
-   and design choice there was made for a measured reason. Do not reverse one, or remove what it added,
-   without rerunning the benchmark that justified it and telling the user first.
+1. Read the development log: the state note at the top of `README.md`, `MISSION.md` if there is one, and
+   the `DECISIONS.md` entries for the part of the code you change. Read reviews and proposals when your
+   task names them. Every model and design choice in the log was made for a measured reason. Do not
+   reverse one, or remove what it added, without rerunning the benchmark that justified it. On a
+   branch, record the reversal and its numbers in `DECISIONS.md` and tell the user. Before it reaches
+   `main`, the user must agree.
 2. Check the branch and the worktree (`git branch --show-current`, `git worktree list`). Never commit
    on `main`.
 
@@ -60,8 +62,8 @@ stricter than this file, it wins.
   creates a GitHub release. This cannot be undone. Tag only when the user says so, only after `main`
   is pushed and the test workflow has passed on it, and only with a tag equal to the version in
   `pyproject.toml`.
-- Version 0.11.0 is skipped. Never tag or publish it: with Nanomotif 1.3.0 motifs it makes no
-  inclusions on a metagenome. The first published version of that series is 0.11.1.
+- Version 0.11.0 is skipped. Never tag or publish it (the changelog says why). The first published
+  version of that series is 0.11.1.
 - The Bioconda recipe follows a PyPI release.
 
 ## Data rules
@@ -79,8 +81,10 @@ stricter than this file, it wins.
   name a held-out number as a target to move.
 - **Truth.** In the monoculture benchmarks the truth of a contig is the isolate assembly it comes
   from. Never relabel contigs that look foreign. A flag on one counts as a false flag.
-- **Motif input.** Motif tables come from Nanomotif 1.3.0; older tables are for comparison only. The
-  motif table can change the results a lot, so record its checksum with every run.
+- **Motif input.** Motif tables for new data come from Nanomotif 1.3.0. The motif table can change
+  the results a lot, so record its checksum with every run. A benchmark's recorded baselines belong to
+  the tables it was run with (the monoculture suite still reads older tables): switching a suite to
+  new tables is its own commit with a new baseline row, never part of another change.
 - **What the metrics leave out.** Contigs below the coverage cut-off (status `low_coverage`) and
   contigs without methylation evidence are reported separately and left out of recall and precision.
   An inclusion into a bin that holds a single contig is valid (plasmid, phage).
@@ -113,13 +117,16 @@ stricter than this file, it wins.
 - A replay of stored calibration data is a cheap first test, not proof. A replay that holds one model
   choice fixed can predict the opposite of the full run.
 - **Speed and memory changes** must leave the decisions, tau and the temperature identical, and the
-  outputs byte-identical where possible. Report peak memory and never raise it. Iterate on the smallest
-  input that shows the effect, one measurement per step; run the full-size benchmark at milestones.
+  outputs byte-identical where possible. Report peak memory, and do not raise it without the user's
+  agreement. Iterate on the smallest input that shows the effect, one measurement per step; run the
+  full-size benchmark at milestones.
 - Report the effect of every implemented change as numbers: what got faster or slower and by how
   much, which metric moved, on which benchmark. Say so plainly when nothing measurable changed, or
   when something got worse.
-- Every suite run appends its summary to `benchmarks/results.tsv` (commit the row of each version that
-  reaches `main`) and to the dev log (`benchmarks/history.tsv`).
+- A suite run appends its summary to `benchmarks/results.tsv` and to the dev log
+  (`benchmarks/history.tsv`). Only runs that decide a merge or a version belong there; commit the row
+  of each version that reaches `main`. Exploratory runs, and every run by a subagent, write elsewhere
+  (`--results <file> --devlog <directory>`).
 
 ## Tests
 
