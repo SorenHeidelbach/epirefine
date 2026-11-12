@@ -980,3 +980,376 @@ def _expand(values, idx, n):
     out = np.full(n, np.nan)
     out[idx] = values
     return out
+
+
+# ------------------------------------------------------------------------------------------------------------------
+# Calibration core (mission WP3, dev log proposals/2026-11-12/wp3_designs): one function from the calibration pieces
+# to the decisions before the redundancy check, called by pipeline.run and, with resampled pieces, by the R4 bootstrap.
+# Every option's default is the behaviour of 0.11.1.
+
+T_MIN = 1.082          # smallest temperature used: the grid's smallest value >= 1 (never sharpen, D7)
+N_REF_SITES = 1000.0   # reference site count of the temperature law (log T = a + b log(n / N_REF_SITES))
+
+
+@dataclass(frozen=True)
+class CoreOptions:
+    """The WP3 core options (CLI --tau-select, --npmle-start, --unknown-share, --temperature-law,
+    --evidence-temperature). tau_select and npmle_start act upstream, in the model fits; they are kept here so a run
+    records one set of options."""
+    tau_select: str = "per-group"         # 'per-group' (0.11) | 'inf'
+    npmle_start: str = "warm"             # 'warm' (0.11) | 'cold'
+    unknown_share: str = "deployed"       # 'deployed' (EM at the deployed T, 0.11) | 't1' (EM at T = 1)
+    temperature_law: str = "grid"         # 'grid' (one T from the 31-point grid, 0.11) | 'sites'
+    evidence_temperature: str = "median"  # 'median' (0.11) | 'contig' (each contig's own T in the evidence cut-off)
+    relatives: str = "switch"             # 'switch' (one model for all bins, 2-SE rule, 0.11) | 'per-bin' (weights)
+
+    def __post_init__(self):
+        for name, ok in (("tau_select", ("per-group", "inf")), ("npmle_start", ("warm", "cold")),
+                         ("unknown_share", ("deployed", "t1")), ("temperature_law", ("grid", "sites")),
+                         ("evidence_temperature", ("median", "contig")), ("relatives", ("switch", "per-bin"))):
+            if getattr(self, name) not in ok:
+                raise ValueError(f"unknown {name} {getattr(self, name)!r}; choose from {', '.join(ok)}")
+
+    @property
+    def decisions_default(self) -> bool:
+        """True when the decision stage is that of 0.11.1 (the upstream options may still differ)."""
+        return ((self.unknown_share, self.temperature_law, self.evidence_temperature, self.relatives)
+                == ("deployed", "grid", "median", "switch"))
+
+
+@dataclass
+class SitesLaw:
+    """Temperature as a smooth function of a unit's number of motif sites: T(n) = max(t_min, exp(a + b log(n / n_ref))),
+    b in [0, 1]. On ZymoFecal (development) the best temperature rises from 3.1 at 2 kb to 13.8 at 500 kb and this
+    form beats one temperature by 0.19 nats per piece, 5.6 SE over bins, cross-validated (dev log
+    model_diagnostics.md section 4); on the look-alikes b is near 0."""
+    a: float
+    b: float
+    n_ref: float = N_REF_SITES
+    t_min: float = T_MIN
+
+    def __call__(self, n_sites) -> np.ndarray:
+        x = np.log(np.maximum(np.asarray(n_sites, float), 1.0) / self.n_ref)
+        return np.maximum(self.t_min, np.exp(self.a + self.b * x))
+
+    def table(self) -> list[dict]:
+        return [{"law": "sites", "a": self.a, "b": self.b, "n_ref": self.n_ref, "t_min": self.t_min,
+                 **{f"T_at_{int(n)}_sites": float(self(n)) for n in (300, 1000, 3000, 10000, 30000)}}]
+
+
+def piece_losses(ff: FragmentFit, T_kept, eta, lam, p: float, weights: "RelativesWeights | None" = None):
+    """FragmentFit.losses with one temperature per kept piece (T_kept [n_kept] or scalar): the same terms. weights:
+    the unknown term is the per-bin relatives mixture (RelativesWeights.logit) instead of (eta, lam)."""
+    k = np.flatnonzero(ff.kept)
+    T = np.broadcast_to(np.asarray(T_kept, float), (len(k),)).astype(float)
+    Z = ff.S[k] / T[:, None]
+    rows = np.arange(len(k))
+    own = Z[rows, ff.fbin[k]].copy()
+    all_ = logsumexp(Z, axis=1)
+    Z[rows, ff.fbin[k]] = -np.inf
+    others = logsumexp(Z, axis=1) if ff.H > 1 else np.full(len(k), -np.inf)
+    if weights is None:
+        zu_a, zu_b = ff._unknown(T, eta, lam, k), ff._unknown(T, eta, lam, k, exclude_own=True)
+    else:
+        R = ff.R[weights.eta][k]
+        zu_a = weights.logit(R, ff.Su_comm[k], T)
+        zu_b = weights.logit(R, ff.Su_comm[k], T, exclude=ff.fbin[k])
+    lpb, lpu = np.log1p(-p) - log_bins(ff.H, T), np.log(p)
+    la = -(lpb + own - np.logaddexp(lpb + all_, lpu + zu_a))
+    d = ff.distinct[k]
+    lpb1 = np.log1p(-p) - log_bins(max(ff.H - 1, 1) if ff.proper else ff.H, T[d])
+    lb = -(lpu + zu_b[d] - np.logaddexp(lpb1 + others[d], lpu + zu_b[d]))
+    cap = -np.log(1e-12)
+    return np.minimum(la, cap), np.minimum(lb, cap)
+
+
+def fit_sites_law(ff: FragmentFit, eta, lam, priors, t_start: float, log=print, weights=None) -> SitesLaw:
+    """(a, b) of the temperature law minimising the calibration objective (FragmentFit.objective with one T per
+    piece) under the given unknown model. b is profiled on a grid in [0, 1] with a bounded 1-D search for a, then
+    polished by L-BFGS-B; deterministic (no random start)."""
+    from scipy.optimize import minimize, minimize_scalar
+    k = np.flatnonzero(ff.kept)
+    x = np.log(np.maximum(ff.n_sites[k], 1.0) / N_REF_SITES)
+
+    def obj(a, b):
+        T = np.maximum(T_MIN, np.exp(a + b * x))
+        la = lb = 0.0
+        for p, wa, wb in priors:
+            pa, pb = piece_losses(ff, T, eta, lam, p, weights)
+            la, lb = la + wa * pa, lb + wb * pb
+        return float(np.mean(la) + (np.mean(lb) if np.size(lb) else 0.0))
+
+    lo, hi = np.log(T_MIN) - 3.0, np.log(100.0)
+    best = None
+    for b in np.linspace(0.0, 1.0, 11):
+        r = minimize_scalar(lambda a: obj(a, b), bounds=(lo, hi), method="bounded", options={"xatol": 1e-4})
+        if best is None or r.fun < best[0]:
+            best = (float(r.fun), float(r.x), float(b))
+    r = minimize(lambda v: obj(v[0], v[1]), x0=[best[1], best[2]], method="L-BFGS-B", bounds=[(lo, hi), (0.0, 1.0)],
+                 options={"maxiter": 200})
+    a, b, f = (float(r.x[0]), float(r.x[1]), float(r.fun)) if r.fun <= best[0] else (best[1], best[2], best[0])
+    law = SitesLaw(a, b)
+    log(f"  temperature law: log T = {a:.4f} + {b:.4f} log(sites / {N_REF_SITES:g}), T >= {T_MIN:g} "
+        f"(T at 300 / 3,000 / 30,000 sites: {law(300):.3g} / {law(3000):.3g} / {law(30000):.3g}); objective {f:.5f} "
+        f"against {obj(np.log(max(t_start, T_MIN)), 0.0):.5f} at the grid temperature {t_start:g}")
+    return law
+
+
+@dataclass
+class ContigScores:
+    """What the decisions read; fixed within a bootstrap. R: eta -> [N, H] relative-of-bin scores (only the etas
+    available); Su: the unknown's score as the run mixed it (mix-then-temper at the model's eta, lam), used as it is
+    on the 0.11 path."""
+    S: np.ndarray
+    Su_comm: np.ndarray
+    R: dict
+    given: np.ndarray
+    testable: np.ndarray
+    decidable: np.ndarray
+    n_sites: np.ndarray
+    Su: np.ndarray | None = None
+    Su_eta_lam: tuple | None = None   # (eta, lam) Su was mixed with
+
+
+@dataclass
+class CalibrationResult:
+    fit: dict                 # temperature (scalar, the grid value or the law's median over contigs), eta, lam, curve
+    T_contig: object          # temperature used in the decisions: scalar or [N]
+    p_unknown: float          # deployed unknown share
+    p_unknown_t1: float | None
+    refinement: object        # refine.Refinement (flags and inclusions before the redundancy check)
+    law: SitesLaw | None = None
+
+    @property
+    def inclusions(self) -> int:
+        r = self.refinement
+        return int(((r.include_bin >= 0) & (self.contigs_given < 0)).sum())
+
+    contigs_given: np.ndarray | None = None
+    weights: "RelativesWeights | None" = None
+
+
+def _su_for(contigs: ContigScores, eta, lam):
+    """Mix-then-temper unknown score at T = 1 (0.11 order); None when R at eta is not available."""
+    if lam >= 1 or eta is None:
+        return contigs.Su_comm
+    if contigs.Su is not None and contigs.Su_eta_lam == (eta, lam):
+        return contigs.Su
+    R = contigs.R.get(eta)
+    return None if R is None else unknown_score(R, contigs.Su_comm, eta, lam)
+
+
+def calibrate_decisions(ff: FragmentFit | None, contigs: ContigScores, rules: dict, options: CoreOptions = CoreOptions(),
+                        fit: dict | None = None, p_cal: float = 0.1, share_rows=None, log=print) -> CalibrationResult:
+    """Calibration pieces in; model choice, temperature (law), unknown share and the decisions before the redundancy
+    check out.
+
+    ff: the calibration pieces (FragmentFit; the R4 bootstrap passes a copy resampled by source bins). fit: the
+    unknown-model choice and grid temperature already made by calibrate() (the pipeline passes it); None refits them
+    on ff exactly as FragmentFit.fit does at the reference prior p_cal (unknown-model switch with the 2-SE rule of
+    the run's features, T on the grid). Then:
+      temperature_law 'sites': the law is fitted on ff under the chosen unknown model (the T fit is redone because
+        the unknown term moves T: ZymoFecal 5.024 community only, 1.715 with relatives);
+      unknown_share 't1': p_unknown is the EM over the decided unbinned contigs at T = 1 (bins (1 - p) / H against
+        the unknown at T = 1; at T = 1 the two orders of tempering and mixing agree), then the decisions use that p
+        with the proper, untempered prior at each contig's temperature. 'deployed' (0.11): the EM runs inside refine
+        at the deployed temperature, where the untempered 1/H prior makes p rise with T (0.41 at T 1, 0.69 at 5.02 on
+        ZymoFecal, development).
+    share_rows: rows of the unbinned contigs for the EM (the bootstrap resamples them); None = all decided ones.
+    rules: refine() options (contamination_threshold, include_threshold, methylome_difference, ...; p_unknown when
+    the user fixed it).
+    """
+    from .refine import em_weight, refine
+    rules = dict(rules)
+    p_user = rules.pop("p_unknown", None)
+    thr_c = rules.pop("contamination_threshold", 0.5)
+    thr_i = rules.pop("include_threshold", 0.9)
+    if fit is None:
+        if ff is None:
+            raise ValueError("calibrate_decisions: no calibration pieces and no fit")
+        fit = ff.fit(p_cal, log=log)
+    fit = dict(fit)
+    eta, lam = fit["eta"], fit["lam"]
+    weights = None
+    user_T = fit.get("user_temperature")
+    if options.relatives == "per-bin":
+        if ff is None:
+            raise ValueError("--relatives per-bin needs the calibration")
+        weights = fit_relatives_weights(ff, log=log)
+        eta, lam = weights.eta, weights.lam
+        fit.update(eta=eta, lam=lam, curve=None, relatives_weights=weights)
+        if user_T is None and options.temperature_law == "grid":
+            fit["temperature"] = grid_temperature(ff, ff.priors_for(p_cal), weights)
+            log(f"  temperature under the per-bin relatives: {fit['temperature']:g}")
+    law = None
+    if options.temperature_law == "sites" and user_T is None:
+        if ff is None:
+            raise ValueError("--temperature-law sites needs the calibration")
+        law = fit_sites_law(ff, eta, lam, ff.priors_for(p_cal), fit["temperature"], log=log, weights=weights)
+        fit["curve"] = law
+    T = law(contigs.n_sites) if law is not None else (fit["curve"](contigs.n_sites) if fit.get("curve") is not None
+                                                      else fit["temperature"])
+    if weights is not None:
+        if weights.eta not in contigs.R:
+            raise ValueError(f"calibrate_decisions: no contig scores for relatives at eta {weights.eta:g}")
+        Rc = contigs.R[weights.eta]
+        Su1 = weights.logit(Rc, contigs.Su_comm, 1.0)          # the unknown at T = 1 (both orders agree there)
+        zu_of = lambda Tx, rows=slice(None): weights.logit(Rc[rows], contigs.Su_comm[rows], Tx)
+    else:
+        Su1 = _su_for(contigs, eta, lam)
+        if Su1 is None:
+            raise ValueError(f"calibrate_decisions: no contig scores for relatives at eta {eta:g}")
+        zu_of = lambda Tx, rows=slice(None): Su1[rows] / Tx     # mix-then-temper, as 0.11
+    p_t1 = None
+    p_fixed = p_user
+    prior = rules.get("p_unknown_prior", (1.0, 1.0))
+    if options.unknown_share == "t1" and p_user is None:
+        unb = np.flatnonzero((contigs.given < 0) & contigs.decidable) if share_rows is None else np.asarray(share_rows)
+        l_bins = logsumexp(contigs.S[unb], axis=1) - np.log(contigs.S.shape[1])
+        p_t1 = float(em_weight(l_bins, Su1[unb], *prior)[0])
+        p_fixed = p_t1
+        log(f"  unknown share by the EM at T = 1: {p_t1:.4f}")
+    elif share_rows is not None and p_user is None:
+        unb = np.asarray(share_rows)
+        Tu = T[unb] if np.ndim(T) else T
+        l_bins = logsumexp(contigs.S[unb] / (Tu[:, None] if np.ndim(Tu) else Tu), axis=1) - np.log(contigs.S.shape[1])
+        p_fixed = float(em_weight(l_bins, zu_of(Tu, unb), *prior)[0])
+    if weights is None:
+        ref = refine(contigs.S, Su1, contigs.given, contigs.testable, T, thr_c, thr_i, p_unknown=p_fixed,
+                     decidable=contigs.decidable, **rules)
+    else:
+        ref = refine(contigs.S, None, contigs.given, contigs.testable, T, thr_c, thr_i, p_unknown=p_fixed,
+                     decidable=contigs.decidable, Zu=zu_of(T), **rules)
+    if law is not None:
+        fit["temperature"] = float(np.median(T))
+    res = CalibrationResult(fit=fit, T_contig=T, p_unknown=ref.p_unknown, p_unknown_t1=p_t1, refinement=ref, law=law,
+                            contigs_given=contigs.given)
+    res.weights = weights
+    return res
+
+
+# ---- candidate 2 of WP3: a relatives weight per bin (design A, dev log wp3_designs/design_A.md section 2a)
+ETA_REL = 0.05   # the eta every relatives fit chose on ZymoFecal and on the look-alikes (development)
+
+
+@dataclass
+class RelativesWeights:
+    """The unknown genome's density as one mixture, no switch: a community draw (weight lam) or an unbinned relative
+    of bin h (weight w[h]), lam + sum(w) = 1. alpha: the Dirichlet concentration that shrinks the spread over bins."""
+    lam: float
+    w: np.ndarray
+    alpha: float
+    eta: float = ETA_REL
+    n_pieces: int = 0
+    rounds: int = 0
+
+    def logit(self, R, Su_comm, temperature, exclude=None) -> np.ndarray:
+        """Tempered log-score of 'unbinned genome', each explanation tempered then mixed (temper-then-mix):
+        log(lam exp(Su / T) + sum_h w_h exp(R_h / T)). exclude[u]: a bin left out (its own, in a host-absent test);
+        the remaining weights are renormalised."""
+        T = np.asarray(temperature, float)
+        Tc = T[:, None] if T.ndim else T
+        lw = np.log(np.maximum(self.w, 1e-300))
+        Z = np.asarray(R, float) / Tc + lw[None, :]
+        norm = np.zeros(len(Z))
+        if exclude is not None:
+            ex = np.asarray(exclude) >= 0
+            rows = np.flatnonzero(ex)
+            Z[rows, np.asarray(exclude)[ex]] = -np.inf
+            norm[ex] = np.log(self.lam + self.w.sum() - self.w[np.asarray(exclude)[ex]])
+        return np.logaddexp(np.log(self.lam) + np.asarray(Su_comm, float) / T, logsumexp(Z, axis=1)) - norm
+
+    def summary(self) -> dict:
+        H = len(self.w)
+        rel = 1.0 - self.lam
+        top = np.sort(self.w)[::-1]
+        return {"lam": self.lam, "alpha": self.alpha, "eta": self.eta, "pieces": self.n_pieces, "rounds": self.rounds,
+                "share_of_relatives_on_top10_bins": float(top[:10].sum() / rel) if rel > 0 else float("nan"),
+                "bins_with_Hw_below_0.05": float(np.mean(H * self.w < 0.05)),
+                "bins_with_Hw_at_least_0.2": float(np.mean(H * self.w >= 0.2))}
+
+
+def _dm_alpha(m: np.ndarray) -> float:
+    """Type-II ML of a symmetric Dirichlet-multinomial concentration from (soft) counts m [H]."""
+    from scipy.optimize import minimize_scalar
+    from scipy.special import gammaln
+    H, M = len(m), float(m.sum())
+
+    def nll(la):
+        a = np.exp(la)
+        return -(gammaln(H * a) - gammaln(M + H * a) + np.sum(gammaln(m + a) - gammaln(a)))
+    r = minimize_scalar(nll, bounds=(-8.0, 4.0), method="bounded", options={"xatol": 1e-6})
+    return float(np.exp(r.x))
+
+
+def fit_relatives_weights(ff: FragmentFit, eta: float = ETA_REL, tol: float = 1e-8, max_rounds: int = 500,
+                          log=print) -> RelativesWeights:
+    """Weights of the unknown mixture by EM on the host-absent calibration pieces (test B) at T = 1.
+
+    Every kept piece of a binned genome, scored with its own bin removed, is a genome without a bin: its
+    responsibilities are r_0 ~ lam exp(Su) (community draw) and r_h ~ w_h exp(R_h), h != its own bin (so a piece never
+    informs the weight of its own bin: leave-one-bin-out by construction). lam = (m_0 + 1) / (n + 2) (Beta(1, 1)); the
+    relatives' share is spread over bins as w_h = (1 - lam) (m_h + alpha) / (M + H alpha), alpha the type-II ML of the
+    Dirichlet-multinomial on the soft counts: concentrated sibling evidence (ZymoFecal: 5 of 213 bins hold 44% of the
+    test-B gain, D51) gives a small alpha and most bins near 0; evidence spread over the bins (look-alikes) gives a large
+    alpha and weights near the uniform (1 - lam) / H of the global model. Deterministic."""
+    k = np.flatnonzero(ff.kept)
+    R = np.array(ff.R[eta][k], float)
+    Su = ff.Su_comm[k].astype(float)
+    b = ff.fbin[k]
+    n, H = R.shape
+    R[np.arange(n), b] = -np.inf
+    mx = np.maximum(Su, R.max(1))
+    E0 = np.exp(Su - mx)
+    E = np.exp(R - mx[:, None])
+    lam, w, alpha = 0.5, np.full(H, 0.5 / H), 1.0
+    it = 0
+    for it in range(1, max_rounds + 1):
+        den = lam * E0 + E @ w
+        m0 = float((lam * E0 / den).sum())
+        mh = w * (E / den[:, None]).sum(0)
+        new_lam = (m0 + 1.0) / (n + 2.0)
+        alpha = _dm_alpha(mh)
+        M = float(mh.sum())
+        new_w = (1.0 - new_lam) * (mh + alpha) / (M + H * alpha)
+        done = abs(new_lam - lam) < tol and np.abs(new_w - w).max() < tol
+        lam, w = new_lam, new_w
+        if done:
+            break
+    out = RelativesWeights(lam=float(lam), w=w, alpha=alpha, eta=eta, n_pieces=n, rounds=it)
+    s = out.summary()
+    log(f"  relatives per bin (eta {eta:g}): lam {lam:.4f}, alpha {alpha:.4g}, {s['share_of_relatives_on_top10_bins']:.1%} "
+        f"of the relatives' weight on the top 10 bins, H w < 0.05 for {s['bins_with_Hw_below_0.05']:.1%} of bins "
+        f"({n} pieces, {it} rounds)")
+    return out
+
+
+def grid_temperature(ff: FragmentFit, priors, weights: RelativesWeights) -> float:
+    """Best temperature >= 1 of the grid under the per-bin unknown mixture (objective of FragmentFit.fit)."""
+    best = None
+    for T in ff.temps:
+        if T < 1.0 and not ff.allow_sharpening:
+            continue
+        la = lb = 0.0
+        for p, wa, wb in priors:
+            a, b = piece_losses(ff, T, None, None, p, weights)
+            la, lb = la + wa * a, lb + wb * b
+        v = float(np.mean(la) + (np.mean(lb) if np.size(lb) else 0.0))
+        if best is None or v < best[0]:
+            best = (v, float(T))
+    return best[1]
+
+
+def hidden_relative(contigs: ContigScores, weights: RelativesWeights, p_unknown: float, T, best_bin) -> np.ndarray:
+    """Per contig: the probability that an unbinned relative of `best_bin` explains it, among all explanations (bins
+    with (1 - p) / H, the community draw p lam, the relatives p w_h; each likelihood tempered by the contig's T).
+    Report only."""
+    N, H = contigs.S.shape
+    Tv = np.broadcast_to(np.asarray(T, float), (N,))
+    R = contigs.R[weights.eta]
+    rows = np.arange(N)
+    lw = np.log(np.maximum(weights.w, 1e-300))
+    l_bins = logsumexp(contigs.S / Tv[:, None], axis=1) + np.log1p(-p_unknown) - np.log(H)
+    l_unk = np.log(p_unknown) + weights.logit(R, contigs.Su_comm, Tv)
+    l_rel = np.log(p_unknown) + lw[best_bin] + R[rows, best_bin] / Tv
+    return np.exp(l_rel - np.logaddexp(l_bins, l_unk))
