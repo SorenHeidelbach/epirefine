@@ -198,6 +198,15 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--siteless-bin-guard", action="store_true",
                    help="include nothing into a bin without a single motif site (such a bin has no profile; its "
                         "posterior is its prior share)")
+
+    g = r.add_argument_group("calibration core (experimental)",
+                             "options of the calibration redesign (mission WP3); every default is the behaviour of 0.11.1")
+    g.add_argument("--tau-select", choices=["per-group", "inf"], default="per-group",
+                   help="between-contig variation: a tau per motif group chosen on the calibration pieces, or none "
+                        "(tau = inf fitted inside the calibration; no tau scan)")
+    g.add_argument("--npmle-start", choices=["warm", "cold"], default="warm",
+                   help="population-prior fits start from the previous fit's solution (warm) or from the uniform (cold)")
+    g.add_argument("--calibration-exclusion", choices=["on", "off"], default="on", help=argparse.SUPPRESS)
     return ap
 
 
@@ -227,7 +236,9 @@ def main(argv=None):
                 gate_leave_out=a.gate_leave_out, gate_unweighted=a.gate_unweighted, eps_gated=a.eps_gated,
                 redundancy_order=a.redundancy_order, unlisted_genome=a.unlisted_genome,
                 inclusion_support=a.inclusion_support, tau_support=a.tau_support, unknown_prior=a.unknown_prior,
-                unknown_prior_strength=a.unknown_prior_strength)
+                unknown_prior_strength=a.unknown_prior_strength,
+                tau_select=a.tau_select, npmle_start=a.npmle_start,
+                calibration_exclusion=a.calibration_exclusion == "on")
         except InputError as e:
             # a problem with the inputs or options: the message says what; no traceback needed
             log(f"ERROR: {e}")

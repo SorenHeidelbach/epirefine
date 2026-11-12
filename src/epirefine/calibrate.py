@@ -612,11 +612,13 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
               chunks_of, p_unknown, H_frag=None, taus=DEFAULT_TAUS, temps=DEFAULT_TEMPS,
               lookalike_dist=0.15, decidable_bf=3.0, etas=DEFAULT_ETAS, lams=DEFAULT_LAMS,
               allow_sharpening=False, n_sites_frag=None, leave_out=None, log=print, features=frozenset(),
-              tau_support="all",              **model_kw):
+              tau_support="all", exclude_foreign=True, **model_kw):
     """chunks_of[i]: host chunks fragment i overlaps (to check its label); leave_out[i]: chunks removed
     from its bin's profile when scoring it (default chunks_of; the pipeline passes the whole source
     contig). features: see FEATURES (empty = the calibration of 0.10). The result's "fragment_fit" refits
-    the temperature and the unknown model for another prior and reports on the deployed posteriors."""
+    the temperature and the unknown model for another prior and reports on the deployed posteriors.
+    exclude_foreign=False (hidden diagnostic option, WP3 step 0): keep the fragments from chunks the robust model
+    calls foreign to their bin, in every tau fit."""
     features = frozenset(features)
     fbin = frags["bin_idx"].to_numpy()
     H = n_bins
@@ -653,7 +655,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             with ThreadPoolExecutor(max(1, min(_n_threads(), len(batches)))) as ex:
                 list(ex.map(one_batch, batches))
         # fragments from chunks the robust model calls foreign to their bin carry a wrong label
-        keep = has_rest & np.array([bool((model.w[ch] >= 0.5).all()) for ch in chunks_of])
+        keep = has_rest & np.array([bool((model.w[ch] >= 0.5).all()) for ch in chunks_of]) if exclude_foreign else has_rest.copy()
         # the chunks' marginal tables (as large as L_chunks) were last needed by the leave-out profiles
         # above; dropped here, the best model so far no longer holds a second copy during the next fit
         spare[:] = [model.Lp_chunks]  # (its memory is the next fit's marginal table: written over, not re-faulted)

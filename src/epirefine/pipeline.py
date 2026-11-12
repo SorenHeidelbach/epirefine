@@ -203,10 +203,17 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         regional_tempered=False, gate_leave_out="none", gate_unweighted=False, eps_gated=False,
         redundancy_order="independent", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all",
         unknown_prior="bins", unknown_prior_strength=5.0,
-        calibration="default", siteless_bin_guard=False):
+        calibration="default", siteless_bin_guard=False,
+        tau_select="per-group", npmle_start="warm", calibration_exclusion=True):
     """calibration: 'default' (the calibration of 0.10 with the parsimony test of the unknown model resampled over
     bins, since 0.11.1), 'legacy' (the calibration of 0.10 and 0.11.0), 'consistent', 'coherent', or a comma-separated
-    list of calibrate.FEATURES; see calibrate.parse_features."""
+    list of calibrate.FEATURES; see calibrate.parse_features.
+
+    Calibration core options (WP3, experimental; each default is the behaviour of 0.11.1):
+    tau_select: 'per-group' (the tau scan and a tau per motif group) or 'inf' (no between-contig variation: the
+    calibration fits tau = inf only; the seed's main route into the scores, dev log model_diagnostics.md 6a).
+    npmle_start: 'warm' or 'cold' (every population-prior fit from the uniform; model.FittedModel).
+    calibration_exclusion: False keeps the calibration fragments from chunks called foreign (diagnostic only)."""
     args = dict(locals())  # first statement: the options as given
     runinfo.begin(args, _log)  # first log lines (version, command, inputs) and option ranges, before any work
     # the inputs are checked before anything is read or written: a missing file or a wrong table must not
@@ -429,13 +436,20 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     ffit = fit = None
     user_temperature = temperature
     model_kw = {"contam_eps": contam_eps, "robust_fit": robust_fit}
+    if npmle_start != "warm":
+        model_kw["prior_start"] = npmle_start
+    if tau_select not in ("per-group", "inf"):
+        raise ValueError(f"unknown tau_select {tau_select!r}")
+    cal_taus = DEFAULT_TAUS if variation == "beta" else DEFAULT_SIGMAS
+    if tau_select == "inf":  # no between-contig variation (beta: tau = inf; logit-normal: sigma = 0)
+        cal_taus = (float("inf"),) if variation == "beta" else (0.0,)
     if do_calibrate:
         _log("calibration with pseudo-contigs")
         chunks_of = fragment_chunks(frags, chunk_size, chunk_index)
         cal = calibrate(L_chunks, chunk_bin, H, group_modtype, grid, frags, tabs["L_frag"], chunks_of,
                         p_cal, H_frag=tabs["H_frag"], allow_sharpening=allow_sharpening,
                         leave_out=contig_chunks(frags["contig"].to_numpy(), chunk_contig),
-                        taus=DEFAULT_TAUS if variation == "beta" else DEFAULT_SIGMAS, n_sites_frag=tabs["frag_sites"],
+                        taus=cal_taus, n_sites_frag=tabs["frag_sites"], exclude_foreign=calibration_exclusion,
                         log=_log, features=features, tau_support=tau_support, **model_kw)
         ffit, fit = cal["fragment_fit"], cal["fit"]
         names = dict(enumerate(bins))
