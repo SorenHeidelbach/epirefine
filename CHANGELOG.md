@@ -3,6 +3,16 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## Unreleased (0.12)
+
+### Added
+- `--calibration-seed` (default: the value of `--seed`): draws the calibration pieces and nothing else. The
+  motif-grouping sample and the calibration pieces now have their own random generators; up to 0.11.1 one generator
+  drew both, so another `--seed` also changed the motif grouping and, on an assembly larger than the grouping sample
+  (`--group-sample-mb`, 50 Mb), rebuilt the site cache (hours on a large pileup). At the default the grouping and
+  the pieces are exactly those of 0.11.1 (tested against stored 0.11.1 draws, and on ZymoFecal's two motif tables
+  against the groups of their site caches), so no decision changes. `params.json` records `calibration_seed`.
+
 ## 0.11.1 (2026-11-12): the unknown-genome model no longer absorbs every unbinned contig
 
 0.11.0 was never published; this is the first published version of the 0.11 series.

@@ -183,7 +183,9 @@ The cache is reused when the assembly, pileup and motifs are the same.
 
 ### Are results reproducible?
 
-Yes. The same inputs and `--seed` (default 1) give identical outputs.
+Yes. The same inputs and seeds (`--seed` and `--calibration-seed`, both 1 by default) give identical outputs.
+`--calibration-seed` draws other calibration pieces and leaves the motif groups and the site cache alone, so
+running a few values of it shows which decisions depend on the pieces drawn.
 
 ### Something went wrong
 

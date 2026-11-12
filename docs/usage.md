@@ -19,7 +19,8 @@ agreement is not an independent check of them. Most users only set the inputs, `
 | `--motifs` | yes | Nanomotif `bin-motifs.tsv` (or any TSV with `motif`, `mod_type`, `mod_position`). Only the list of motifs is used, plus their complements when given. `mod_type` must be a modkit code (`a` = 6mA, `m` = 5mC, `21839` = 4mC, `h` = 5hmC), `mod_position` is 0-based; other mod types stop the run, invalid motifs are skipped and counted in the log. |
 | `--out` | yes | Output folder. |
 | `--motif-fit` | no | Also write `motif_fit.tsv`: each contig's methylated fraction per motif group next to its bin's. |
-| `--seed` | no (1) | Random seed; the same seed gives identical outputs. |
+| `--seed` | no (1) | Random seed of the motif-grouping sample (part of the site-cache key) and, unless `--calibration-seed` is given, of the calibration pieces; the same seeds give identical outputs. |
+| `--calibration-seed` | no (`--seed`) | Random seed of the calibration pieces only. Another value draws other pieces, and so shows how much the calibration depends on them, without changing the motif groups or invalidating the site cache. At the default the pieces are those of 0.11.1. |
 
 ## Decisions
 

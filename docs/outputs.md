@@ -125,7 +125,8 @@ outputs can read EpiRefine's.
   `false`) and completed at the end, so an interrupted run still shows its settings.
   - Provenance: `version`, `command_line`, `start_time` (UTC), `python`, `inputs` (path, size in bytes and
     modification time of the assembly, pileup, contig-bin table and motif table), `out`, `cache_dir`, `workers`,
-    `seed`.
+    `seed`, `calibration_seed` (the seed the calibration pieces were drawn with: `--calibration-seed`, or `seed`
+    when it was not given).
   - Every option as given, under the name of the command-line option with underscores (`contamination_threshold`,
     `include_threshold`, `include_threshold_unmethylated`, `min_methylome_difference`, `max_redundancy`,
     `min_evidence`, `min_contig_coverage`, `min_contig_length`, `min_cov`, `chunk_size`, `grid_size`, `contam_eps`,
