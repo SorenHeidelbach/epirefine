@@ -183,7 +183,14 @@ The cache is reused when the assembly, pileup and motifs are the same.
 
 ### Are results reproducible?
 
-Yes. The same inputs and `--seed` (default 1) give identical outputs.
+Yes. The same inputs and `--seed` (default 1) give identical outputs, also with another number of workers
+(`--workers`) or threads (cores, `OMP_NUM_THREADS`), with the same installation on the same kind of machine.
+
+Two things can change the last digits of the probabilities without changing the decisions: the optional compiled
+kernels (package `epirefine-rs`) against the numpy code, and another machine or BLAS library. Both change only how
+floating-point sums and exponentials are rounded. On the development benchmarks (monoculture training communities,
+ZymoOral pieces, simulated look-alikes) runs with and without the kernels made the same calls, with probabilities
+that agreed to 1e-10 or better.
 
 ### Something went wrong
 

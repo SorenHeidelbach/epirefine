@@ -645,15 +645,15 @@ class _single_threaded_blas:
 
 
 def _summed_scores_rows(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None):
-    """summed_scores for large tables: units in slices of ROWS_STEP on threads, each slice through all groups,
+    """summed_scores in numpy: units in slices of ROWS_STEP on threads, each slice through all groups,
     ROWS_GROUPS at a time (stacked [step, G] x [G, H] products on a one-thread BLAS, work buffers reused).
     A unit's result depends only on its slice (ROWS_STEP-aligned), not on the thread count or on how many
     units are scored with it in steps of ROWS_STEP. The relatives' term is taken with one logarithm,
         log((1 - eta) P + eta e^Au) = log(q + c d) + log(1 - eta) + am + bm,
         q = sum_g e^(a - am) e^(b - bm), c = eta e^(Au - am) / (1 - eta), d = e^-bm,
     instead of numpy's logaddexp (scalar code, 20 ns a cell); c <= eta / (1 - eta) since Au <= am, and
-    d <= G for normalised profiles. Agrees with the group form to about 1e-14 relative (other order of the
-    sums over groups, another product kernel)."""
+    d <= G for normalised profiles. Agrees with group_scores(...).sum(-1) and with the kernel of epirefine-rs to
+    about 1e-15 relative (another order of the products inside a group, another logarithm)."""
     U, M, G = Lp.shape
     H = log_prof.shape[0]
     bm = log_prof.max(-1)                                                          # [H, M]
@@ -683,7 +683,7 @@ def _summed_scores_rows(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None 
             ms = slice(m0, min(m0 + K, M))
             k = ms.stop - m0
             x, q = xb[:k], qb[:k]
-            x[...] = np.exp(a[:, ms, :].transpose(1, 0, 2) - amT[ms])          # float32 exp, as the group form
+            x[...] = np.exp(a[:, ms, :].transpose(1, 0, 2) - amT[ms])          # float32 exp, as group_scores
             np.matmul(x, ebT[ms], out=q)
             np.maximum(q, 1e-300, out=q)
             if rel is not None:
