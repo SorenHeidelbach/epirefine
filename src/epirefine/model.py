@@ -897,6 +897,27 @@ def score_units(Lp: np.ndarray, log_prof: np.ndarray) -> np.ndarray:
     return summed_scores(Lp, log_prof)
 
 
+# Calibration feature tempered-bin-prior (calibrate.FEATURES): set by pipeline.run for the length of a run.
+_TEMPERED_BIN_PRIOR = False
+
+
+def set_tempered_bin_prior(on: bool) -> bool:
+    """Switches the form of the prior over bins in every posterior; returns the previous setting."""
+    global _TEMPERED_BIN_PRIOR
+    old, _TEMPERED_BIN_PRIOR = _TEMPERED_BIN_PRIOR, bool(on)
+    return old
+
+
+def log_bins(n, temperature=1.0):
+    """log of the number n of candidate bins as it enters a posterior: the uniform prior over bins costs each bin
+    log n. The evidence is tempered (S / T) and, by default (0.10), this cost is not, so the log odds of 'unknown'
+    against 'some bin' gain log(n) (1 - 1 / T) from the temperature alone and the estimated p_unknown rises with T
+    (ZymoFecal, community-only: 0.41 at T 1, 0.69 at T 5.02, 0.94 at T 10). With tempered-bin-prior the cost is
+    log(n) / T: the mixture over bins is tempered as a whole, as the relatives' mixture already is."""
+    ln = np.log(n)
+    return ln / temperature if _TEMPERED_BIN_PRIOR else ln
+
+
 def posterior(S_hosts: np.ndarray, S_unknown: np.ndarray | None, p_unknown: float, temperature=1.0,
               host_mask: np.ndarray | None = None, Zu: np.ndarray | None = None) -> np.ndarray:
     """Posterior over [bins..., unknown]. host_mask[u, h] = False removes bin h as a candidate for unit u.
@@ -907,8 +928,8 @@ def posterior(S_hosts: np.ndarray, S_unknown: np.ndarray | None, p_unknown: floa
     """
     U, H = S_hosts.shape
     T = np.asarray(temperature, float)
-    prior = np.r_[np.full(H, np.log((1 - p_unknown) / H)), np.log(p_unknown)]
     Tb = T[:, None] if T.ndim else T
+    lp_bin = np.log1p(-p_unknown) - log_bins(H, Tb) if _TEMPERED_BIN_PRIOR else np.log((1 - p_unknown) / H)
     # one [U, H + 1] array, updated in place
     if Zu is None:
         logits = np.concatenate([S_hosts, S_unknown[:, None]], 1)
@@ -916,7 +937,8 @@ def posterior(S_hosts: np.ndarray, S_unknown: np.ndarray | None, p_unknown: floa
     else:
         logits = np.concatenate([S_hosts, Zu[:, None]], 1)
         logits[:, :H] /= Tb
-    logits += prior[None, :]
+    logits[:, :H] += lp_bin
+    logits[:, H] += np.log(p_unknown)
     if host_mask is not None:
         logits[:, :H] = np.where(host_mask, logits[:, :H], -np.inf)
     logits -= logsumexp(logits, axis=1, keepdims=True)

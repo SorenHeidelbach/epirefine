@@ -25,7 +25,7 @@ from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, calibrate
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
-from .model import (LOO_BATCH, LOO_THREADS_MIN, FittedModel, _cores, _n_threads, logsumexp, posterior, summed_scores, unbinned_state_frequencies, unknown_logit,
+from .model import (LOO_BATCH, LOO_THREADS_MIN, FittedModel, _cores, _n_threads, log_bins, logsumexp, posterior, set_tempered_bin_prior, summed_scores, unbinned_state_frequencies, unknown_logit,
                     unknown_score)
 from .motifs import (build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights,
                      specificity_ranks)
@@ -168,6 +168,31 @@ def _spill(a: np.ndarray, directory) -> np.ndarray:
         return a
 
 
+
+def _bin_prior_scope(f):
+    """Runs f with the form of the bin prior that its calibration features ask for (tempered-bin-prior) and puts
+    the previous form back afterwards, also when the run fails."""
+    import functools
+    import inspect
+    sig = inspect.signature(f)
+
+    @functools.wraps(f)
+    def wrapped(*args, **kwargs):
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        try:
+            on = "tempered-bin-prior" in parse_features(bound.arguments["calibration"])
+        except ValueError:
+            on = False  # run() reports the bad value
+        old = set_tempered_bin_prior(on)
+        try:
+            return f(*args, **kwargs)
+        finally:
+            set_tempered_bin_prior(old)
+    return wrapped
+
+
+@_bin_prior_scope
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
@@ -567,7 +592,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         def deployed_p(f):
             T = f["temperature"]
             zu = unknown_logit(sc.R[ub] if f["lam"] < 1 else None, sc.Su_comm[ub], f["eta"], f["lam"], T, temper_then_mix=ttm)
-            return em_weight(logsumexp(sc.S[ub] / T, axis=1) - np.log(H), zu, *prior_u)[0]
+            return em_weight(logsumexp(sc.S[ub] / T, axis=1) - log_bins(H, T), zu, *prior_u)[0]
         p_rel, p_com = deployed_p(fit), deployed_p(community_fit)
         gain, se = ffit.deployed_gain((fit["temperature"], fit["eta"], fit["lam"]), p_rel,
                                       (community_fit["temperature"], community_fit["eta"], 1.0), p_com)
@@ -763,7 +788,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                 if i is None or given[i] >= 0 or len(ks) < 2 or ref.include_bin[i] >= 0 or low_cov[i] or short[i]:
                     continue
                 pu = min(max(ref.p_unknown, 1e-3), 1 - 1e-3)
-                logits = np.concatenate([Sw[ks] + np.log((1 - pu) / H), (Suw[ks] + np.log(pu))[:, None]], 1)
+                logits = np.concatenate([Sw[ks] + np.log1p(-pu) - log_bins(H, T), (Suw[ks] + np.log(pu))[:, None]], 1)
                 pw = np.exp(logits - logits.max(1, keepdims=True)); pw /= pw.sum(1, keepdims=True)
                 share = pw[:, :H].sum(0)                                        # expected windows per bin
                 h = int(share.argmax())
@@ -807,7 +832,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
 
         def segment_map(L_rows, nos, i, sc_=None):
             sc_ = model.score(L_rows) if sc_ is None else sc_
-            lg = np.concatenate([sc_.S / T0 + np.log((1 - pu0) / H), (sc_.Su / T0 + np.log(pu0))[:, None]], 1)
+            lg = np.concatenate([sc_.S / T0 + np.log1p(-pu0) - log_bins(H, T0), (sc_.Su / T0 + np.log(pu0))[:, None]], 1)
             pr = np.exp(lg - lg.max(1, keepdims=True)); pr /= pr.sum(1, keepdims=True)
             best, pbest = pr.argmax(1), pr.max(1)
             runs, start = [], 0

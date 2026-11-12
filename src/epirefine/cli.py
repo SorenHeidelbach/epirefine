@@ -129,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "'legacy' (exactly as in 0.10 and 0.11.0), 'consistent' (temper-then-mix, common-tau, "
                         "em-priors), 'coherent' (the full proposed design), or a comma-separated list of features "
                         "(temper-then-mix, prior-averaged, prior-matched, conservative-temperature, full-test-b, "
-                        "unit-temperature, sites-temperature, common-tau, em-priors, bin-parsimony, deployed-unknown; '-name' removes one). "
+                        "unit-temperature, sites-temperature, common-tau, em-priors, bin-parsimony, tempered-bin-prior, deployed-unknown; '-name' removes one). "
                         "See docs/development/method-notes.md")
     g.add_argument("--frag-lengths", type=lambda s: tuple(int(x) for x in s.split(",")), default=DEFAULT_LENGTHS,
                    help="lengths (bp, comma-separated) of the pieces cut from binned contigs for calibration; at "

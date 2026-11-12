@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from scipy.special import expit, logsumexp
 
 from .assignability import margin_vs_competitors
-from .model import LOO_BATCH, LOO_THREADS_MIN, FittedModel, _n_threads, posterior, summed_scores, unknown_logit, unknown_score
+from .model import LOO_BATCH, LOO_THREADS_MIN, FittedModel, _n_threads, log_bins, posterior, summed_scores, unknown_logit, unknown_score
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -67,6 +67,9 @@ FEATURES = {
     "bin-parsimony": "the unknown model with relatives (lam < 1) must beat the community-only model by 2 SE with the "
                      "standard error taken over bins (the fragments of a bin share its sibling bins), not over "
                      "single fragments",
+    "tempered-bin-prior": "the uniform prior over bins is tempered with the evidence (each bin costs log(H) / T "
+                          "instead of log(H)), in calibration and in the decisions, so the estimated p_unknown "
+                          "no longer rises with the temperature",
     "deployed-unknown": "an unknown model with relatives (lam < 1) is kept only if it still beats the community-only "
                         "model by 2 SE when each is scored on the fragments at the p_unknown it would be deployed "
                         "with (EM on the unbinned contigs), not at the reference prior of the fit",
@@ -313,10 +316,10 @@ class FragmentFit:
             self._cache[key] = (self._unknown(T, eta, lam, k), self._unknown(T, eta, lam, k, exclude_own=True))
         zu_a, zu_b = self._cache[key]
         own, all_, others = self._bins(T)
-        lpb, lpu = np.log1p(-p) - np.log(self.H), np.log(p)
+        lpb, lpu = np.log1p(-p) - log_bins(self.H, T), np.log(p)
         la = -(lpb + own - np.logaddexp(lpb + all_, lpu + zu_a))
         d = self.distinct[k]
-        lpb1 = np.log1p(-p) - np.log(max(self.H - 1, 1) if self.proper else self.H)
+        lpb1 = np.log1p(-p) - log_bins(max(self.H - 1, 1) if self.proper else self.H, T)
         lb = -(lpu + zu_b[d] - np.logaddexp(lpb1 + others[d], lpu + zu_b[d]))
         cap = -np.log(1e-12)
         return np.minimum(la, cap), np.minimum(lb, cap)
@@ -827,7 +830,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         return la.mean() + lb.mean(), la.mean(), lb.mean()
 
     flen = frags_k["length"].to_numpy()
-    if not features - {"common-tau", "em-priors", "deployed-unknown", "bin-parsimony"}:  # no feature that touches the temperature / unknown-model fit
+    if not features - {"common-tau", "em-priors", "deployed-unknown", "bin-parsimony", "tempered-bin-prior"}:  # no feature that touches the temperature / unknown-model fit
         # the calibration of 0.10: prior p_unknown as passed (0.1), tests A and B weighted 1 : 1, the unknown's
         # mixture summed before tempering
         temp_rows, Su_by = [], {}

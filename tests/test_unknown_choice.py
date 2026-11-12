@@ -140,3 +140,44 @@ def test_check_runs_with_temper_then_mix(small_community, tmp_path, forced_relat
         assert p["unknown_lam"] == 0.1 and p["temperature"] == 20.0
     else:
         assert p["unknown_lam"] == 1.0 and p["temperature"] < 20
+
+
+def test_tempered_bin_prior_is_a_shift_of_the_bin_scores():
+    """log(H) / T instead of log(H): the same posterior as adding (T - 1) log(H) to every bin score."""
+    from epirefine import model as M
+    rng = np.random.default_rng(0)
+    S, Su, T, H = rng.normal(0, 5, (30, 7)), rng.normal(0, 5, 30), 3.0, 7
+    plain = M.posterior(S, Su, 0.3, T)
+    old = M.set_tempered_bin_prior(True)
+    try:
+        tempered = M.posterior(S, Su, 0.3, T)
+        per_unit = M.posterior(S, Su, 0.3, np.full(30, T))
+    finally:
+        M.set_tempered_bin_prior(old)
+    assert M._TEMPERED_BIN_PRIOR is False
+    shifted = M.posterior(S + (T - 1) * np.log(H), Su * 1.0, 0.3, T)
+    np.testing.assert_allclose(tempered, shifted, rtol=1e-10)
+    np.testing.assert_allclose(per_unit, tempered, rtol=1e-10)
+    assert not np.allclose(plain, tempered)
+    assert (tempered[:, H] <= plain[:, H] + 1e-12).all()  # 'unknown' loses the log(H) (1 - 1/T) it gained from T
+
+
+def test_tempered_bin_prior_at_temperature_one_changes_nothing():
+    from epirefine import model as M
+    rng = np.random.default_rng(1)
+    S, Su = rng.normal(0, 5, (20, 5)), rng.normal(0, 5, 20)
+    plain = M.posterior(S, Su, 0.2, 1.0)
+    old = M.set_tempered_bin_prior(True)
+    try:
+        np.testing.assert_allclose(M.posterior(S, Su, 0.2, 1.0), plain, rtol=1e-12)
+    finally:
+        M.set_tempered_bin_prior(old)
+
+
+def test_run_with_tempered_bin_prior_restores_the_default_form(small_community, tmp_path):
+    from epirefine import model as M
+    run_community(small_community, tmp_path / "t", seed=3, calibration="default,tempered-bin-prior")
+    p = json.loads((tmp_path / "t" / "params.json").read_text())
+    assert p["calibration_features"] == ["bin-parsimony", "tempered-bin-prior"]
+    assert M._TEMPERED_BIN_PRIOR is False
+    assert "tempered-bin-prior" not in parse_features("default") | parse_features("coherent") | parse_features("consistent")
