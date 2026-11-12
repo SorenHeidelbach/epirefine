@@ -629,7 +629,7 @@ assigned reliably *in this sample*, with its coverage, motif repertoire and call
 
 ### 7.6 Calibration designs (`--calibration`)
 
-The calibration of 0.10 (`--calibration legacy`, the default) is the one described above. A set of
+The calibration of 0.10 (`--calibration legacy`, the default up to 0.11.0) is the one described above. Since 0.11.1 the default (`--calibration default`) is that calibration plus the feature `deployed-unknown`. A set of
 features, each selectable alone, changes one step each (`epirefine.calibrate.FEATURES`);
 `--calibration coherent` switches on the proposed set (temper-then-mix, prior-averaged, full-test-b,
 common-tau, em-priors); `coherent,-name` leaves one out.

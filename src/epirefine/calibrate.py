@@ -79,11 +79,15 @@ COHERENT = ("temper-then-mix", "prior-averaged", "full-test-b", "common-tau", "e
 # correct confirmed defects of the 0.10 calibration (the order of tempering and mixing, tau compared over
 # different fragment sets, a flat prior on p_unknown, a contamination rate estimated before the gate).
 CONSISTENT = ("temper-then-mix", "common-tau", "em-priors")
+# The default since 0.11.1: the calibration of 0.10 plus the check of the unknown model at its deployed prior
+# (dev log proposal 2026-11-12). 'legacy' is the calibration of 0.10 and 0.11.0 exactly.
+DEFAULT = ("deployed-unknown",)
 
 
 def parse_features(spec) -> frozenset:
-    """'legacy' (the calibration of 0.10), 'consistent' (CONSISTENT), 'coherent' (COHERENT), or a
-    comma-separated list of FEATURES, optionally after one of the three names ('-name' removes a feature)."""
+    """'default' (DEFAULT, since 0.11.1), 'legacy' (the calibration of 0.10 and 0.11.0: no feature), 'consistent'
+    (CONSISTENT), 'coherent' (COHERENT), or a comma-separated list of FEATURES, optionally after one of these names
+    ('-name' removes a feature)."""
     if spec is None:
         return frozenset()
     if not isinstance(spec, str):
@@ -91,6 +95,9 @@ def parse_features(spec) -> frozenset:
     out: set[str] = set()
     for tok in (t.strip() for t in spec.split(",")):
         if tok in ("", "legacy"):
+            continue
+        if tok == "default":
+            out |= set(DEFAULT)
             continue
         if tok == "coherent":
             out |= set(COHERENT)
@@ -101,7 +108,7 @@ def parse_features(spec) -> frozenset:
         elif tok in FEATURES:
             out.add(tok)
         else:
-            raise ValueError(f"unknown calibration feature {tok!r}; choose from legacy, consistent, coherent, {', '.join(FEATURES)}")
+            raise ValueError(f"unknown calibration feature {tok!r}; choose from default, legacy, consistent, coherent, {', '.join(FEATURES)}")
     if {"prior-averaged", "prior-matched"} <= out:
         raise ValueError("prior-averaged and prior-matched exclude each other")
     return frozenset(out)
