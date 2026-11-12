@@ -3,6 +3,66 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## 0.11.1 (2026-11-12): the unknown-genome model no longer absorbs every unbinned contig
+
+0.11.0 was never published; this is the first published version of the 0.11 series.
+
+### Fixed
+- **Inclusion collapse with some motif tables.** With a Nanomotif 1.3.0 motif table on a fecal metagenome
+  (ZymoFecal, 34,878 contigs, 490 bins), calibration chose the unknown-genome model with relatives of the bins at a
+  low temperature, the estimated share of unbinned contigs without a bin ran to 1 and no unbinned contig was
+  included (0.10.1, 0.10.2 and 0.11.0; with a Nanomotif 1.1.3 table the same code included 485). The test that keeps
+  the relatives model only when it beats the community-only model by 2 standard errors took its standard error from a
+  bootstrap over single calibration pieces. The evidence for relatives comes from sibling pairs of bins (5 of 213
+  bins held 44% of it), so the pieces are not independent: the gain 0.142 was 2.9 standard errors over pieces but 1.8
+  over bins. The standard error is now taken over bins (calibration feature `bin-parsimony`, the default;
+  `--calibration legacy` is the rule of 0.10 and 0.11.0).
+  - ZymoFecal, Nanomotif 1.3.0 table: 0 -> 503 inclusions, flags 150 -> 147, contigs moved to another bin 0 -> 18,
+    share without a bin 1.000 -> 0.688; six sets of calibration pieces give 503-515 inclusions and the same 147
+    flags; with calibration pieces up to 500 kb 501 inclusions. Against Hi-C at >= 10x: 7 of 8 judged flags and 24 of
+    26 judged inclusions agree. Nanomotif 1.1.3 table: every decision file identical to 0.11.0 (485 inclusions).
+  - Six monoculture training communities, six ZymoOral scenarios and three simulated look-alike communities
+    (where the relatives model stays, at 5.0-5.4 standard errors over bins): every benchmark metric identical to
+    0.11.0.
+  - Known limit: on ZymoFecal the choice rests on a narrow margin (1.4-1.9 standard errors over bins against the
+    limit of 2), and 16 inclusions depend on which calibration pieces are drawn. Flags do not.
+- The 0.11.0 entry below says that flagged and included contigs were identical on ZymoFecal throughout the speed
+  work; those runs made no inclusion at all (the collapse above), so the inclusion path was first checked on a
+  metagenome with this version.
+
+### Added (options, off by default)
+- `--calibration ...,tempered-bin-prior`: the uniform prior over bins is tempered with the evidence (each bin costs
+  log(H) / T instead of log(H)), so the estimated share of unbinned contigs without a bin no longer rises with the
+  temperature (ZymoFecal, community-only model: 0.41 at T 1, 0.69 at T 5, 0.94 at T 10 without it). Benchmarks with
+  it on: no new false flag or wrong placement, contigs put back 89.3 -> 90.4% on the training communities. On
+  ZymoFecal it makes calibration choose the relatives model decisively (gain 1.59 +- 0.15 over bins) and the run then
+  includes 1 contig: not a default.
+- `--calibration ...,deployed-unknown`: compares the two unknown models at the share each would be deployed with.
+  Restores inclusion on ZymoFecal (503) but also replaces the relatives model on the simulated look-alikes (wrongly
+  placed contigs 2 -> 19): not a default.
+
+### Documentation (branch docs/review-accuracy)
+- README and `docs/`: benchmark figures now say which data they come from. Held-out monoculture communities: 311 of
+  316 flags (98.4%) and 1,096 of 1,180 placements (92.9%; validation set 89.6%) right; the development figures
+  (every flag right) are labelled as such. The comparison with Nanomotif's refinement is removed.
+- Corrected claims without a measurement behind them: "calibrated" probabilities (long contigs remain overconfident),
+  methylation "independent of composition and coverage", plasmids and phages methylated "alike" (binned ones can be
+  flagged), contaminated bins "handled" (one-motif merges are mostly missed), motifs no bin methylates "harmless",
+  a high `p_unknown` as "the right answer", Hi-C precision below 5x (4 of 41, 9.8%, replaces 12.5%), the share of
+  contigs without a decision, time and memory per version.
+- FAQ: new "Known limitations" section, including the inclusion collapse with some motif tables
+  (`p_unknown=1.000`, 0 inclusions) and how to recognise it in the log.
+
+### Benchmarks
+- `monoculture_sets.py`: an isolate's piece cuts are seeded by the SHA-256 of its name instead of Python's salted
+  `hash()`, so they no longer depend on `PYTHONHASHSEED`. The stored sets cannot be regenerated from code; their cuts
+  are kept as data (see the module docstring).
+- `benchmark_suite.py`: every row records the version the runs report, the motif table's md5 and the calibration's
+  choices (`unknown_lam`, temperature and `p_unknown` ranges), as columns appended to older record files.
+
+**Benchmark effect:** mono-train identical to 0.11.0 (contaminants found 0.948, flag precision 1.000, put back 0.893,
+wrongly placed 2.0 per scenario).
+
 ## 0.11.0 (2026-11-11): performance and robustness; model options are opt-in
 
 **Results are those of 0.10.2.** A run without new options adds and removes the same contigs. Checked on the six

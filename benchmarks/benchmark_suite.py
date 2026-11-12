@@ -18,10 +18,23 @@ dataset's site cache, so wall time measures everything after the pileup pass unl
 this repository and to <devlog>/benchmarks/history.tsv, per-scenario rows go to
 <devlog>/benchmarks/runs/<version>_<commit>.tsv, and the change against the last recorded version of each group is
 printed.
+
+Provenance columns. The version and commit of a row are those of this checkout (pyproject.toml, git), which need not
+be the code the runs executed (an editable install can point elsewhere). Each run's params.json says what ran, and
+the motif table decides much of the result (D50), so every row also records, at its end (older rows leave them
+empty):
+  run_version      the version(s) the runs report in params.json (a warning is printed when it differs from the label)
+  motifs_md5       md5 of the motif table; for a group of several scenarios, the md5 of the sorted
+                   "<scenario><TAB><md5>" lines (per-scenario rows keep each table's own md5)
+  unknown_lam      the calibration's unknown-genome model per run, as the distinct lam values (1 = community only,
+                   below 1 = relatives); unknown_eta per scenario
+  temperature_range  lowest-highest temperature used
+  p_unknown_range    lowest-highest estimated p_unknown (1.000 with no inclusions: see docs/faq.md, known limitations)
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -37,6 +50,9 @@ import polars as pl
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "benchmarks"))
 from evaluate_refinement import evaluate  # noqa: E402
+
+# appended after the metric columns of a record, in this order (columns added after 0.11.0)
+PROVENANCE = ["run_version", "motifs_md5", "unknown_lam", "temperature_range", "p_unknown_range"]
 
 METRICS = ["contam_recall", "contam_precision", "inclusion_recall", "placed_wrongly", "should_stay_unbinned",
            "contamination_after", "completeness_after", "wall_s", "peak_rss_gb"]
@@ -83,6 +99,62 @@ def version() -> str:
     return m.group(1) if m else "unknown"
 
 
+def file_md5(path) -> str | None:
+    try:
+        h = hashlib.md5()
+        with open(path, "rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                h.update(block)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def run_record(sc: dict, out: Path) -> dict:
+    """What a scenario's run actually used: md5 of its motif table, and from its params.json the version that ran
+    and the calibration's choices (unknown-genome model, temperature, p_unknown). Missing values are left out."""
+    rec = {"motifs_md5": file_md5(sc["motifs"]) if sc.get("motifs") else None}
+    try:
+        par = json.loads((out / "params.json").read_text())
+    except (OSError, ValueError):
+        return rec
+    rec["run_version"] = par.get("version")
+    for k in ("unknown_eta", "unknown_lam", "temperature", "fitted_temperature", "p_unknown"):
+        v = par.get(k)
+        rec[k] = float(v) if isinstance(v, (int, float)) else None
+    return rec
+
+
+def _range(values) -> str | None:
+    v = [x for x in values if x is not None]
+    return f"{min(v):.4g}-{max(v):.4g}" if v else None
+
+
+def group_provenance(rows: list[dict]) -> dict:
+    """The provenance columns (PROVENANCE) of one benchmark group from its per-scenario rows, all as text."""
+    md5 = sorted((r["scenario"], r.get("motifs_md5") or "") for r in rows)
+    if len(md5) == 1:
+        motifs = md5[0][1] or None
+    else:
+        motifs = hashlib.md5("\n".join(f"{n}\t{m}" for n, m in md5).encode()).hexdigest()
+    versions = sorted({r["run_version"] for r in rows if r.get("run_version")})
+    lams = sorted({r["unknown_lam"] for r in rows if r.get("unknown_lam") is not None})
+    return {"run_version": ",".join(versions) or None, "motifs_md5": motifs,
+            "unknown_lam": ",".join(f"{x:g}" for x in lams) or None,
+            "temperature_range": _range(r.get("temperature") for r in rows),
+            "p_unknown_range": _range(r.get("p_unknown") for r in rows)}
+
+
+def append_rows(path: Path, new: pl.DataFrame) -> pl.DataFrame:
+    """Append summary rows to a record file, keeping its columns first: columns the file lacks (an older header)
+    are added at the end, empty for its old rows."""
+    if not path.exists():
+        return new
+    old = pl.read_csv(path, separator="\t", infer_schema_length=None)
+    cols = old.columns + [c for c in new.columns if c not in old.columns]
+    return pl.concat([old, new], how="diagonal_relaxed").select(cols)
+
+
 def run_scenario(sc: dict, out_root: Path, workers: int = 16, extra_args: list[str] | None = None) -> dict:
     out = out_root / sc["name"]
     out.mkdir(parents=True, exist_ok=True)
@@ -103,6 +175,10 @@ def run_scenario(sc: dict, out_root: Path, workers: int = 16, extra_args: list[s
     m = re.search(r"refinement: p_unknown=([\d.]+), contamination rate=([\d.]+)", p.stdout)
     if m:
         row.update(p_unknown=float(m.group(1)), contamination_rate=float(m.group(2)))
+    rec = run_record(sc, out)
+    if rec.get("p_unknown") is None:
+        rec.pop("p_unknown", None)  # keep the value from the log
+    row.update(rec)
     if p.returncode == 0 and sc.get("truth"):
         r = evaluate(sc["truth"], out / "bin_contamination.tsv", out / "new_contig_bin.tsv", "epirefine",
                      out / "contig_decisions.tsv")
@@ -177,7 +253,14 @@ def main():
                           pl.lit(now).alias("date"), pl.lit(a.note).alias("note")))
     hist_path = bdir / "history.tsv"
     hist = pl.read_csv(hist_path, separator="\t") if hist_path.exists() else None
-    summ = summ.select("date", "version", "commit", "group", "scenarios", *cols, "jobs", "note")
+    prov = pl.DataFrame([{"group": g, **group_provenance([r for r in rows if r["group"] == g])}
+                         for g in summ["group"].to_list()], schema={"group": pl.Utf8, **{c: pl.Utf8 for c in PROVENANCE}})
+    summ = summ.join(prov, on="group", how="left", maintain_order="left")
+    summ = summ.select("date", "version", "commit", "group", "scenarios", *cols, "jobs", "note", *PROVENANCE)
+    for r in summ.iter_rows(named=True):
+        if r["run_version"] and r["run_version"] != ver:
+            print(f"WARNING: {r['group']}: the runs report version {r['run_version']}, the record is labelled {ver} "
+                  f"(is .venv/bin/epirefine installed from this checkout?)")
     if hist is not None:
         print("\nChange against the last recorded version of each benchmark:")
         for r in summ.iter_rows(named=True):
@@ -193,14 +276,13 @@ def main():
                     continue
                 d = r[c] - p[c]
                 parts.append(f"{c} {r[c]:.4g} ({d:+.3g})")
+            if p.get("motifs_md5") and r["motifs_md5"] != p["motifs_md5"]:
+                parts.append("OTHER MOTIF TABLE than that record")
             print(f"  {r['group']} vs {p['version']} ({p['commit']}): " + ", ".join(parts))
-        hist = pl.concat([hist, summ], how="diagonal_relaxed")
-    else:
-        hist = summ
+    hist = append_rows(hist_path, summ)
     hist.write_csv(hist_path, separator="\t", float_precision=4)
     res_path = Path(a.results)
-    res = pl.read_csv(res_path, separator="\t") if res_path.exists() else None
-    res = summ if res is None else pl.concat([res, summ], how="diagonal_relaxed")
+    res = append_rows(res_path, summ)
     res.write_csv(res_path, separator="\t", float_precision=4)
     print(f"\nrows: {bdir / 'runs' / (tag + '.tsv')}\nhistory: {hist_path}\nresults (repository): {res_path}")
 
