@@ -179,7 +179,8 @@ Yes. The site cache is kept in `<out>/cache`. Point a new run at it with `--cach
 epirefine run ... --out strict --contamination-threshold 0.9 --cache-dir epirefine_out/cache
 ```
 
-The cache is reused when the assembly, pileup and motifs are the same.
+The cache is reused when the assembly, pileup and motifs are the same (and the motif-grouping options; see
+`docs/usage.md`). `epirefine cache check` tells beforehand whether a run would reuse it.
 
 ### Are results reproducible?
 

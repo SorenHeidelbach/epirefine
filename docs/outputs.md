@@ -11,7 +11,7 @@ Everything EpiRefine writes into `--out`. For most uses you need only the first 
 | [`bin_evidence.tsv`, `host_profiles.tsv`, `motif_fit.tsv`](#bins-and-motifs) | What each bin's methylation looks like. |
 | [`motif_groups.tsv`, `motif_noise.tsv`, `group_weights.tsv`, `detection_model.tsv`](#bins-and-motifs) | How the motifs were grouped, filtered and modelled. |
 | [`host_chunk_outliers.tsv`, `calibration/`, `params.json`](#diagnostics) | Diagnostics and fitted parameters. |
-| `cache/` | The site cache, reused by reruns (see `--cache-dir`). |
+| `cache/` | The site cache, reused by reruns (see `--cache-dir`). `manifest.json` holds its key (`inputs`), its part files (`parts`), `format` (2 since 0.12; missing in older caches) and `fingerprints` of the assembly and the pileup; `.lock` is the lock file runs share. |
 
 All tables are tab-separated with a header. Empty fields are written as `""`.
 
