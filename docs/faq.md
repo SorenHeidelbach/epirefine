@@ -184,9 +184,16 @@ The cache is reused when the assembly, pileup and motifs are the same (and the m
 
 ### Are results reproducible?
 
-Yes. The same inputs and seeds (`--seed` and `--calibration-seed`, both 1 by default) give identical outputs.
-`--calibration-seed` draws other calibration pieces and leaves the motif groups and the site cache alone, so
-running a few values of it shows which decisions depend on the pieces drawn.
+Yes. The same inputs and seeds (`--seed` and `--calibration-seed`, both 1 by default) give identical outputs, also
+with another number of workers (`--workers`) or threads (cores, `OMP_NUM_THREADS`), with the same installation on the
+same kind of machine. `--calibration-seed` draws other calibration pieces and leaves the motif groups and the site
+cache alone, so running a few values of it shows which decisions depend on the pieces drawn.
+
+Two things can change the last digits of the probabilities without changing the decisions: the optional compiled
+kernels (package `epirefine-rs`) against the numpy code, and another machine or BLAS library. Both change only how
+floating-point sums and exponentials are rounded. On the development benchmarks (monoculture training communities,
+ZymoOral pieces, simulated look-alikes) runs with and without the kernels made the same calls, with probabilities
+that agreed to 1e-10 or better.
 
 ### Something went wrong
 

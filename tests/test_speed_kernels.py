@@ -360,8 +360,8 @@ def test_two_state_share_threads_bits(monkeypatch, threads):
 @pytest.mark.parametrize("threads", ["1", "4"])
 def test_summed_scores_row_form(monkeypatch, threads):
     """The row form of summed_scores (one-thread BLAS products on unit slices, one logarithm for the relatives)
-    agrees with the group form to rounding, does not depend on the thread count, and leaves BLAS's thread count
-    as it found it."""
+    agrees with the per-group terms summed in ascending order to rounding, does not depend on the thread count,
+    and leaves BLAS's thread count as it found it."""
     monkeypatch.setenv("OMP_NUM_THREADS", threads)
     rng = np.random.default_rng(7)
     U, Mg, H = 300, 11, 7
@@ -372,7 +372,9 @@ def test_summed_scores_row_form(monkeypatch, threads):
     Au = np.minimum(Au, Lp.max(-1))  # Au <= max of the unit's table, as for a community draw
     api = M._blas_thread_api()
     before = api[1]() if api else None
-    S0, R0 = M.summed_scores(Lp, lp, rel=(0.05, Au), form="groups")
+    A = M.group_scores(Lp, lp)                                       # [U, H, M]
+    S0 = A.sum(-1)
+    R0 = np.logaddexp(A + np.log1p(-0.05), (np.log(0.05) + Au)[:, None, :]).sum(-1)
     S1, R1 = M.summed_scores(Lp, lp, rel=(0.05, Au), form="rows")
     np.testing.assert_allclose(S1, S0, rtol=1e-12)
     np.testing.assert_allclose(R1, R0, rtol=1e-12)
