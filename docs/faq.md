@@ -5,9 +5,10 @@
 [Which binner?](#does-it-matter-which-binner-i-used) · [Gzipped pileup?](#can-the-pileup-be-gzipped)
 
 **Results:** [Many contigs not judged](#why-did-so-many-contigs-get-no-decision) ·
-[Nothing included](#why-was-nothing-included) · [Plasmids left unbinned](#why-are-some-plasmids-or-phages-left-unbinned) ·
+[Nothing included](#why-was-nothing-included) · [Plasmids and phages](#why-are-some-plasmids-or-phages-left-unbinned-or-flagged) ·
 [Close strains](#can-it-separate-close-strains) · [Bins without methylation](#what-about-bins-without-detected-methylation) ·
-[Why was this contig flagged?](#why-was-this-contig-flagged) · [Should I trust a flag?](#should-i-trust-every-flag)
+[Why was this contig flagged?](#why-was-this-contig-flagged) · [Should I trust a flag?](#should-i-trust-every-flag) ·
+[Known limitations](#known-limitations)
 
 **Running:** [Time and memory](#how-long-does-it-take-and-how-much-memory) ·
 [Rerunning with other thresholds](#can-i-rerun-with-other-thresholds-without-reading-the-pileup-again) ·
@@ -25,14 +26,19 @@ are needed.
 ### Must the motifs come from Nanomotif?
 
 No. EpiRefine needs only the list of motifs: any TSV with the columns `motif`, `mod_type` and `mod_position` works.
-Nanomotif's `bin-motifs.tsv` is the usual source. Motifs that no bin methylates are harmless; motifs missing from the
-list cannot be used, so a genome whose motifs are all missing looks unmethylated.
+Nanomotif's `bin-motifs.tsv` is the usual source. Motifs missing from the list cannot be used, so a genome whose
+motifs are all missing looks unmethylated. Extra motifs that no bin methylates are not harmless: on the development
+benchmarks, adding motifs from another sample's motif table left flag precision at 99.5% or more but lowered the
+share of removed contigs put back on the training communities from 89.3% to 77.1% (100 added motifs), 40.4% (400) and
+6.7% (all 715), because the calibration then chose a model that keeps unbinned contigs out of the bins (see
+[known limitations](#known-limitations)).
 
 ### Does it matter which binner I used?
 
 No. EpiRefine refines any binning given as `contig<TAB>bin`. The bins are used as examples of what each genome's
-methylation looks like, so more complete bins give better fingerprints, but bins with their own contamination are
-handled: their foreign pieces are down-weighted when the fingerprint is built.
+methylation looks like, so more complete bins give better fingerprints. A bin's own contaminants are down-weighted
+when its fingerprint is built, which works when they differ from the bin in several motifs. A bin that is a merge of
+two genomes differing in a single motif is not handled: see [known limitations](#known-limitations).
 
 ### Can the pileup be gzipped?
 
@@ -54,11 +60,12 @@ Unbinned contigs are still tested for inclusion into the bin.
 
 EpiRefine declines rather than guesses. A contig gets no decision (`low_coverage`, `too_short` or
 `no_methylation_evidence`) when it has fewer than 5 reads per motif site, is shorter than 1 kb, or carries too few
-informative motif sites to tell bins apart. On a complex fecal sample that was about half of the assembly, mostly
-short, low-coverage contigs. Binned contigs without a decision stay in their bin.
+informative motif sites to tell bins apart. On a complex fecal sample (ZymoFecal, a development sample) that was
+76% of the contigs and 31% of the assembled sequence, mostly short, low-coverage contigs. Binned contigs without a
+decision stay in their bin.
 
 You can lower `--min-contig-coverage`, `--min-contig-length` or `--min-evidence`, but decisions there are much less
-reliable: against Hi-C, flags below 5x coverage were right only 12.5% of the time.
+reliable: on that sample, Hi-C confirmed only 4 of 41 flags below 5x coverage (9.8%).
 
 ### Why was nothing included?
 
@@ -66,16 +73,24 @@ An unbinned contig is included only when one bin has probability ≥ 0.9. That f
 
 - the contig has no decision (see above; check its `status`);
 - several bins methylate the same motifs, so `credible_set_95` lists more than one;
-- its genome has no bin, and `p_unknown` is high: this is the right answer for contigs of unbinned genomes;
+- its genome has no bin, so "no bin" is the most probable answer (`p_unknown` high). That is expected for contigs of
+  unbinned genomes, but when `p_unknown` is near 1 and nothing at all is included, see
+  [known limitations](#known-limitations);
 - it would be `redundant`: its sequence is already in the bin.
 
 `include_contigs.tsv` lists the candidates with probability ≥ 0.5, which shows how close the near misses were.
 
-### Why are some plasmids or phages left unbinned?
+### Why are some plasmids or phages left unbinned, or flagged?
 
-Most are short and at low coverage, so they get no decision. Others carry their own methyltransferase and methylate
-a motif their host does not; that contradicts the host's fingerprint, so EpiRefine does not place them with their
-host. Both cases are reported as not placed rather than placed wrongly.
+Most are short and at low coverage, so they get no decision: on a fecal development sample (ZymoFecal) half of the
+unbinned plasmids and 63% of the unbinned viruses were below 5x, and only 5 of 116 binned plasmids and 3 of 67 binned
+viruses got a decision. Most elements with enough coverage share their host's methylation, but some do not:
+high-copy plasmids can be partly unmethylated at a motif their host methylates, and phages can bring their own
+methyltransferases (on that sample a 190 kb phage carrying three methyltransferase genes had four motifs its host
+lacks). An unbinned element like that is left unbinned rather than placed with its host. A binned one can be flagged
+as a contaminant even though it lives in the bin's cells: 4 of the 8 binned plasmids and viruses with a decision on
+that sample were flagged, and Hi-C could check none of them. Flags on contigs annotated as plasmid or virus (for
+example by geNomad) deserve a second look.
 
 ### Can it separate close strains?
 
@@ -98,13 +113,44 @@ contig does not, or the reverse. `best_alternative` says which bin, or `unknown`
 
 ### Should I trust every flag?
 
-On benchmarks with known truth every flag was a true contaminant. On a fecal sample, 6 of 7 flags and 23 of 24
-inclusions that Hi-C could check (at ≥ 10x) agreed with Hi-C. Two cases deserve a look:
+Most flags are right, but not all. On held-out benchmark communities with known truth (monoculture isolates not used
+during development), 311 of 316 flags (98.4%) were true contaminants; on the development benchmarks every flag was.
+On a fecal sample with Hi-C (ZymoFecal, version 0.8.0 with a Nanomotif 1.1.3 motif table), 6 of 7 flags and 23 of 24
+inclusions that Hi-C could check at ≥ 10x agreed with it. Hi-C could check only these 7 of the 120 flags and 24 of
+the 485 inclusions, and the same sample was used to choose several defaults (the 0.4 methylome difference, the 0.9
+inclusion threshold, the 5x cut-off), so it is not an independent check. Things to keep in mind:
 
-- **`p_contaminant` just above 0.5**: the evidence is real but not overwhelming. Sort by `p_contaminant` to review
-  the least certain flags first.
-- **Very long contigs**: evidence grows with length faster than calibration fully corrects, so long contigs are
-  somewhat overconfident. A long contig that is only partly foreign is reported as `mixed` instead of being flagged.
+- **A high `p_contaminant` is no guarantee**: the 5 wrong flags on the held-out communities all had `p_contaminant`
+  ≥ 0.9999. Sorting by `p_contaminant` shows the least certain flags first, but wrong flags are not only among them.
+- **Very long contigs**: evidence grows with length faster than one temperature corrects, so long contigs are
+  overconfident (on the fecal sample, the temperature that would fit each piece length alone rose from 2.7 at 2 kb
+  to 14.7 at 500 kb). A long contig that is only partly foreign is reported as `mixed` instead of being flagged.
+- **Plasmids and phages** in their host's bin can be flagged (see [above](#why-are-some-plasmids-or-phages-left-unbinned-or-flagged)).
+
+## Known limitations
+
+- **With some motif tables nothing is included.** EpiRefine describes a genome without a bin either as a draw from
+  the whole community or as a relative of the binned genomes, and chooses between the two during calibration. With
+  some motif tables it chooses the relatives, which then absorb every unbinned contig: the estimated share of
+  unbinned contigs from genomes without a bin (`p_unknown`) becomes 1, and no contig is included or moved; flags
+  are still made. On a fecal development sample this happened with a Nanomotif 1.3.0 motif table but not with a
+  1.1.3 table of the same bins (0 against 485 inclusions). It shows in the log as
+
+  ```
+  unknown model: relatives (eta=0.05, lam=0.9) vs community only: log-loss gain 0.1418 +- 0.0459 -> relatives
+  refinement: p_unknown=1.000, contamination rate=0.302; 150 of 9129 testable binned contigs flagged, 0 of 25600 unbinned included, 0 contaminants moved to another bin
+  ```
+
+  and in `params.json` as `p_unknown` near 1 with `unknown_lam` below 1. A run in this state has no usable
+  inclusion result. Version 0.11.1 changes how this model is chosen to prevent it; see the
+  [changelog](https://github.com/SorenHeidelbach/epirefine/blob/main/CHANGELOG.md).
+- **Bins merged from two genomes that differ in one motif are not detected.** On development sets built by merging
+  two isolates' bins, a second genome that differed in several motifs had all its contigs flagged up to at least 40%
+  of the bin; one that differed in a single motif was mostly missed (at most half of its contigs flagged at any
+  share, and 0-1% once it held 40% or more of the bin).
+  `bin_evidence.tsv` marks such bins in its `warning` column (`two_methylation_states`).
+- **Real-data accuracy is known from one development sample only.** The Hi-C comparison above is on a sample that
+  was used to choose defaults; no real sample held out from development has been evaluated yet.
 
 ## Running
 
@@ -112,11 +158,12 @@ inclusions that Hi-C could check (at ≥ 10x) agreed with Hi-C. Two cases deserv
 
 | Sample | Pileup | Time | Peak memory |
 |---|---|---|---|
-| Community of 25-35 Mb | 4-6 GB | 0.5-3 min | ≤ 2.2 GB |
-| Fecal sample, 2.6 Gb assembly, 490 bins | 330 GB | 1.5-2 h | 41 GB |
+| Benchmark community of 25-35 Mb | 4-6 GB | 0.5-3 min (0.8.0); about 16 s from the site cache (0.11.0, 4 workers) | ≤ 2.2 GB (0.8.0); 0.6-1.0 GB (0.11.0) |
+| Fecal sample, 2.6 Gb assembly, 490 bins | 330 GB | first read of the pileup: 2.4 h with 2 workers (0.10.1); everything after it: 13.5 min with 12 workers (0.11.0, from the site cache) | 25.5 GB in the main process (0.11.0), plus the workers |
 
-With `--workers 16`. Most of the time on large samples is the first read of the pileup; a rerun from the cache is
-much faster.
+Memory is that of the largest single process; the worker processes come on top (an early version needed up to 54 GB
+in total on the fecal sample with 8 workers). Most of the time on large samples is the first read of the pileup; a
+rerun from the cache is much faster.
 
 ### Can I rerun with other thresholds without reading the pileup again?
 
