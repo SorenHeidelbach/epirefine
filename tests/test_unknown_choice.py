@@ -104,3 +104,15 @@ def test_feature_refuses_options_it_cannot_check(small_community, tmp_path):
         run_community(small_community, tmp_path / "x", calibration="deployed-unknown,prior-matched")
     with pytest.raises(ValueError, match="deployed-unknown"):
         run_community(small_community, tmp_path / "y", calibration="deployed-unknown", unlisted_genome=True)
+
+
+def test_check_runs_with_temper_then_mix(small_community, tmp_path, forced_relatives):
+    """With the coherent order the check uses the tempered-then-mixed unknown score; the decisions follow its verdict."""
+    run_community(small_community, tmp_path / "out", seed=3, calibration="temper-then-mix,deployed-unknown")
+    p = json.loads((tmp_path / "out" / "params.json").read_text())
+    chk = p["unknown_model_deployed_check"]
+    assert set(chk) == {"p_unknown_relatives", "p_unknown_community", "gain", "se", "kept_relatives"}
+    if chk["kept_relatives"]:
+        assert p["unknown_lam"] == 0.1 and p["temperature"] == 20.0
+    else:
+        assert p["unknown_lam"] == 1.0 and p["temperature"] < 20
