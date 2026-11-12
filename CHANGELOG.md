@@ -3,6 +3,22 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## Unreleased (0.12)
+
+### Fixed
+- **Site-cache key.** The manifest now has a format number (2) and a content fingerprint of the assembly and the
+  pileup (SHA-256 of three 1 MiB blocks: start, middle, end; files up to 16 MiB whole). A pileup replaced by one of
+  the same size and modification time was reused with the old sites; it is now rebuilt (the strict expected failure
+  in `tests/test_cache.py` is fixed). A cache whose part files are missing is rebuilt instead of failing later.
+  Caches written before 0.12 (format 1) stay valid: they are reused on path, size and time as before, and
+  `epirefine cache upgrade` adds the fingerprints, reading only the blocks.
+- **Lock on the cache directory.** Two runs no longer write one cache at once: a run that rebuilds the cache holds
+  an exclusive lock, runs that read it a shared one, so readers do not wait for each other.
+
+### Added
+- `epirefine cache check`: says whether a run with given inputs would reuse a cache ("reused") or rebuild it
+  ("would rebuild", with the reason), without the pass over the pileup.
+
 ## 0.11.1 (2026-11-12): the unknown-genome model no longer absorbs every unbinned contig
 
 0.11.0 was never published; this is the first published version of the 0.11 series.

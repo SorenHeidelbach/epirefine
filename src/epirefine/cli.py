@@ -198,11 +198,58 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--siteless-bin-guard", action="store_true",
                    help="include nothing into a bin without a single motif site (such a bin has no profile; its "
                         "posterior is its prior share)")
+
+    c = sub.add_parser("cache", help="site cache: check whether a run would reuse it, or upgrade an old one",
+                       formatter_class=_Help)
+    csub = c.add_subparsers(dest="cache_cmd", required=True)
+    ck = csub.add_parser("check", formatter_class=_Help,
+                         help="say whether a run with these inputs would reuse the cache ('reused') or rebuild it "
+                              "('would rebuild'), without reading the pileup beyond a few fingerprint blocks",
+                         description="Exit status 0 when the cache would be reused, 1 when it would be rebuilt.")
+    up = csub.add_parser("upgrade", formatter_class=_Help,
+                         help="add the content fingerprints to a cache written before 0.12 (format 1), reading a "
+                              "few blocks of the assembly and the pileup")
+    for p in (ck, up):
+        p.add_argument("--cache-dir", required=True, help="the site cache directory")
+        p.add_argument("--assembly", required=True, help="assembly FASTA, as given to the run")
+        p.add_argument("--pileup", required=True, help="pileup, as given to the run")
+    ck.add_argument("--motifs", required=True, help="motif table, as given to the run")
+    ck.add_argument("--seed", type=int, default=1, help="--seed of the run (the motif-grouping sample)")
+    ck.add_argument("--group-sample-mb", type=float, default=50.0, help="--group-sample-mb of the run")
+    ck.add_argument("--min-jaccard", type=float, default=0.9, help="--min-jaccard of the run")
+    ck.add_argument("--shared-sites", choices=["sample", "motif"], default="sample", help="--shared-sites of the run")
+    ck.add_argument("--complement-pairs", choices=["sequence", "position", "separate"], default="sequence",
+                    help="--complement-pairs of the run")
+    ck.add_argument("--strand-sites", choices=["sum", "split", "auto"], default="sum", help="--strand-sites of the run")
     return ap
+
+
+def _cache_command(a) -> int:
+    from . import sitecache
+    from .pipeline import check_cache
+    if a.cache_cmd == "upgrade":
+        msg = sitecache.upgrade(a.cache_dir, {"assembly": a.assembly, "pileup": a.pileup})
+        print(msg)
+        return 0 if not msg.startswith("not upgraded") else 1
+    ok, why = check_cache(a.cache_dir, a.assembly, a.pileup, a.motifs, seed=a.seed,
+                          group_sample_bp=a.group_sample_mb * 1e6, min_jaccard=a.min_jaccard,
+                          shared_sites=a.shared_sites, complement_pairs=a.complement_pairs, strand_sites=a.strand_sites)
+    print(f"{'reused' if ok else 'would rebuild'}: {why}")
+    return 0 if ok else 1
 
 
 def main(argv=None):
     a = build_parser().parse_args(argv)
+    if a.cmd == "cache":
+        from .io import InputError
+        try:
+            code = _cache_command(a)
+        except InputError as e:
+            print(f"epirefine: error: {e}", file=sys.stderr)
+            sys.exit(2)
+        if code:
+            sys.exit(code)
+        return
     if a.cmd == "run":
         from . import pipeline
         from .io import InputError
