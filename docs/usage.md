@@ -19,7 +19,8 @@ agreement is not an independent check of them. Most users only set the inputs, `
 | `--motifs` | yes | Nanomotif `bin-motifs.tsv` (or any TSV with `motif`, `mod_type`, `mod_position`). Only the list of motifs is used, plus their complements when given. `mod_type` must be a modkit code (`a` = 6mA, `m` = 5mC, `21839` = 4mC, `h` = 5hmC), `mod_position` is 0-based; other mod types stop the run, invalid motifs are skipped and counted in the log. |
 | `--out` | yes | Output folder. |
 | `--motif-fit` | no | Also write `motif_fit.tsv`: each contig's methylated fraction per motif group next to its bin's. |
-| `--seed` | no (1) | Random seed; the same seed gives identical outputs. |
+| `--seed` | no (1) | Random seed of the motif-grouping sample (part of the site-cache key) and, unless `--calibration-seed` is given, of the calibration pieces; the same seeds give identical outputs. |
+| `--calibration-seed` | no (`--seed`) | Random seed of the calibration pieces only. Another value draws other pieces, and so shows how much the calibration depends on them, without changing the motif groups or invalidating the site cache. At the default the pieces are those of 0.11.1. |
 
 ## Decisions
 
@@ -96,7 +97,37 @@ estimates. Leave them unset unless you are testing the model.
 | Option | Default | What it does |
 |---|---|---|
 | `--workers` | number of CPUs, at most 16 | Processes for reading the pileup and building the tables. Uncompressed pileups are read in parallel; a gzipped pileup is read by one worker, so unpack large pileups first. |
-| `--cache-dir` | `<out>/cache` | Where the site cache goes. A rerun with the same assembly, pileup and motifs reuses it and skips reading the pileup, so reruns with other thresholds are fast. Point several runs at the same cache to share it. |
+| `--cache-dir` | `<out>/cache` | Where the site cache goes. A rerun with the same assembly, pileup and motifs reuses it and skips reading the pileup, so reruns with other thresholds are fast. Point several runs at the same cache to share it: runs that read it share a lock on it and run at the same time; a run that has to rebuild it waits until they are done (and they wait for a rebuild). |
+
+### The site cache
+
+The cache is reused when its key matches: the assembly and the pileup (path, size and modification time, plus a
+fingerprint of a few 1 MiB blocks at the start, middle and end of each file; small files are hashed whole), the
+motif list, the motif groups (which depend on `--seed`, `--group-sample-mb` and `--min-jaccard`) and the site
+rules `--shared-sites`, `--complement-pairs` and `--strand-sites`. `--calibration-seed` and every decision
+option leave it valid. Caches written before 0.12 have no fingerprint (format 1); they are reused on path, size and
+time as before, and the log says so.
+
+```bash
+# would a run reuse this cache? (exit status 0: reused, 1: would rebuild); reads no more of the pileup than the
+# fingerprint blocks
+epirefine cache check --cache-dir run1/cache --assembly asm.fasta --pileup pileup.bed --motifs bin-motifs.tsv
+# add the fingerprints to a cache written before 0.12 (only if it was built from these very files)
+epirefine cache upgrade --cache-dir run1/cache --assembly asm.fasta --pileup pileup.bed
+```
+
+## Repeating a run
+
+`params.json` records the inputs, every option, the seeds, the commit, the library versions, the kernels and the
+threads. `epirefine rerun` repeats the run it describes, reading the inputs from their recorded paths and reusing the
+recorded run's site cache:
+
+```bash
+epirefine rerun --params first_run/params.json --out repeat [--workers N] [--cache-dir DIR]
+```
+
+The log warns when an input file's size or modification time, the version or the commit differs from the record.
+Decisions do not depend on the worker count.
 
 ## Examples
 

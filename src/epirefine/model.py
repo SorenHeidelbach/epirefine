@@ -584,7 +584,7 @@ def _group_term(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 LOO_THREADS_MIN = 16_384  # groups x grid cells from which the leave-one-out loops run on threads (ZymoOral, 34 x 64:
                           # one thread was faster; ZymoFecal, 710 x 64: 1.6 ms of numpy work per contig)
 LOO_BATCH = 16  # contigs per batch of the leave-one-out loops (loo_profiles / loo_rescore_many)
-ROWS_MIN = 20_000_000   # unit x bin x group cells from which summed_scores takes the row form
+ROWS_MIN = 20_000_000   # unit x bin x group cells from which summed_scores takes the row form also with the kernels
 ROWS_STEP = 128         # units per row slice of the row form (a divisor of FittedModel.SCORE_BATCH)
 ROWS_GROUPS = 4         # groups per step of a row slice
 
@@ -645,15 +645,15 @@ class _single_threaded_blas:
 
 
 def _summed_scores_rows(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None):
-    """summed_scores for large tables: units in slices of ROWS_STEP on threads, each slice through all groups,
+    """summed_scores in numpy: units in slices of ROWS_STEP on threads, each slice through all groups,
     ROWS_GROUPS at a time (stacked [step, G] x [G, H] products on a one-thread BLAS, work buffers reused).
     A unit's result depends only on its slice (ROWS_STEP-aligned), not on the thread count or on how many
     units are scored with it in steps of ROWS_STEP. The relatives' term is taken with one logarithm,
         log((1 - eta) P + eta e^Au) = log(q + c d) + log(1 - eta) + am + bm,
         q = sum_g e^(a - am) e^(b - bm), c = eta e^(Au - am) / (1 - eta), d = e^-bm,
     instead of numpy's logaddexp (scalar code, 20 ns a cell); c <= eta / (1 - eta) since Au <= am, and
-    d <= G for normalised profiles. Agrees with the group form to about 1e-14 relative (other order of the
-    sums over groups, another product kernel)."""
+    d <= G for normalised profiles. Agrees with group_scores(...).sum(-1) and with the kernel of epirefine-rs to
+    about 1e-15 relative (another order of the products inside a group, another logarithm)."""
     U, M, G = Lp.shape
     H = log_prof.shape[0]
     bm = log_prof.max(-1)                                                          # [H, M]
@@ -683,7 +683,7 @@ def _summed_scores_rows(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None 
             ms = slice(m0, min(m0 + K, M))
             k = ms.stop - m0
             x, q = xb[:k], qb[:k]
-            x[...] = np.exp(a[:, ms, :].transpose(1, 0, 2) - amT[ms])          # float32 exp, as the group form
+            x[...] = np.exp(a[:, ms, :].transpose(1, 0, 2) - amT[ms])          # float32 exp, as group_scores
             np.matmul(x, ebT[ms], out=q)
             np.maximum(q, 1e-300, out=q)
             if rel is not None:
@@ -711,94 +711,56 @@ def _summed_scores_rows(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None 
     return (S, R) if rel is not None else S
 
 
-SCORE_BYTES = 4 << 30  # memory summed_scores may use for the [U, H] work arrays of its threads
+def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None, form: str | None = None):
+    """S[u, h] = sum_m log P(group m of u | h): group_scores(...).sum(-1) without the [U, H, M] tensor.
 
-
-def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None, max_bytes: int | None = None,
-                  form: str | None = None):
-    """S[u, h] = sum_m log P(group m of u | h).
-
-    form: "rows" (_summed_scores_rows, the form for large tables: from ROWS_MIN unit x bin x group cells on) or
-    "groups" (below); None chooses by the size of this call (_score_form). Callers that score the units of one
-    table in batches pass the form of the whole table, so that every unit gets the same arithmetic.
-
-    Equal to group_scores(...).sum(-1) without the [U, H, M] tensor: groups are accumulated one at
-    a time, in blocks of groups that run on threads (numpy releases the GIL).
     rel = (eta, Au[U, M]) also returns R[u, h] = sum_m log((1 - eta) P(group m | h) + eta exp(Au_um)):
     the score of an unbinned relative of bin h, whose level in each group is h's with prob 1 - eta
     and the community's otherwise.
 
-    Memory: a running block holds three [U, H] float64 arrays (its two sums and the current group's
-    term, updated in place), and only as many blocks run at once as fit in max_bytes (at least one);
-    a finished block is added to the result and freed. With every block on its own thread, each
-    keeping its sums to the end next to four temporaries, 581,835 contigs x 495 bins needed 74 GB
-    kept and up to 220 GB at peak; it now needs five arrays (11.5 GB), S and R included.
-    The additions are the same in the same order whatever max_bytes is (groups within a block, then
-    the blocks), and each group's matrix product is still one call over all units: scoring units in
-    batches instead would cap memory further, but the BLAS product gives a row different last bits
-    depending on the height of the batch (measured, up to 5e-16 relative), so results would change.
+    The order of the sums is part of the definition: for every unit its groups are added one after another in
+    ascending order, and a unit's sums do not depend on the units scored with it beyond its ROWS_STEP-aligned
+    slice, nor on the number of threads. Two implementations keep that order: the numpy row form
+    (_summed_scores_rows) and the kernel of epirefine-rs (score_sums), which takes tables from 1e5 to ROWS_MIN
+    unit x bin x group cells when it is installed. They agree to about 1e-15 relative (another order of the 64
+    products inside a group's dot product, and libm's logarithm against numpy's).
+
+    form: "rows" makes the numpy row form take the call whatever its size (callers that score the units of one
+    table in batches pass the form of the whole table, _score_form, so that every unit gets the same
+    arithmetic); "groups" or None let the kernel take it when the call is in its range.
+
+    Up to 0.11 the numpy sums below ROWS_MIN split the groups into one block per thread, summed the blocks and
+    then added the block sums: every score depended on the core count in its last bits (and that form was 3-6x
+    slower than the row form on monoculture-sized tables).
     """
     U, M, _ = Lp.shape
     H = log_prof.shape[0]
+    rs = _rs("score_sums") if U * H * M >= 100_000 else None
+    if rs is None or (form or _score_form(U, H, M)) == "rows":
+        return _summed_scores_rows(Lp, log_prof, rel)
+    # The kernel does the sums; the exponentials stay numpy's (the float32 exp of the unit tables decides the
+    # eighth digit of a score).
     if rel is not None:
         le1, le0 = np.log1p(-rel[0]), np.log(rel[0]) + rel[1]
-    if (form or _score_form(U, H, M)) == "rows":
-        return _summed_scores_rows(Lp, log_prof, rel)
-    rs = _rs("score_sums") if U * H * M >= 100_000 else None
-    if rs is not None:
-        # The kernel of epirefine-rs does the sums; the exponentials stay numpy's (the float32 exp of the unit
-        # tables decides the eighth digit of a score). Groups are added in ascending order there, in blocks of
-        # groups here: scores agree to about 1e-14 relative.
-        bm = log_prof.max(-1)                                                          # [H, M]
-        eb = np.ascontiguousarray(_profile_exp(log_prof).transpose(1, 2, 0))           # [M, G, H]
-        bm = np.ascontiguousarray(bm.T)
-        S = np.empty((U, H))
-        R = np.empty((U, H)) if rel is not None else None
-        step = int(max(32, min(4096, (256 << 20) // max(1, M * Lp.shape[2] * 8))))  # e of a batch: about 256 MB
-        for s in range(0, U, step):
-            x = Lp[s:s + step]
-            am = np.empty(x.shape[:2], Lp.dtype)
-            e = np.empty(x.shape, np.float64)
+    bm = log_prof.max(-1)                                                          # [H, M]
+    eb = np.ascontiguousarray(_profile_exp(log_prof).transpose(1, 2, 0))           # [M, G, H]
+    bm = np.ascontiguousarray(bm.T)
+    S = np.empty((U, H))
+    R = np.empty((U, H)) if rel is not None else None
+    step = int(max(32, min(4096, (256 << 20) // max(1, M * Lp.shape[2] * 8))))  # e of a batch: about 256 MB
+    for s in range(0, U, step):
+        x = Lp[s:s + step]
+        am = np.empty(x.shape[:2], Lp.dtype)
+        e = np.empty(x.shape, np.float64)
 
-            def fill(sl):
-                np.max(x[sl], axis=-1, out=am[sl])
-                e[sl] = np.exp(x[sl] - am[sl][..., None])
-            _on_threads(fill, len(x))
-            S[s:s + step], r = rs.score_sums(e, am.astype(np.float64), eb, bm, le1 if rel is not None else 0.0,
-                                             le0[s:s + step] if rel is not None else None, threads=_n_threads())
-            if rel is not None:
-                R[s:s + step] = r
-        return (S, R) if rel is not None else S
-
-    def work(ms):
-        acc = np.zeros((U, H))
-        accR = np.zeros((U, H)) if rel is not None else None
-        for m in ms:
-            A = _group_term(Lp[:, m, :], log_prof[:, m, :])
-            acc += A
-            if rel is not None:
-                A += le1
-                accR += np.logaddexp(A, le0[:, m, None], out=A)
-        return acc, accR
-
-    blocks = [b for b in np.array_split(np.arange(M), min(M, _n_threads())) if len(b)]
-    if len(blocks) <= 1 or U * H < 10_000:
-        S, R = work(range(M))
-        return (S, R) if rel is not None else S
-    per_block = (3 if rel is not None else 2) * 8 * U * H
-    at_once = int(max(1, min(len(blocks), (SCORE_BYTES if max_bytes is None else max_bytes) // per_block)))
-    S = R = None
-    with ThreadPoolExecutor(at_once) as ex:
-        for i in range(0, len(blocks), at_once):
-            for acc, accR in ex.map(work, blocks[i:i + at_once]):
-                if S is None:  # 0 + first block, as sum() starts
-                    S = np.add(acc, 0, out=acc)
-                    R = np.add(accR, 0, out=accR) if rel is not None else None
-                else:
-                    S += acc
-                    if rel is not None:
-                        R += accR
-                del acc, accR
+        def fill(sl):
+            np.max(x[sl], axis=-1, out=am[sl])
+            e[sl] = np.exp(x[sl] - am[sl][..., None])
+        _on_threads(fill, len(x))
+        S[s:s + step], r = rs.score_sums(e, am.astype(np.float64), eb, bm, le1 if rel is not None else 0.0,
+                                         le0[s:s + step] if rel is not None else None, threads=_n_threads())
+        if rel is not None:
+            R[s:s + step] = r
     return (S, R) if rel is not None else S
 
 
@@ -1199,7 +1161,7 @@ class FittedModel:
         """score() without the marginal tables of all units at once: they are a second copy of L_units (6.3 GB
         for the 34,878 contigs of ZymoFecal, and the peak of the run), of which only the rows lp_rows are kept.
         Used with the row form of summed_scores and with the scoring kernel of epirefine-rs, whose sums for a unit do
-        not depend on the units scored with it (the BLAS products of the group form do, in the last bits)."""
+        not depend on the units scored with it (beyond its ROWS_STEP-aligned slice)."""
         U, M, G = L_units.shape
         eta = self.eta if self.eta else 0.05
         S, R, Au = np.empty((U, self.n_bins)), np.empty((U, self.n_bins)), np.empty((U, M))

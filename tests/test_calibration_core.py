@@ -281,3 +281,26 @@ def test_slot_relatives_run_end_to_end(community, base_run, tmp_path):
     assert np.all((p >= 0) & (p <= 1))
     with pytest.raises(ValueError, match="unknown-share t1"):
         run_pipeline(**community.args(tmp_path / "o2"), cache_dir=str(out / "cache"), relatives="slot")
+
+
+def test_core_options_are_recorded_and_rerun(community, base_run, tmp_path):
+    """Every WP3 core option away from its default, with a calibration seed, comes back from params.json: the CLI
+    rerun repeats the pieces and the decisions (the WP1 run record covers the core options)."""
+    from epirefine.cli import main
+    from helpers import DECISION_FILES, assert_same_outputs, logged
+    first = copy_cache(base_run, tmp_path / "first")
+    core = {"tau_select": "inf", "npmle_start": "cold", "unknown_share": "t1", "temperature_law": "sites",
+            "evidence_temperature": "contig", "relatives": "slot", "slot_objective": "averaged", "slot_test_b": "all",
+            "slot_kappa": 2.0}
+    opts = [x for k, v in core.items() for x in ("--" + k.replace("_", "-"), v)]
+    logged(main, community.cli_args(first, "--workers", 1, "--cache-dir", first / "cache", "--calibration-seed", 2,
+                                    "--calibration-exclusion", "off", *opts))
+    rec = json.loads((first / "params.json").read_text())
+    assert {k: rec[k] for k in core} == core and rec["calibration_exclusion"] is False and rec["calibration_seed"] == 2
+    log = logged(main, ["rerun", "--params", str(first / "params.json"), "--out", str(tmp_path / "again")])
+    assert "reusing site cache" in log and "slot model" in log
+    assert_same_outputs(first, tmp_path / "again",
+                        DECISION_FILES + ["calibration/fragments.tsv", "hidden_relative.tsv",
+                                          "calibration/relatives_by_bin.tsv"])
+    again = json.loads((tmp_path / "again" / "params.json").read_text())
+    assert {k: again[k] for k in core} == core and again["calibration_exclusion"] is False

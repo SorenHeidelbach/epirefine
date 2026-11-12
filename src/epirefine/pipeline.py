@@ -38,6 +38,7 @@ from .refine import (bin_evidence_table, em_weight, flagged_share_per_bin, refin
                      withdraw_as_mixed,
                      write_outputs)
 from .sites import EncodedAssembly, extract_sites, same_pairs, unit_tables
+from . import sitecache
 
 
 
@@ -63,6 +64,26 @@ def _sample_names(lengths: dict[str, int], names, sample_bp: float, rng) -> list
     return out
 
 
+def _grouping_draws(lengths: dict[str, int], names, sample_bp: float) -> bool:
+    """Whether _sample_names draws from its generator (the sequence exceeds the sample size)."""
+    return sum(lengths[c] for c in names) > sample_bp
+
+
+def _calibration_rng(calibration_seed: int, n_names: int, grouping_draws: bool) -> np.random.Generator:
+    """The generator of the calibration pieces, apart from the one of the motif-grouping sample, so that a new
+    calibration seed leaves the grouping, and with it the site cache, as it was.
+
+    Up to 0.11.1 one generator, seeded with --seed, drew first the grouping sample (a permutation of the contigs,
+    only when the sequence exceeds --group-sample-mb) and then the pieces. This generator starts from
+    calibration_seed and repeats that permutation draw when the grouping sample draws one (it costs one
+    permutation of the contig list), so with calibration_seed equal to --seed (the default) the pieces are exactly
+    those of 0.11.1, and the stored results of 0.11.1 stay valid."""
+    rng = np.random.default_rng(calibration_seed)
+    if grouping_draws:
+        rng.permutation(n_names)
+    return rng
+
+
 def _manifest(**kw) -> dict:
     out = {}
     for k, v in kw.items():
@@ -82,9 +103,89 @@ def _cached_assembly(cache: Path, assembly):
         cached = json.loads((cache / "manifest.json").read_text())
         if cached["inputs"].get("assembly") != _manifest(assembly=assembly)["assembly"]:
             return None
+        fp = cached.get("fingerprints", {}).get("assembly")
+        if fp is not None and sitecache.fingerprint(assembly) != fp:
+            return None
         return EncodedAssembly(cache / "asm")
     except (OSError, ValueError, KeyError, TypeError):
         return None
+
+
+def _motif_groups(sample: dict[str, str], motifs, min_jaccard, complement_pairs, shared_sites, cached_group_of=None):
+    """Motif groups from the records of the sample: group of each motif, the motifs' record counts in the sample
+    (which group gets a shared site under --shared-sites sample) and, under --shared-sites motif, the group order
+    by expected frequency. A cached grouping that is the same partition keeps its labels (its cache stays valid)."""
+    records = build_records(sample, motifs, pairing=complement_pairs)
+    group_of = group_motifs(records, motifs, min_jaccard, pairing=complement_pairs)
+    rank_d = dict(records.group_by("motif").len().iter_rows())
+    motif_rank = [int(rank_d.get(i, 0)) for i in range(len(motifs))]
+    del records
+    if shared_sites not in ("sample", "motif"):
+        raise ValueError(f"shared_sites must be 'sample' or 'motif', not {shared_sites!r}")
+    if cached_group_of and _same_partition(cached_group_of, group_of):
+        group_of = cached_group_of
+    group_rank = None
+    if shared_sites == "motif":
+        motif_rank, group_rank = specificity_ranks(motifs, group_of)
+    return group_of, motif_rank, group_rank
+
+
+def _site_cache_key(assembly, pileup, motifs, group_of, motif_rank, group_rank, n_relevant, complement_pairs,
+                    strand_sites) -> dict:
+    """The `inputs` of the site-cache manifest: what decides which sites the cache holds."""
+    man = _manifest(assembly=assembly, pileup=pileup, motifs=[m.key for m in motifs], group_of=group_of,
+                    motif_rank=motif_rank, relevant=n_relevant, shared_sites="most_specific_group")
+    if group_rank is not None:  # (keys are added only for non-default rules, so existing caches stay valid)
+        man.update(shared_sites="motif_frequency", group_rank=group_rank)
+    if not same_pairs(motifs, complement_pairs):  # a rule that pairs this motif list as "sequence" does gives the same sites
+        man.update(complement_pairs=complement_pairs)
+    if strand_sites != "sum":
+        man.update(strand_sites=strand_sites + ("+half" if strand_sites == "auto" else ""))
+    return man
+
+
+def check_cache(cache_dir, assembly, pileup, motifs_path, seed=1, group_sample_bp=50e6, min_jaccard=0.9,
+                shared_sites="sample", complement_pairs="sequence", strand_sites="sum", log=None) -> tuple[bool, str]:
+    """Would a run with these inputs and options reuse the site cache in cache_dir? (True, why) or (False, why).
+    Does what a run does up to the cache, without the pass over the pileup: reads the motif table, the contig
+    names and the grouping sample (from the cache's encoded assembly when it was built from this assembly, else
+    from the FASTA), groups the motifs, and compares the key and the fingerprints (a few blocks of the assembly
+    and the pileup). Holds the cache's shared lock while it reads; writes nothing but the lock file."""
+    log = log or (lambda m: None)
+    cache = Path(cache_dir)
+    if sitecache.read_manifest(cache) is None:
+        return False, "no site cache (no readable manifest)"
+    with sitecache.CacheLock(cache, log=log) as lock:
+        lock.shared()
+        cached = sitecache.read_manifest(cache)
+        motifs = pio.read_motifs(motifs_path, log=log)
+        asm_cached = _cached_assembly(cache, assembly)
+        lengths = (dict(zip(asm_cached.names, asm_cached.lengths.tolist())) if asm_cached is not None
+                   else pio.fasta_lengths(assembly))
+        relevant = sorted(lengths)  # every contig is a target, so the relevant set is the whole assembly
+        names = _sample_names(lengths, relevant, group_sample_bp, np.random.default_rng(seed))
+        sample = _decoded(asm_cached, names) if asm_cached is not None else pio.fasta_subset(assembly, names)
+        group_of, motif_rank, group_rank = _motif_groups(sample, motifs, min_jaccard, complement_pairs, shared_sites,
+                                                         (cached or {}).get("inputs", {}).get("group_of"))
+        key = _site_cache_key(assembly, pileup, motifs, group_of, motif_rank, group_rank, len(relevant),
+                              complement_pairs, strand_sites)
+        return sitecache.status(cache, key, {"assembly": assembly, "pileup": pileup})
+
+
+_HELD_LOCKS: list = []  # site-cache locks of the run in progress; released when run() returns or fails
+
+
+def _releases_cache_locks(f):
+    import functools
+
+    @functools.wraps(f)
+    def wrapped(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        finally:
+            while _HELD_LOCKS:
+                _HELD_LOCKS.pop().release()
+    return wrapped
 
 
 def _prefetch_cache(cache: Path):
@@ -197,6 +298,7 @@ def _bin_prior_scope(f):
 
 
 @_bin_prior_scope
+@_releases_cache_locks
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
         max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
@@ -210,7 +312,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         calibration="default", siteless_bin_guard=False,
         tau_select="per-group", npmle_start="warm", calibration_exclusion=True, unknown_share="deployed",
         temperature_law="grid", evidence_temperature="median", relatives="switch", slot_objective="legacy",
-        slot_test_b="decidable", slot_kappa=None):
+        slot_test_b="decidable", slot_kappa=None, calibration_seed=None):
     """calibration: 'default' (the calibration of 0.10 with the parsimony test of the unknown model resampled over
     bins, since 0.11.1), 'legacy' (the calibration of 0.10 and 0.11.0), 'consistent', 'coherent', or a comma-separated
     list of calibrate.FEATURES; see calibrate.parse_features.
@@ -228,7 +330,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     its own genome or an unbinned relative, pi_h fitted jointly with the temperature; needs unknown_share 't1';
     slot_objective 'legacy' | 'averaged', slot_test_b 'decidable' | 'all', slot_kappa None = cross-validated). See
     calibrate.calibrate_decisions.
-    calibration_exclusion: False keeps the calibration fragments from chunks called foreign (diagnostic only)."""
+    calibration_exclusion: False keeps the calibration fragments from chunks called foreign (diagnostic only).
+    seed: the motif-grouping sample (and the calibration pieces unless calibration_seed is given);
+    calibration_seed: the calibration pieces only (default: seed). Each random step has its own generator."""
     args = dict(locals())  # first statement: the options as given
     runinfo.begin(args, _log)  # first log lines (version, command, inputs) and option ranges, before any work
     # the inputs are checked before anything is read or written: a missing file or a wrong table must not
@@ -258,7 +362,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     runinfo.write_params(out / "params.json", provenance)  # a run that does not finish leaves its settings
-    rng = np.random.default_rng(seed)
+    if calibration_seed is None:
+        calibration_seed = seed
+    group_rng = np.random.default_rng(seed)
     cache = Path(cache_dir) if cache_dir else out / "cache"
 
     # the assembly is streamed (lengths, then the motif-grouping sample, then the encoded copy on disk): held
@@ -266,6 +372,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     motifs = pio.read_motifs(motifs_path, log=_log)
     cb_given = pio.read_contig_bin(contig_bin, log=_log)
     pileup_first = runinfo.check_pileup_head(pileup)
+    # shared while this run reads the cache; exclusive (waiting for the runs that read it) only while it rebuilds it
+    cache_lock = sitecache.CacheLock(cache, log=_log)
+    _HELD_LOCKS.append(cache_lock)
+    cache_lock.shared()
     asm_cached = _cached_assembly(cache, assembly)
     if asm_cached is not None:
         _prefetch_cache(cache)
@@ -291,47 +401,41 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
 
     # motif groups, from the records of a random sample of the sequence
     relevant = sorted(host_set | set(targets))
-    sample_names = _sample_names(lengths, relevant, group_sample_bp, rng)
+    sample_names = _sample_names(lengths, relevant, group_sample_bp, group_rng)
+    calib_rng = _calibration_rng(calibration_seed, len(relevant), _grouping_draws(lengths, relevant, group_sample_bp))
     sample = _decoded(asm_cached, sample_names) if asm_cached is not None else pio.fasta_subset(assembly, sample_names)
     del asm_cached
     if strand_sites not in ("sum", "split", "auto"):
         raise ValueError(f"strand_sites must be 'sum', 'split' or 'auto', not {strand_sites!r}")
-    records = build_records(sample, motifs, pairing=complement_pairs)
-    group_of = group_motifs(records, motifs, min_jaccard, pairing=complement_pairs)
-    rank_d = dict(records.group_by("motif").len().iter_rows())
-    motif_rank = [int(rank_d.get(i, 0)) for i in range(len(motifs))]
-    del records
-    if shared_sites not in ("sample", "motif"):
-        raise ValueError(f"shared_sites must be 'sample' or 'motif', not {shared_sites!r}")
-    # a cache written with another numbering of the same groups is still valid: keep its labels
-    man_path = cache / "manifest.json"
-    cached = json.loads(man_path.read_text()) if man_path.exists() else None
-    if cached and _same_partition(cached["inputs"].get("group_of", []), group_of):
-        group_of = cached["inputs"]["group_of"]
-    n_groups = max(group_of) + 1
-    # which group a position matched by several groups goes to: "sample" orders the groups by their record counts
+    # a cache written with another numbering of the same groups is still valid: keep its labels.
+    # Which group a position matched by several groups goes to: "sample" orders the groups by their record counts
     # in the sample (seed-dependent for motifs of similar frequency); "motif" by the motifs' expected frequency
-    group_rank = None
-    if shared_sites == "motif":
-        motif_rank, group_rank = specificity_ranks(motifs, group_of)
+    man_path = cache / "manifest.json"
+    cached = sitecache.read_manifest(cache)
+    group_of, motif_rank, group_rank = _motif_groups(sample, motifs, min_jaccard, complement_pairs, shared_sites,
+                                                     (cached or {}).get("inputs", {}).get("group_of"))
+    n_groups = max(group_of) + 1
     group_modtype = [next(motifs[i].mod_type for i in range(len(motifs)) if group_of[i] == g) for g in range(n_groups)]
     group_label = [",".join(motifs[i].key for i in range(len(motifs)) if group_of[i] == g) for g in range(n_groups)]
     _log(f"{len(motifs)} motifs -> {n_groups} groups (overlap from {sum(map(len, sample.values())) / 1e6:.0f} Mb)")
 
     # pass 1: pileup -> site cache (reused when inputs are unchanged)
-    man = _manifest(assembly=assembly, pileup=pileup, motifs=[m.key for m in motifs], group_of=group_of,
-                    motif_rank=motif_rank, relevant=len(relevant), shared_sites="most_specific_group")
-    if group_rank is not None:  # (keys are added only for non-default rules, so existing caches stay valid)
-        man.update(shared_sites="motif_frequency", group_rank=group_rank)
-    if not same_pairs(motifs, complement_pairs):  # a rule that pairs this motif list as "sequence" does gives the same sites
-        man.update(complement_pairs=complement_pairs)
-    if strand_sites != "sum":
-        man.update(strand_sites=strand_sites + ("+half" if strand_sites == "auto" else ""))
-    if cached and cached.get("inputs") == man:
+    man = _site_cache_key(assembly, pileup, motifs, group_of, motif_rank, group_rank, len(relevant), complement_pairs,
+                          strand_sites)
+    paths = {"assembly": assembly, "pileup": pileup}
+    reuse, why = sitecache.status(cache, man, paths)
+    if not reuse:
+        cache_lock.exclusive()  # waits for runs that read the old cache; then look again: one may have rebuilt it
+        reuse, why = sitecache.status(cache, man, paths)
+        if reuse:
+            cache_lock.shared()
+    if reuse:
+        cached = sitecache.read_manifest(cache)
         parts = [str(cache / "sites" / Path(f).name) for f in cached["parts"]]  # wherever the cache now lives
         asm = EncodedAssembly(cache / "asm")
-        _log(f"reusing site cache {cache} ({len(parts)} parts)")
+        _log(f"reusing site cache {cache} ({len(parts)} parts; {why})")
     else:
+        _log(f"site cache {cache} is (re)built: {why}")
         # the old manifest goes first: a rebuild that is killed must not leave it describing parts and an
         # encoded assembly that have been partly rewritten (a later run with the old inputs would reuse them)
         man_path.unlink(missing_ok=True)
@@ -342,7 +446,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         parts = extract_sites(asm, pileup, motifs, group_of, motif_rank, cache / "sites", wanted=wanted,
                               workers=workers, log=_log, group_rank=group_rank, pairing=complement_pairs,
                               strand_sites=strand_sites)
-        man_path.write_text(json.dumps({"inputs": man, "parts": parts}))
+        sitecache.write_manifest(cache, man, parts, paths)
+        cache_lock.shared()  # written: other runs may read it
     del sample
     cid = asm.index
 
@@ -427,7 +532,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                            "length": [lengths[c] for c in hc_ok]}, schema={"contig": pl.Int32, "bin_idx": pl.Int64, "length": pl.Int64})
         runinfo.check_calibration_contigs([lengths[c] for c in hc_ok], len(host_contigs), min_contig_coverage, frag_lengths)
         per_bin = fragments_per_bin(frag_budget, len(frag_lengths), H, frags_per_bin)
-        frags = select_fragments(hc, frag_lengths, per_bin, rng)
+        frags = select_fragments(hc, frag_lengths, per_bin, calib_rng)
         _log(f"{frags.height} calibration fragments ({per_bin} per bin and length)")
 
     # pass 2: site cache -> likelihood tables

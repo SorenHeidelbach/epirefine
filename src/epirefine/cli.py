@@ -143,8 +143,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--grid-size", type=int, default=64,
                    help="number of grid points for the methylated fraction of a motif group (finer = slower)")
     g.add_argument("--seed", type=int, default=1,
-                   help="random seed (motif-grouping sample, calibration pieces); the same inputs and seed give "
+                   help="random seed of the motif-grouping sample (part of the site-cache key) and, unless "
+                        "--calibration-seed is given, of the calibration pieces; the same inputs and seeds give "
                         "the same outputs")
+    g.add_argument("--calibration-seed", type=int, default=None,
+                   help="random seed of the calibration pieces only (default: --seed); another value draws other "
+                        "pieces and leaves the motif groups and the site cache as they are")
 
     g = r.add_argument_group("speed and extra output")
     g.add_argument("--workers", type=int, help="processes for the pileup and table passes (default: CPUs, max 16)")
@@ -230,16 +234,84 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--slot-kappa", type=float, default=None,
                    help="shrinkage of the slot model's per-bin weights (default: by cross-validation)")
     g.add_argument("--calibration-exclusion", choices=["on", "off"], default="on", help=argparse.SUPPRESS)
+
+    rr = sub.add_parser("rerun", formatter_class=_Help,
+                        help="repeat a run from its params.json: the same inputs (recorded paths) and options, into "
+                             "a new output folder",
+                        description="Repeat the run that a params.json records: the same input files and every option "
+                                    "as given, seeds included. The log warns when an input file, the version or the "
+                                    "commit differs from the record.")
+    rr.add_argument("--params", required=True, help="params.json of the run to repeat")
+    rr.add_argument("--out", required=True, help="output folder of the rerun")
+    rr.add_argument("--workers", type=int, help="processes (default: as recorded; decisions do not depend on it)")
+    rr.add_argument("--cache-dir", help="site cache (default: the recorded run's cache)")
+
+    c = sub.add_parser("cache", help="site cache: check whether a run would reuse it, or upgrade an old one",
+                       formatter_class=_Help)
+    csub = c.add_subparsers(dest="cache_cmd", required=True)
+    ck = csub.add_parser("check", formatter_class=_Help,
+                         help="say whether a run with these inputs would reuse the cache ('reused') or rebuild it "
+                              "('would rebuild'), without reading the pileup beyond a few fingerprint blocks",
+                         description="Exit status 0 when the cache would be reused, 1 when it would be rebuilt.")
+    up = csub.add_parser("upgrade", formatter_class=_Help,
+                         help="add the content fingerprints to a cache written before 0.12 (format 1), reading a "
+                              "few blocks of the assembly and the pileup")
+    for p in (ck, up):
+        p.add_argument("--cache-dir", required=True, help="the site cache directory")
+        p.add_argument("--assembly", required=True, help="assembly FASTA, as given to the run")
+        p.add_argument("--pileup", required=True, help="pileup, as given to the run")
+    ck.add_argument("--motifs", required=True, help="motif table, as given to the run")
+    ck.add_argument("--seed", type=int, default=1, help="--seed of the run (the motif-grouping sample)")
+    ck.add_argument("--group-sample-mb", type=float, default=50.0, help="--group-sample-mb of the run")
+    ck.add_argument("--min-jaccard", type=float, default=0.9, help="--min-jaccard of the run")
+    ck.add_argument("--shared-sites", choices=["sample", "motif"], default="sample", help="--shared-sites of the run")
+    ck.add_argument("--complement-pairs", choices=["sequence", "position", "separate"], default="sequence",
+                    help="--complement-pairs of the run")
+    ck.add_argument("--strand-sites", choices=["sum", "split", "auto"], default="sum", help="--strand-sites of the run")
     return ap
+
+
+def _cache_command(a) -> int:
+    from . import sitecache
+    from .pipeline import check_cache
+    if a.cache_cmd == "upgrade":
+        msg = sitecache.upgrade(a.cache_dir, {"assembly": a.assembly, "pileup": a.pileup})
+        print(msg)
+        return 0 if not msg.startswith("not upgraded") else 1
+    ok, why = check_cache(a.cache_dir, a.assembly, a.pileup, a.motifs, seed=a.seed,
+                          group_sample_bp=a.group_sample_mb * 1e6, min_jaccard=a.min_jaccard,
+                          shared_sites=a.shared_sites, complement_pairs=a.complement_pairs, strand_sites=a.strand_sites)
+    print(f"{'reused' if ok else 'would rebuild'}: {why}")
+    return 0 if ok else 1
 
 
 def main(argv=None):
     a = build_parser().parse_args(argv)
-    if a.cmd == "run":
+    if a.cmd == "cache":
+        from .io import InputError
+        try:
+            code = _cache_command(a)
+        except InputError as e:
+            print(f"epirefine: error: {e}", file=sys.stderr)
+            sys.exit(2)
+        if code:
+            sys.exit(code)
+        return
+    if a.cmd in ("run", "rerun"):
         from . import pipeline
         from .io import InputError
         from .runinfo import log
         try:
+            if a.cmd == "rerun":
+                import json
+                from pathlib import Path
+                from .runinfo import rerun_arguments
+                try:
+                    params = json.loads(Path(a.params).read_text())
+                except (OSError, ValueError) as e:
+                    raise InputError(f"cannot read {a.params}: {e}") from None
+                pipeline.run(**rerun_arguments(params, a.out, workers=a.workers, cache_dir=a.cache_dir))
+                return
             pipeline.run(
                 a.assembly, a.pileup, a.contig_bin, a.motifs, a.out, min_cov=a.min_cov, chunk_size=a.chunk_size,
                 grid_size=a.grid_size, p_unknown=a.p_unknown, contamination_threshold=a.contamination_threshold,
@@ -249,7 +321,7 @@ def main(argv=None):
                 contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, calibration=a.calibration,
                 min_jaccard=a.min_jaccard,
                 variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
-                cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed, shared_sites=a.shared_sites,
+                cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed, calibration_seed=a.calibration_seed, shared_sites=a.shared_sites,
                 complement_pairs=a.complement_pairs, strand_sites=a.strand_sites,
                 noise_max_off_share=a.noise_max_off_share,
                 two_state_warning=a.two_state_warning, siteless_bin_guard=a.siteless_bin_guard,

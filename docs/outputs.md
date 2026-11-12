@@ -11,7 +11,7 @@ Everything EpiRefine writes into `--out`. For most uses you need only the first 
 | [`bin_evidence.tsv`, `host_profiles.tsv`, `motif_fit.tsv`](#bins-and-motifs) | What each bin's methylation looks like. |
 | [`motif_groups.tsv`, `motif_noise.tsv`, `group_weights.tsv`, `detection_model.tsv`](#bins-and-motifs) | How the motifs were grouped, filtered and modelled. |
 | [`host_chunk_outliers.tsv`, `calibration/`, `params.json`](#diagnostics) | Diagnostics and fitted parameters. |
-| `cache/` | The site cache, reused by reruns (see `--cache-dir`). |
+| `cache/` | The site cache, reused by reruns (see `--cache-dir`). `manifest.json` holds its key (`inputs`), its part files (`parts`), `format` (2 since 0.12; missing in older caches) and `fingerprints` of the assembly and the pileup; `.lock` is the lock file runs share. |
 
 All tables are tab-separated with a header. Empty fields are written as `""`.
 
@@ -125,7 +125,17 @@ outputs can read EpiRefine's.
   `false`) and completed at the end, so an interrupted run still shows its settings.
   - Provenance: `version`, `command_line`, `start_time` (UTC), `python`, `inputs` (path, size in bytes and
     modification time of the assembly, pileup, contig-bin table and motif table), `out`, `cache_dir`, `workers`,
-    `seed`.
+    `seed`, `calibration_seed` (the seed the calibration pieces were drawn with: `--calibration-seed`, or `seed`
+    when it was not given).
+  - The code and where it ran: `commit` (`commit`, `source`: `git` with `dirty` true when tracked files differ from
+    the commit, or the environment variable `EPIREFINE_COMMIT`, or a file `COMMIT` next to `src` as a snapshot made
+    with `git archive` can carry; `null` for an installed release, whose `version` names it), `libraries` (python,
+    numpy, scipy, polars, epirefine_rs versions), `kernels` (`installed`, `used`, `EPIREFINE_RS`, `version`, `api`,
+    `features`, `module_sha256` of the compiled module, `installed_from`), `threads` (`workers`, `cores` this process
+    may use, `model_threads`, `polars_threads`, and the variables `omp_num_threads`, `openblas_num_threads`,
+    `mkl_num_threads`, `polars_max_threads` as set, or `null`), `seeds` (`seed`, `calibration_seed`, and `bootstrap`,
+    the fixed seed of the resampling in the calibration tests).
+  - `epirefine rerun --params params.json --out <dir>` repeats the run from this file (see `docs/usage.md`).
   - Every option as given, under the name of the command-line option with underscores (`contamination_threshold`,
     `include_threshold`, `include_threshold_unmethylated`, `min_methylome_difference`, `max_redundancy`,
     `min_evidence`, `min_contig_coverage`, `min_contig_length`, `min_cov`, `chunk_size`, `grid_size`, `contam_eps`,

@@ -13,8 +13,9 @@ and commits the new files, so the changed decisions show up in the diff of that 
 make an unexpected failure go away: the failure means behaviour changed.
 
 Labels are compared exactly. Numbers are compared with an absolute tolerance of 1e-3 (the outputs are written
-with 4 decimals, and the last digit can differ between machines: the model sums per-group scores in blocks
-that depend on the core count and on the BLAS library; review 08, F4).
+with 4 decimals, and the last digit can differ between machines: another CPU or BLAS library rounds sums and
+exponentials differently, and so do the optional compiled kernels). The thread count no longer enters (0.12:
+tests/test_threads.py checks byte-identical outputs on 1, 4 and 12 threads).
 """
 import json
 import math

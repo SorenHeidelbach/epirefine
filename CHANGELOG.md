@@ -3,6 +3,35 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## Unreleased (0.12)
+
+### Fixed
+- **Site-cache key.** The manifest now has a format number (2) and a content fingerprint of the assembly and the
+  pileup (SHA-256 of three 1 MiB blocks: start, middle, end; files up to 16 MiB whole). A pileup replaced by one of
+  the same size and modification time was reused with the old sites; it is now rebuilt (the strict expected failure
+  in `tests/test_cache.py` is fixed). A cache whose part files are missing is rebuilt instead of failing later.
+  Caches written before 0.12 (format 1) stay valid: they are reused on path, size and time as before, and
+  `epirefine cache upgrade` adds the fingerprints, reading only the blocks.
+- **Lock on the cache directory.** Two runs no longer write one cache at once: a run that rebuilds the cache holds
+  an exclusive lock, runs that read it a shared one, so readers do not wait for each other.
+
+### Added
+- `--calibration-seed` (default: the value of `--seed`): draws the calibration pieces and nothing else. The
+  motif-grouping sample and the calibration pieces now have their own random generators; up to 0.11.1 one generator
+  drew both, so another `--seed` also changed the motif grouping and, on an assembly larger than the grouping sample
+  (`--group-sample-mb`, 50 Mb), rebuilt the site cache (hours on a large pileup). At the default the grouping and
+  the pieces are exactly those of 0.11.1 (tested against stored 0.11.1 draws, and on ZymoFecal's two motif tables
+  against the groups of their site caches), so no decision changes. `params.json` records `calibration_seed`.
+- `params.json` records the code and where it ran: `commit` (from git, `EPIREFINE_COMMIT` or a `COMMIT` file),
+  `libraries`, `kernels` (installed, used, build hash), `threads` and `seeds`. `epirefine rerun --params
+  params.json --out DIR` repeats a run from it (tested: same decisions).
+- Input checks with one-line errors: a contig listed in two bins (it was silently put in the last one), a
+  contig-bin table with its columns swapped, a motif table without the needed columns (names the missing ones).
+  Bins none of whose contigs are in the assembly are named in the log. Every development input (monoculture,
+  ZymoOral, simulated, ZymoFecal, fecal_inhouse contig-bin tables) passes as before.
+- `epirefine cache check`: says whether a run with given inputs would reuse a cache ("reused") or rebuild it
+  ("would rebuild", with the reason), without the pass over the pileup.
+
 ## 0.11.1 (2026-11-12): the unknown-genome model no longer absorbs every unbinned contig
 
 0.11.0 was never published; this is the first published version of the 0.11 series.
