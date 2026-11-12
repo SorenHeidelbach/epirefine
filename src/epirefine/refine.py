@@ -30,7 +30,7 @@ import numpy as np
 import polars as pl
 from scipy.special import expit, logsumexp
 
-from .model import credible_set
+from .model import credible_set, log_bins
 
 CONFIDENCE = ((0.95, "high_confidence"), (0.8, "medium_confidence"), (0.5, "low_confidence"))
 # include_contigs.tsv, column confidence: the candidate reached the inclusion threshold but the bin already
@@ -118,7 +118,7 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     testable = testable & dec
     unb = (given < 0) & dec
     # p_u from the unbinned contigs: "some bin, uniformly" vs "an unbinned genome"
-    l_bins = logsumexp(Z, axis=1) - np.log(H)
+    l_bins = logsumexp(Z, axis=1) - log_bins(H, T)
     unlisted_share = None
     if S_unlisted is not None:
         # An unbinned genome is a community draw (each motif group's level drawn independently from the levels
@@ -158,7 +158,7 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     alt_logits[np.arange(N)[given >= 0], own[given >= 0]] = -np.inf  # exclude the own bin
     alt_logits[:, :H] += lpb
     if H > 1:
-        alt_logits[:, :H] -= np.log(n_alt)[:, None]
+        alt_logits[:, :H] -= np.asarray(log_bins(n_alt, T))[:, None]
     # one bin only: a binned contig has no other bin to come from (n_alt = 0; -inf - log(0) made every
     # probability NaN). Its row stays -inf here and is settled below; unbinned contigs have n_alt = 1.
     alt_logits[:, H] = Zu + lpu

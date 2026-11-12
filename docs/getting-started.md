@@ -63,16 +63,17 @@ epirefine run \
 
 What happens, in order (the log shows each step):
 
-1. The pileup is read once and reduced to the motif sites (a 330 GB pileup became a 2.7 GB site cache). The cache
+1. The pileup is read once and reduced to the motif sites (a 330 GB pileup became 2.7 GB of motif sites; with an encoded copy of the assembly the cache was 5.1 GB). The cache
    is kept in `epirefine_out/cache`; a rerun with the same inputs skips this step.
 2. EpiRefine learns, per motif, how the basecaller behaves at methylated and unmethylated sites.
 3. It builds a methylation fingerprint for every bin, robust to the bin's own contaminants.
 4. It calibrates its probabilities on pieces cut from your own bins.
 5. It scores every contig against every bin and against "a genome without a bin", and decides.
 
-**Time and memory.** A community of 25-35 Mb with a 4-6 GB pileup takes 0.5-3 minutes and at most 2.2 GB. A
-complex fecal sample (2.6 Gb assembly, 490 bins, 330 GB pileup) took about 1.5-2 hours and 41 GB with
-`--workers 16`. Most of the time on large samples is the first read of the pileup.
+**Time and memory.** A community of 25-35 Mb with a 4-6 GB pileup takes a few minutes at most and about 1-2 GB.
+For a complex fecal sample (2.6 Gb assembly, 490 bins, 330 GB pileup), the first read of the pileup took 2.4 hours
+with 2 workers (0.10.1) and everything after it 13.5 minutes with 12 workers (0.11.0), with 25.5 GB in the main
+process plus the workers. Measurements per version are in the [FAQ](faq.md#how-long-does-it-take-and-how-much-memory).
 
 ## 4. Read the results
 

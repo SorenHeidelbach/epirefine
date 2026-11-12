@@ -1,6 +1,6 @@
 [project]
 name = "epirefine"
-version = "0.11.0"
+version = "0.11.1"
 description = "Refine metagenome bins from nanopore methylation: flag contaminants and place unbinned contigs, with calibrated probabilities"
 readme = "README.md"
 license = "MIT"

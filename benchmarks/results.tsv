@@ -1,8 +1,9 @@
-date	version	commit	group	scenarios	contam_recall	contam_precision	inclusion_recall	placed_wrongly	should_stay_unbinned	contamination_after	completeness_after	wall_s	peak_rss_gb	note	jobs
-2026-10-28 13:40	0.6.1	39ab5ae	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	43.6333	0.8617	regional model final (tied inclusion, segment map)	2
-2026-10-29 09:01	0.7.2	bc822e3	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	39.1167	0.8733	regional inclusion off	2
-2026-11-02 08:53	0.9.0	2db6aee	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	39.0500	0.8800	0.9.0 rename pbinner -> EpiRefine (no model change)	1
-2026-11-02 08:59	0.9.1	60dd6c6	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	37.9500	0.8783	0.9.1 repository holds only the tool (no package change)	1
-2026-11-02 09:27	0.10.0	cf5f363	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	37.1667	0.8833	0.10.0 packaging for PyPI/Bioconda (no package code change)	1
-2026-11-02 11:41	0.10.1	64d76a8	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	36.6500	0.9000	0.10.1 user documentation (no package code change)	1
-2026-11-11 20:56	0.11.0	a322627	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	15.8833	0.8650	0.11.0 performance release: 0.10.2 function, heavy steps on threads, optional Rust reader and kernels (ZymoFecal from the site cache 4,785 -> 810 s)	1
+date	version	commit	group	scenarios	contam_recall	contam_precision	inclusion_recall	placed_wrongly	should_stay_unbinned	contamination_after	completeness_after	wall_s	peak_rss_gb	note	jobs	run_version	motifs_md5	unknown_lam	temperature_range	p_unknown_range
+2026-10-28 13:40	0.6.1	39ab5ae	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	43.6333	0.8617	regional model final (tied inclusion, segment map)	2					
+2026-10-29 09:01	0.7.2	bc822e3	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	39.1167	0.8733	regional inclusion off	2					
+2026-11-02 08:53	0.9.0	2db6aee	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	39.0500	0.8800	0.9.0 rename pbinner -> EpiRefine (no model change)	1					
+2026-11-02 08:59	0.9.1	60dd6c6	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	37.9500	0.8783	0.9.1 repository holds only the tool (no package change)	1					
+2026-11-02 09:27	0.10.0	cf5f363	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	37.1667	0.8833	0.10.0 packaging for PyPI/Bioconda (no package code change)	1					
+2026-11-02 11:41	0.10.1	64d76a8	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	36.6500	0.9000	0.10.1 user documentation (no package code change)	1					
+2026-11-11 20:56	0.11.0	a322627	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	15.8833	0.8650	0.11.0 performance release: 0.10.2 function, heavy steps on threads, optional Rust reader and kernels (ZymoFecal from the site cache 4,785 -> 810 s)	1					
+2026-11-12 11:39	0.11.1	2721246	mono-train	6	0.9481	1.0000	0.8930	2.0000	159.1667	0.0042	0.9829	27.5500	0.8267	0.11.1 unknown-model test over bins (ZymoFecal with Nanomotif 1.3.0 motifs: 0 -> 503 inclusions; benchmarks identical to 0.11.0)	2	0.11.1	775ebbf911d18084c87d6ba06ab03bfd	1	1.082-1.082	0.2586-0.5553

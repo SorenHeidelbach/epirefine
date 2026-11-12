@@ -1,7 +1,8 @@
 # How it works
 
 EpiRefine turns the reads at motif sites into a probability for every contig and every bin, in six steps. Every
-parameter is estimated from your own sample; nothing is trained elsewhere.
+model parameter is estimated from your own sample; nothing is trained elsewhere. The decision thresholds (for
+example 0.5 to flag, 0.9 to include, 5 reads per site) are fixed defaults that were chosen during development.
 
 [The idea](#the-idea) · [1. Motif sites](#1-motif-sites) · [2. Basecaller noise](#2-basecaller-noise) ·
 [3. A contig's methylation](#3-a-contigs-methylation) · [4. Bin fingerprints](#4-bin-fingerprints) ·
@@ -10,14 +11,17 @@ parameter is estimated from your own sample; nothing is trained elsewhere.
 
 ## The idea
 
-A bacterium's methyltransferases modify their target motif (for example GATC or CCWGG) on every copy of it in the
-cell: on the chromosome, and on the plasmids and phages it carries. Which motifs are methylated is therefore the
-same along a whole genome and usually differs between genomes. Nanopore reads record it, base by base.
+A bacterium's methyltransferases modify their target motif (for example GATC or CCWGG) on the copies of it in the
+cell: on the chromosome, and usually on the plasmids and phages it carries as well (exceptions are under
+[Limits](#limits)). Which motifs are methylated is therefore the same along a whole genome and usually differs
+between genomes. Nanopore reads record it, base by base.
 
 So every contig carries a methylation signature, and a contig that belongs to a bin should have the bin's. A
 contig whose signature contradicts its bin is probably from another genome; an unbinned contig whose signature
-matches one bin probably belongs there. This works independently of GC content, k-mer composition and coverage,
-which are what binners use, so it finds errors that binning cannot see.
+matches one bin probably belongs there. This signal is measured separately from GC content, k-mer composition and
+coverage, which are what binners use, so it can find errors that binning cannot see. It is not fully independent of
+them: decisions need enough coverage, and in bins without methylated motifs the remaining signal (how often the
+basecaller calls unmethylated sites modified) follows GC content.
 
 ## 1. Motif sites
 
@@ -79,9 +83,10 @@ Raw evidence is too confident, because sites on a contig are not independent (ne
 methylation varies a little along a genome). EpiRefine calibrates it on the sample itself: it cuts pieces of 2-100 kb
 from binned contigs, scores each as if it were unbinned (with the piece removed from its bin), and also with its bin
 removed, where the right answer is "no bin". It then chooses the **temperature**, a single factor that divides all
-evidence, that makes these known answers come out with honest probabilities. On a fecal sample the temperature was
-5, so 100 nats of raw evidence count as 20; it rises with piece length, so very long contigs
-remain somewhat overconfident. The calibration results are in `calibration/`.
+evidence, that makes these known answers come out with honest probabilities on average. On a fecal development
+sample (with a Nanomotif 1.1.3 motif table) the temperature was 5.0, so 100 nats of raw evidence count as 20. The
+temperature that would fit each piece length alone rises with length (there from 2.7 at 2 kb to 14.7 at 500 kb), so
+one temperature leaves very long contigs overconfident. The calibration results are in `calibration/`.
 
 ## Decisions
 
@@ -114,14 +119,20 @@ stretches are reported (`foreign_segments`). Nothing is split.
 ## Limits
 
 - **Coverage and length.** Decisions need about 5 reads per motif site and enough sites; on a complex fecal sample
-  about half of the assembly was below that, including most plasmids and viruses.
+  76% of the contigs and 31% of the sequence got no decision, including half of the unbinned plasmids and most
+  binned plasmids and viruses.
 - **Genomes with the same methylation**, such as very close strains, cannot be told apart. EpiRefine then keeps
   several bins in the credible set or leaves the contig where it is.
 - **Bins without methylation** match every unmethylated contig; inclusions into them need P ≥ 0.95.
-- **Mobile elements with their own methyltransferases** can methylate motifs their host does not, and are then left
-  unbinned rather than placed with their host.
+- **Mobile elements methylated unlike their host**, such as phages with their own methyltransferases or high-copy
+  plasmids that are partly unmethylated, are left unbinned rather than placed with their host when unbinned, and can
+  be flagged as contaminants when binned (on the fecal sample, 4 of the 8 binned plasmids and viruses with a
+  decision).
+- **Results depend on the motif table**: with some motif tables nothing is included (see the
+  [FAQ](faq.md#known-limitations)), and extra motifs that no bin methylates lower how many contigs are put back.
 - **Motif groups are treated as independent.** One enzyme whose sites spread over several partly methylated groups
-  can count more than once; calibration absorbs this on average.
+  can count more than once. On the fecal sample, dropping such groups entirely reversed or weakened below 3 nats
+  the evidence of 2 of 101 flags and 17 of 485 inclusions, none of them contradicted by Hi-C.
 
 The statistical details, with formulas and the reasoning behind each choice, are in the developer notes
 ([development/method-notes.md](development/method-notes.md)) and in the manuscript (in preparation).
