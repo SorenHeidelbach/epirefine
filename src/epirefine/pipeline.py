@@ -30,7 +30,7 @@ from .model import (LOO_BATCH, LOO_THREADS_MIN, FittedModel, _cores, _n_threads,
 from .motifs import (build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights,
                      specificity_ranks)
 from .redundancy import inclusion_redundancy
-from .refine import (bin_evidence_table, flagged_share_per_bin, refine, regional_pattern, suspected_merges,
+from .refine import (bin_evidence_table, em_weight, flagged_share_per_bin, refine, regional_pattern, suspected_merges,
                      withdraw_as_mixed,
                      write_outputs)
 from .sites import EncodedAssembly, extract_sites, same_pairs, unit_tables
@@ -188,6 +188,11 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     runinfo.check_inputs(args)
     provenance = runinfo.provenance(args)
     features = parse_features(calibration)
+    if "deployed-unknown" in features and features & {"prior-matched", "sites-temperature"}:
+        raise ValueError("the calibration feature deployed-unknown checks one fit with one temperature; it cannot be "
+                         "combined with prior-matched (which refits the unknown model) or sites-temperature")
+    if "deployed-unknown" in features and unlisted_genome:
+        raise ValueError("the calibration feature deployed-unknown cannot be combined with --unlisted-genome")
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     runinfo.write_params(out / "params.json", provenance)  # a run that does not finish leaves its settings
@@ -427,10 +432,12 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         warm = {"init_w": cal["model"].w, "init_pi": cal["model"].raw_pi}
         unknown_params = (cal["eta"], cal["lam"])
         params.update(unknown_eta=cal["eta"], unknown_lam=cal["lam"])
+        community_fit = cal["community"]
         del cal
         _log(f"calibrated: tau={'per-group' if np.ndim(tau) else f'{tau:g}'}, temperature={temperature:g}")
     else:
         warm, unknown_params = {}, (None, 1.0)
+        community_fit = None
     tabs = None
     tau = (100.0 if variation == "beta" else 0.3) if tau is None else tau
     temperature = 1.0 if temperature is None else temperature
@@ -546,6 +553,35 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
 
     # bin refinement: contamination of binned contigs, inclusion of unbinned ones
     given = np.array([bin_idx[cb[c]] if c in cb else -1 for c in targets])
+    if ("deployed-unknown" in features and ffit is not None and fit is not None and fit["lam"] < 1
+            and community_fit is not None and user_temperature is None and p_unknown is None):
+        # The relatives model was chosen on the fragments at the reference prior; check it at the prior it would be
+        # deployed with. p_unknown is estimated exactly as refine() will (EM over the unbinned contigs that get a
+        # decision), once under each model, and both models are scored on the fragments at their own estimate.
+        ub = np.array([c not in host_set and cov_of.get(cid[c], 0.0) >= min_contig_coverage
+                       and lengths[c] >= min_contig_length for c in targets])
+        prior_u = (2.0, 2.0) if "em-priors" in features else (1.0, 1.0)
+        ttm = "temper-then-mix" in features
+
+        def deployed_p(f):
+            T = f["temperature"]
+            zu = unknown_logit(sc.R[ub] if f["lam"] < 1 else None, sc.Su_comm[ub], f["eta"], f["lam"], T, temper_then_mix=ttm)
+            return em_weight(logsumexp(sc.S[ub] / T, axis=1) - np.log(H), zu, *prior_u)[0]
+        p_rel, p_com = deployed_p(fit), deployed_p(community_fit)
+        gain, se = ffit.deployed_gain((fit["temperature"], fit["eta"], fit["lam"]), p_rel,
+                                      (community_fit["temperature"], community_fit["eta"], 1.0), p_com)
+        keep = gain > 2 * se
+        _log(f"unknown model at its deployed prior: relatives (T={fit['temperature']:g}, eta={fit['eta']:g}, lam={fit['lam']:g}) "
+             f"p_unknown={p_rel:.3f} vs community only (T={community_fit['temperature']:g}) p_unknown={p_com:.3f}: "
+             f"log-loss gain {gain:.4f} +- {se:.4f} -> {'relatives' if keep else 'community only'}")
+        params["unknown_model_deployed_check"] = {"p_unknown_relatives": p_rel, "p_unknown_community": p_com,
+                                                  "gain": gain, "se": se, "kept_relatives": bool(keep)}
+        if not keep:
+            fit = dict(fit, temperature=community_fit["temperature"], eta=community_fit["eta"], lam=1.0, curve=None)
+            temperature = fit["temperature"]
+            model.set_unknown_params(fit["eta"], 1.0)
+            sc.Su = sc.Su_comm.copy()
+            params.update(temperature=temperature, unknown_eta=fit["eta"], unknown_lam=1.0)
     # expected methylation evidence (assignability) per contig, for its own bin (binned) or its best
     # bin (unbinned), and its coverage (median reads per motif site)
     best_bin = np.where(given >= 0, given, sc.S.argmax(1))

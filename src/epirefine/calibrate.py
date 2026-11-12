@@ -64,6 +64,9 @@ FEATURES = {
     "common-tau": "tau values are compared on the fragments every tau fit keeps",
     "em-priors": "p_unknown has a Beta(2, 2) prior; the contamination rate counts only contigs that pass the "
                  "methylome-difference gate",
+    "deployed-unknown": "an unknown model with relatives (lam < 1) is kept only if it still beats the community-only "
+                        "model by 2 SE when each is scored on the fragments at the p_unknown it would be deployed "
+                        "with (EM on the unbinned contigs), not at the reference prior of the fit",
 }
 # The proposed set (rounds of the proposal in the dev log, 2026-11-10). Not in it, on the evidence of the
 # development sets: unit-temperature (contig posteriors at exactly T = 1 are over-confident: 83% right at
@@ -371,12 +374,12 @@ class FragmentFit:
             out["curve"] = self._curve(out, priors, ok_T, log)
         return out
 
-    def _paired_gain(self, a, b, priors, n_boot: int = 200, by_contig: bool = False):
+    def _paired_gain(self, a, b, priors, n_boot: int = 200, by_contig: bool = False, priors_b=None):
         """Objective(b) - objective(a) with a paired-bootstrap standard error over fragments, or over
         source contigs (by_contig: fragments of one contig share its departures from the bin, so resampling
-        them one by one understates the error)."""
+        them one by one understates the error). priors_b: b's objective at other priors than a's."""
         la1, lb1 = self.objective_terms(*a, priors)
-        la0, lb0 = self.objective_terms(*b, priors)
+        la0, lb0 = self.objective_terms(*b, priors if priors_b is None else priors_b)
         dA, dB = la0 - la1, lb0 - lb1
         gain = dA.mean() + (dB.mean() if len(dB) else 0.0)
         rng = np.random.default_rng(0)
@@ -392,6 +395,23 @@ class FragmentFit:
         boots = [dA[rng.integers(0, len(dA), len(dA))].mean()
                  + (dB[rng.integers(0, len(dB), len(dB))].mean() if len(dB) else 0.0) for _ in range(n_boot)]
         return float(gain), float(np.std(boots))
+
+    def deployed_gain(self, flexible, p_flexible: float, simple, p_simple: float) -> tuple[float, float]:
+        """Log-loss gain of the unknown model with relatives over the community-only one, each scored on the
+        fragments at the p_unknown it would be deployed with (feature deployed-unknown).
+
+        flexible, simple: (temperature, eta, lam). p_flexible, p_simple: the EM estimates of p_unknown on the
+        real unbinned contigs under each. The fit compares the two at a reference prior (0.1), but a model is
+        deployed at the prior its own EM finds, and that prior depends on the model: a relative of bin h fits
+        every contig that fits h, so wherever the relatives' likelihood ratio unknown : bins exceeds 1 - f (f the
+        share of unbinned contigs that fit no bin) the EM runs to p_unknown = 1 and no contig can be placed
+        (dev log, proposal 2026-11-10, R1.1; ZymoFecal with Nanomotif 1.3.0 motifs, 2026-11-12). The fragments are
+        a fixed population, tests A (host present) and B (host absent) weighted 1 : 1 as in the fit of 0.10;
+        only the prior of each posterior changes. Standard error by paired bootstrap over source contigs.
+        Returns (gain, se); gain > 0: the relatives model is better at deployment."""
+        clip = lambda p: float(np.clip(p, 1e-6, 1 - 1e-6))
+        return self._paired_gain(flexible, simple, ((clip(p_flexible), 1.0, 1.0),), by_contig=True,
+                                 priors_b=((clip(p_simple), 1.0, 1.0),))
 
     def _class_objective(self, sel_k, T, eta, lam, priors):
         la, lb = self.objective_terms(T, eta, lam, priors)
@@ -777,7 +797,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         return la.mean() + lb.mean(), la.mean(), lb.mean()
 
     flen = frags_k["length"].to_numpy()
-    if not features - {"common-tau", "em-priors"}:  # no feature that touches the temperature / unknown-model fit
+    if not features - {"common-tau", "em-priors", "deployed-unknown"}:  # no feature that touches the temperature / unknown-model fit
         # the calibration of 0.10: prior p_unknown as passed (0.1), tests A and B weighted 1 : 1, the unknown's
         # mixture summed before tempering
         temp_rows, Su_by = [], {}
@@ -845,6 +865,10 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         temperature, eta, lam = first_fit["temperature"], first_fit["eta"], first_fit["lam"]
         fitted_temperature = first_fit["fitted_temperature"]
         temp_rows, by_length = first_fit["temperature_fit"], first_fit["by_length"]
+    # the best community-only unknown model (lam = 1) at temperatures that may be used: the fallback when an unknown
+    # model with relatives fails at its deployed prior (feature deployed-unknown, checked in pipeline.run)
+    simple_rows = [r for r in temp_rows if r["lam"] >= 1 and (allow_sharpening or r["temperature"] >= 1.0)]
+    community = min(simple_rows, key=lambda r: r["log_loss"]) if simple_rows else None
     log(f"  unknown model: eta={eta:g}, lam={lam:g}; temperature fitted {fitted_temperature:g} -> used {temperature:g}")
     log("  temperature by fragment length: " + ", ".join(f"{r['length'] // 1000} kb {r['temperature']:g}" for r in by_length))
 
@@ -909,7 +933,9 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             "reliability": reliability, "assignability": pl.DataFrame(assign_rows),
             "fragments": frags.with_columns(pl.Series("foreign_excluded", ~keep), **{
                 k: pl.Series(_expand(v, kidx, len(keep))) for k, v in frag_extra.items()}), "model": best_model,
-            "fragment_fit": ff, "fit": first_fit, "report": report}
+            "fragment_fit": ff, "fit": first_fit, "report": report,
+            "community": None if community is None else {"temperature": float(community["temperature"]),
+                                                          "eta": float(community["eta"]), "lam": 1.0}}
 
 
 def _expand(values, idx, n):
