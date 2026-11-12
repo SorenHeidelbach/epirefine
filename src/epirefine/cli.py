@@ -143,8 +143,12 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--grid-size", type=int, default=64,
                    help="number of grid points for the methylated fraction of a motif group (finer = slower)")
     g.add_argument("--seed", type=int, default=1,
-                   help="random seed (motif-grouping sample, calibration pieces); the same inputs and seed give "
+                   help="random seed of the motif-grouping sample (part of the site-cache key) and, unless "
+                        "--calibration-seed is given, of the calibration pieces; the same inputs and seeds give "
                         "the same outputs")
+    g.add_argument("--calibration-seed", type=int, default=None,
+                   help="random seed of the calibration pieces only (default: --seed); another value draws other "
+                        "pieces and leaves the motif groups and the site cache as they are")
 
     g = r.add_argument_group("speed and extra output")
     g.add_argument("--workers", type=int, help="processes for the pileup and table passes (default: CPUs, max 16)")
@@ -217,7 +221,7 @@ def main(argv=None):
                 contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, calibration=a.calibration,
                 min_jaccard=a.min_jaccard,
                 variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
-                cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed, shared_sites=a.shared_sites,
+                cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed, calibration_seed=a.calibration_seed, shared_sites=a.shared_sites,
                 complement_pairs=a.complement_pairs, strand_sites=a.strand_sites,
                 noise_max_off_share=a.noise_max_off_share,
                 two_state_warning=a.two_state_warning, siteless_bin_guard=a.siteless_bin_guard,

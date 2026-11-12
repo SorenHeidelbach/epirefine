@@ -67,7 +67,8 @@ def begin(args: dict, log=log) -> None:
     start_clock()
     log(f"epirefine {package_version()} starting; command: {' '.join(sys.argv)}")
     log("inputs: " + ", ".join(f"{k.removesuffix('_path')}={args[k]}" for k in INPUT_NAMES) + f"; out={args['out']}; "
-        f"workers={n_workers(args['workers'])}; seed={args['seed']}")
+        f"workers={n_workers(args['workers'])}; seed={args['seed']}"
+        + (f"; calibration seed={args['calibration_seed']}" if args.get("calibration_seed") is not None else ""))
     check_settings(args)
     if args["contam_eps"] == 0:
         log("--contam-eps 0: no robust bin profiles and no regional model (long contigs are judged as a whole)")
@@ -241,6 +242,8 @@ def provenance(args: dict) -> dict:
     # the options as given (p_unknown, tau and temperature under *_given: their plain keys hold the values
     # used, estimated or calibrated when not given)
     prov.update({given.get(k, k): v for k, v in args.items() if k not in skip})
+    if prov.get("calibration_seed") is None and "seed" in prov:
+        prov["calibration_seed"] = prov["seed"]  # the seed the pieces were drawn with, also when not given
     return prov
 
 

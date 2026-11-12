@@ -59,6 +59,26 @@ def _sample_names(lengths: dict[str, int], names, sample_bp: float, rng) -> list
     return out
 
 
+def _grouping_draws(lengths: dict[str, int], names, sample_bp: float) -> bool:
+    """Whether _sample_names draws from its generator (the sequence exceeds the sample size)."""
+    return sum(lengths[c] for c in names) > sample_bp
+
+
+def _calibration_rng(calibration_seed: int, n_names: int, grouping_draws: bool) -> np.random.Generator:
+    """The generator of the calibration pieces, apart from the one of the motif-grouping sample, so that a new
+    calibration seed leaves the grouping, and with it the site cache, as it was.
+
+    Up to 0.11.1 one generator, seeded with --seed, drew first the grouping sample (a permutation of the contigs,
+    only when the sequence exceeds --group-sample-mb) and then the pieces. This generator starts from
+    calibration_seed and repeats that permutation draw when the grouping sample draws one (it costs one
+    permutation of the contig list), so with calibration_seed equal to --seed (the default) the pieces are exactly
+    those of 0.11.1, and the stored results of 0.11.1 stay valid."""
+    rng = np.random.default_rng(calibration_seed)
+    if grouping_draws:
+        rng.permutation(n_names)
+    return rng
+
+
 def _manifest(**kw) -> dict:
     out = {}
     for k, v in kw.items():
@@ -203,10 +223,13 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         regional_tempered=False, gate_leave_out="none", gate_unweighted=False, eps_gated=False,
         redundancy_order="independent", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all",
         unknown_prior="bins", unknown_prior_strength=5.0,
-        calibration="default", siteless_bin_guard=False):
+        calibration="default", siteless_bin_guard=False, calibration_seed=None):
     """calibration: 'default' (the calibration of 0.10 with the parsimony test of the unknown model resampled over
     bins, since 0.11.1), 'legacy' (the calibration of 0.10 and 0.11.0), 'consistent', 'coherent', or a comma-separated
-    list of calibrate.FEATURES; see calibrate.parse_features."""
+    list of calibrate.FEATURES; see calibrate.parse_features.
+
+    seed: the motif-grouping sample (and the calibration pieces unless calibration_seed is given);
+    calibration_seed: the calibration pieces only (default: seed). Each random step has its own generator."""
     args = dict(locals())  # first statement: the options as given
     runinfo.begin(args, _log)  # first log lines (version, command, inputs) and option ranges, before any work
     # the inputs are checked before anything is read or written: a missing file or a wrong table must not
@@ -222,7 +245,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     runinfo.write_params(out / "params.json", provenance)  # a run that does not finish leaves its settings
-    rng = np.random.default_rng(seed)
+    if calibration_seed is None:
+        calibration_seed = seed
+    group_rng = np.random.default_rng(seed)
     cache = Path(cache_dir) if cache_dir else out / "cache"
 
     # the assembly is streamed (lengths, then the motif-grouping sample, then the encoded copy on disk): held
@@ -255,7 +280,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
 
     # motif groups, from the records of a random sample of the sequence
     relevant = sorted(host_set | set(targets))
-    sample_names = _sample_names(lengths, relevant, group_sample_bp, rng)
+    sample_names = _sample_names(lengths, relevant, group_sample_bp, group_rng)
+    calib_rng = _calibration_rng(calibration_seed, len(relevant), _grouping_draws(lengths, relevant, group_sample_bp))
     sample = _decoded(asm_cached, sample_names) if asm_cached is not None else pio.fasta_subset(assembly, sample_names)
     del asm_cached
     if strand_sites not in ("sum", "split", "auto"):
@@ -391,7 +417,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                            "length": [lengths[c] for c in hc_ok]}, schema={"contig": pl.Int32, "bin_idx": pl.Int64, "length": pl.Int64})
         runinfo.check_calibration_contigs([lengths[c] for c in hc_ok], len(host_contigs), min_contig_coverage, frag_lengths)
         per_bin = fragments_per_bin(frag_budget, len(frag_lengths), H, frags_per_bin)
-        frags = select_fragments(hc, frag_lengths, per_bin, rng)
+        frags = select_fragments(hc, frag_lengths, per_bin, calib_rng)
         _log(f"{frags.height} calibration fragments ({per_bin} per bin and length)")
 
     # pass 2: site cache -> likelihood tables
