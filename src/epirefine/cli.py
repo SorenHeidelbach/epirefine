@@ -202,16 +202,37 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--siteless-bin-guard", action="store_true",
                    help="include nothing into a bin without a single motif site (such a bin has no profile; its "
                         "posterior is its prior share)")
+
+    rr = sub.add_parser("rerun", formatter_class=_Help,
+                        help="repeat a run from its params.json: the same inputs (recorded paths) and options, into "
+                             "a new output folder",
+                        description="Repeat the run that a params.json records: the same input files and every option "
+                                    "as given, seeds included. The log warns when an input file, the version or the "
+                                    "commit differs from the record.")
+    rr.add_argument("--params", required=True, help="params.json of the run to repeat")
+    rr.add_argument("--out", required=True, help="output folder of the rerun")
+    rr.add_argument("--workers", type=int, help="processes (default: as recorded; decisions do not depend on it)")
+    rr.add_argument("--cache-dir", help="site cache (default: the recorded run's cache)")
     return ap
 
 
 def main(argv=None):
     a = build_parser().parse_args(argv)
-    if a.cmd == "run":
+    if a.cmd in ("run", "rerun"):
         from . import pipeline
         from .io import InputError
         from .runinfo import log
         try:
+            if a.cmd == "rerun":
+                import json
+                from pathlib import Path
+                from .runinfo import rerun_arguments
+                try:
+                    params = json.loads(Path(a.params).read_text())
+                except (OSError, ValueError) as e:
+                    raise InputError(f"cannot read {a.params}: {e}") from None
+                pipeline.run(**rerun_arguments(params, a.out, workers=a.workers, cache_dir=a.cache_dir))
+                return
             pipeline.run(
                 a.assembly, a.pileup, a.contig_bin, a.motifs, a.out, min_cov=a.min_cov, chunk_size=a.chunk_size,
                 grid_size=a.grid_size, p_unknown=a.p_unknown, contamination_threshold=a.contamination_threshold,

@@ -36,14 +36,24 @@ def test_contig_bin_malformed_rows_are_counted(tmp_path):
 
 def test_contig_bin_must_share_contigs_with_the_assembly():
     lengths = {"c1": 10, "c2": 10, "c3": 10}
-    with pytest.raises(InputError, match="none of the 2 contigs"):
+    with pytest.raises(InputError, match="columns are swapped"):
         runinfo.match_contig_bin({"binA": "c1", "binB": "c2"}, lengths, "cb.tsv")  # columns swapped
+    with pytest.raises(InputError, match="none of the 2 contigs"):
+        runinfo.match_contig_bin({"y1": "binA", "y2": "binB"}, lengths, "cb.tsv")
     msgs = []
     kept = runinfo.match_contig_bin({"c1": "binA", "x1": "binA", "x2": "binB", "x3": "binB"}, lengths, "cb.tsv",
                                     log=msgs.append)
     assert kept == {"c1": "binA"}
-    assert len(msgs) == 1 and "3 of 4 contigs are not in the assembly" in msgs[0] and "1 of 2 bins" in msgs[0]
-    assert "fewer than half" in msgs[0]
+    assert len(msgs) == 2 and "1 bins have none of their contigs in the assembly" in msgs[0] and "binB" in msgs[0]
+    assert "3 of 4 contigs are not in the assembly" in msgs[1] and "1 of 2 bins" in msgs[1]
+    assert "fewer than half" in msgs[1]
+
+
+def test_contig_in_two_bins_is_an_error(tmp_path):
+    p = tmp_path / "cb.tsv"
+    p.write_text("c1\tbinA\nc2\tbinA\nc1\tbinB\nc2\tbinA\n")  # c2 twice in the same bin is harmless
+    with pytest.raises(InputError, match="1 contigs are listed in more than one bin .e.g. c1 .binA, binB.."):
+        pio.read_contig_bin(p)
 
 
 def test_unknown_mod_type_is_rejected_with_the_accepted_ones(tmp_path):

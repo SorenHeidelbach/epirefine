@@ -127,6 +127,15 @@ outputs can read EpiRefine's.
     modification time of the assembly, pileup, contig-bin table and motif table), `out`, `cache_dir`, `workers`,
     `seed`, `calibration_seed` (the seed the calibration pieces were drawn with: `--calibration-seed`, or `seed`
     when it was not given).
+  - The code and where it ran: `commit` (`commit`, `source`: `git` with `dirty` true when tracked files differ from
+    the commit, or the environment variable `EPIREFINE_COMMIT`, or a file `COMMIT` next to `src` as a snapshot made
+    with `git archive` can carry; `null` for an installed release, whose `version` names it), `libraries` (python,
+    numpy, scipy, polars, epirefine_rs versions), `kernels` (`installed`, `used`, `EPIREFINE_RS`, `version`, `api`,
+    `features`, `module_sha256` of the compiled module, `installed_from`), `threads` (`workers`, `cores` this process
+    may use, `model_threads`, `polars_threads`, and the variables `omp_num_threads`, `openblas_num_threads`,
+    `mkl_num_threads`, `polars_max_threads` as set, or `null`), `seeds` (`seed`, `calibration_seed`, and `bootstrap`,
+    the fixed seed of the resampling in the calibration tests).
+  - `epirefine rerun --params params.json --out <dir>` repeats the run from this file (see `docs/usage.md`).
   - Every option as given, under the name of the command-line option with underscores (`contamination_threshold`,
     `include_threshold`, `include_threshold_unmethylated`, `min_methylome_difference`, `max_redundancy`,
     `min_evidence`, `min_contig_coverage`, `min_contig_length`, `min_cov`, `chunk_size`, `grid_size`, `contam_eps`,

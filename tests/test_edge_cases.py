@@ -113,7 +113,7 @@ def test_motif_table_without_motifs_is_an_error(community, tmp_path):
 def test_motif_table_without_the_needed_columns_is_an_error(community, tmp_path):
     bad = tmp_path / "bin-motifs.tsv"
     bad.write_text("bin\tmotif\nbinA\tGATC\n")
-    with pytest.raises(ValueError, match="needs columns"):
+    with pytest.raises(ValueError, match="lacks the column.s. mod_position, mod_type"):
         run_pipeline(**{**community.args(tmp_path / "out"), "motifs_path": str(bad)})
 
 
