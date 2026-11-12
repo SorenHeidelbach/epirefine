@@ -117,8 +117,9 @@ outputs can read EpiRefine's.
   apart (`assignability.tsv`) and bins whose methylation looks alike (`lookalikes.tsv`). Two tables describe the
   probabilities as they are used for the decisions: `false_flag_rate.tsv`, per piece length the share of pieces
   of true members (scored without their own contig) that would be flagged at the run's settings, for all pieces
-  and for those kept by the calibration (`false_flag_rate`, `false_flags`; a rate above about 1% of the kept pieces
-  means flags in this sample deserve a second look), and `reliability_deployed.tsv`, predicted against observed
+  and for those kept by the calibration (`false_flag_rate`, `false_flags`; on the development benchmarks
+  0 of 5,723 kept member pieces of the training communities would have been flagged, so a clearly higher rate means
+  flags in this sample deserve a second look; no threshold for it has been validated), and `reliability_deployed.tsv`, predicted against observed
   probabilities at the estimated priors and the temperature in use.
 - **`params.json`**: what the run was made with and what it fitted. Written when the run starts (`finished` is
   `false`) and completed at the end, so an interrupted run still shows its settings.
