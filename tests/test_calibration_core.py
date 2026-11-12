@@ -153,7 +153,8 @@ def _sibling_pieces(H=20, per_bin=15, siblings=((0, 1), (1, 0)), seed=3):
     S[np.arange(n), fbin] = 0.0
     R = S - 2.0
     Su = np.full(n, -10.0)
-    for a, b in siblings:
+    for a, b in siblings:   # the sibling bin fits a's pieces almost as well, its unbinned relative better still
+        S[fbin == a, b] = -3.0
         R[fbin == a, b] = -1.0
     ff = FragmentFit(S=S, fbin=fbin, Su_comm=Su, R={0.05: R}, kept=np.ones(n, bool), distinct=np.ones(n, bool),
                      length=np.full(n, 5000), n_sites=np.full(n, 300.0), difference=np.zeros(n), contig=np.arange(n))
@@ -204,3 +205,79 @@ def test_core_options_with_the_temper_then_mix_feature_run(community, base_run, 
     run = run_pipeline(**community.args(out), cache_dir=str(out / "cache"), unknown_share="t1",
                        calibration="default,temper-then-mix")
     assert "unknown share by the EM at T = 1" in run.log
+
+
+# ---------------------------------------------------------------------------------------- slot model (candidate 3)
+from epirefine.calibrate import SlotModel, fit_slot_model, slot_decide, slot_piece_terms  # noqa: E402
+
+
+def test_slot_gradient_matches_finite_differences():
+    rng = np.random.default_rng(5)
+    n, H = 40, 7
+    S = rng.normal(-5, 3, (n, H)); R = S + rng.normal(-0.5, 0.5, (n, H)); Sc = rng.normal(-6, 2, n)
+    fb = rng.integers(0, H, n); dist = rng.random(n) < 0.7
+    T = rng.uniform(1.1, 4.0, n); u = rng.normal(-2, 1, H)
+    la, lb, g = slot_piece_terms(S, R, Sc, fb, dist, T, u, 0.1)
+    f = lambda v: (lambda a, b, _: a.mean() + b.mean())(*slot_piece_terms(S, R, Sc, fb, dist, T, v, 0.1, need_grad=False))
+    num = np.array([(f(u + 1e-6 * np.eye(H)[h]) - f(u - 1e-6 * np.eye(H)[h])) / 2e-6 for h in range(H)])
+    assert np.allclose(g, num, atol=1e-6)
+
+
+def test_slot_unknown_share_does_not_see_the_bin_relative_split():
+    """Design C's test R0: members of bins whose relative fits almost as well (R = S + log 0.8). The EM over 'community'
+    against 'some slot' gives the same p_c whatever pi; the 0.11 parametrisation (relatives inside the unknown share)
+    runs to p_u near 1 at lam 0.5."""
+    from epirefine.refine import em_weight
+    from epirefine.model import unknown_score
+    from scipy.special import logsumexp as lse
+    rng = np.random.default_rng(0)
+    H, n = 490, 4000
+    best = rng.integers(0, H, n)
+    S = rng.normal(-40, 3, (n, H)); S[np.arange(n), best] = 0.0
+    R = S + np.log(0.8)
+    comm = rng.random(n) < 0.4
+    Sc = np.where(comm, 5.0, -15.0)    # 40% fit the community draw better than any slot
+    c = ContigScores(S=S, Su_comm=Sc, R={0.05: R}, given=np.full(n, -1), testable=np.zeros(n, bool),
+                     decidable=np.ones(n, bool), n_sites=np.full(n, 1000.0))
+    ps = []
+    for pi in (0.0, 0.5, 0.9):
+        m = SlotModel(pi=np.full(H, max(pi, 1e-9)), pi0=pi, kappa=np.inf, law=None, T=1.0)
+        _, p_c, _, _ = slot_decide(c, m, {}, 0.5, 0.9, log=lambda *a: None)
+        ps.append(p_c)
+    assert max(abs(p - 0.4) for p in ps) < 0.02
+    # the 0.11 parametrisation follows p_u = min(1, f_c / (1 - r)), r = (1 - lam) c (calibration_coherence R1.1)
+    old = lambda lam: em_weight(lse(S, axis=1) - np.log(H), unknown_score(R, Sc, 0.05, lam))[0]
+    assert old(0.5) == pytest.approx(0.4 / (1 - 0.5 * 0.8), abs=0.05)
+    assert old(0.1) >= 0.99
+
+
+def test_slot_model_fit_raises_pi_only_for_sibling_bins():
+    ff = _sibling_pieces()
+    m = fit_slot_model(ff, law_mode=False, kappa=10.0, log=lambda *a: None)
+    assert set(np.argsort(m.pi)[-2:]) == {0, 1}
+    assert min(m.pi[0], m.pi[1]) > 2 * np.median(m.pi)
+
+
+def test_slot_averaged_objective_gradient_matches_finite_differences():
+    from epirefine.calibrate import PRIOR_GRID, _slot_objective
+    rng = np.random.default_rng(6)
+    n, H = 30, 6
+    S = rng.normal(-5, 3, (n, H)); R = S + rng.normal(-0.5, 0.5, (n, H)); Sc = rng.normal(-6, 2, n)
+    arr = (S, R, Sc, rng.integers(0, H, n), rng.random(n) < 0.6)
+    pri = tuple((p, (1 - p) / 5, p / 5) for p in PRIOR_GRID)
+    u = rng.normal(-1.5, 1, H)
+    _, g = _slot_objective(arr, 2.0, u, pri)
+    f = lambda v: _slot_objective(arr, 2.0, v, pri, need_grad=False)[0]
+    num = np.array([(f(u + 1e-6 * np.eye(H)[h]) - f(u - 1e-6 * np.eye(H)[h])) / 2e-6 for h in range(H)])
+    assert np.allclose(g, num, atol=1e-6)
+
+
+def test_slot_relatives_run_end_to_end(community, base_run, tmp_path):
+    out = copy_cache(base_run, tmp_path / "out")
+    run = run_pipeline(**community.args(out), cache_dir=str(out / "cache"), relatives="slot", unknown_share="t1",
+                       temperature_law="sites")
+    assert "slot model" in run.log and "relatives_slot" in _params(run)
+    p = run.table("hidden_relative.tsv")["p_hidden_relative"].to_numpy()
+    assert np.all((p >= 0) & (p <= 1))
+    with pytest.raises(ValueError, match="unknown-share t1"):
+        run_pipeline(**community.args(tmp_path / "o2"), cache_dir=str(out / "cache"), relatives="slot")

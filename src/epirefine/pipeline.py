@@ -23,7 +23,7 @@ import polars as pl
 from . import io as pio
 from . import runinfo
 from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, ETA_REL, ContigScores, CoreOptions, SitesLaw,
-                        hidden_relative,
+                        hidden_relative, slot_hidden_relative,
                         calibrate, calibrate_decisions, contig_chunks, fragment_chunks,
                         fragments_per_bin, parse_features, select_fragments)
 from .detection import detection_table, fit_detection_by_bin
@@ -209,7 +209,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         unknown_prior="bins", unknown_prior_strength=5.0,
         calibration="default", siteless_bin_guard=False,
         tau_select="per-group", npmle_start="warm", calibration_exclusion=True, unknown_share="deployed",
-        temperature_law="grid", evidence_temperature="median", relatives="switch"):
+        temperature_law="grid", evidence_temperature="median", relatives="switch", slot_objective="legacy",
+        slot_test_b="decidable", slot_kappa=None):
     """calibration: 'default' (the calibration of 0.10 with the parsimony test of the unknown model resampled over
     bins, since 0.11.1), 'legacy' (the calibration of 0.10 and 0.11.0), 'consistent', 'coherent', or a comma-separated
     list of calibrate.FEATURES; see calibrate.parse_features.
@@ -223,7 +224,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     log(sites), refitted under the chosen unknown model). evidence_temperature: 'median' or 'contig' (each contig's own
     temperature in the methylation-evidence cut-off). relatives: 'switch' (one unknown model for all bins, chosen by
     the 2-SE rule) or 'per-bin' (one mixture with a relatives weight per bin, fitted on the pieces; writes
-    calibration/relatives_by_bin.tsv and hidden_relative.tsv, report only). See calibrate.calibrate_decisions.
+    calibration/relatives_by_bin.tsv and hidden_relative.tsv, report only) or 'slot' (design C: each bin's slot holds
+    its own genome or an unbinned relative, pi_h fitted jointly with the temperature; needs unknown_share 't1';
+    slot_objective 'legacy' | 'averaged', slot_test_b 'decidable' | 'all', slot_kappa None = cross-validated). See
+    calibrate.calibrate_decisions.
     calibration_exclusion: False keeps the calibration fragments from chunks called foreign (diagnostic only)."""
     args = dict(locals())  # first statement: the options as given
     runinfo.begin(args, _log)  # first log lines (version, command, inputs) and option ranges, before any work
@@ -234,7 +238,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     features = parse_features(calibration)
     core = CoreOptions(tau_select=tau_select, npmle_start=npmle_start, unknown_share=unknown_share,
                        temperature_law=temperature_law, evidence_temperature=evidence_temperature,
-                       relatives=relatives)
+                       relatives=relatives, slot_objective=slot_objective, slot_test_b=slot_test_b,
+                       slot_kappa=slot_kappa)
     if not core.decisions_default:
         if features & {"sites-temperature", "prior-matched", "prior-averaged", "unit-temperature", "deployed-unknown"}:
             raise ValueError("--unknown-share, --temperature-law, --evidence-temperature and --relatives cannot be "
@@ -505,7 +510,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     temperature = 1.0 if temperature is None else temperature
 
     model = FittedModel(L_chunks, chunk_bin, H, group_modtype, grid, tau, **warm, **model_kw)
-    if core.relatives == "per-bin":   # the contigs' relative scores at the eta of the per-bin mixture
+    if core.relatives in ("per-bin", "slot"):   # the contigs' relative scores at the eta of the per-bin weights
         unknown_params = (ETA_REL, 1.0)
     model.set_unknown_params(*unknown_params)
     # from here on the chunk tables are read only for the few mixed contigs of the regional step: kept in a temporary
@@ -704,7 +709,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         raise ValueError("--unlisted-genome cannot be combined with the calibration features temper-then-mix, "
                          "sites-temperature, prior-matched, prior-averaged or unit-temperature")
     T_contig, Zu = temperature, None
-    relatives_weights = None
+    relatives_weights = slot_model = None
 
     def decide(fit):
         """Decisions under one calibration fit: the temperature (per contig when it depends on the number of
@@ -745,6 +750,14 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         if core.temper_then_mix and res.weights is None and res.fit["lam"] < 1:
             T_contig = res.T_contig
             Zu = unknown_logit(sc.R, sc.Su_comm, res.fit["eta"], res.fit["lam"], T_contig, temper_then_mix=True)
+        if res.slot is not None:
+            sm = res.slot
+            params["relatives_slot"] = {**sm.summary(), **res.slot_extra, "kappa_cv": sm.cv}
+            _write(pl.DataFrame({"bin": bins, "pi_relative": sm.pi}), out / "calibration" / "relatives_by_bin.tsv")
+            ph = slot_hidden_relative(contigs, sm, res.p_unknown_t1, res.T_contig, best_bin)
+            _write(pl.DataFrame({"contig": targets, "bin": [bins[b] for b in best_bin], "p_hidden_relative": ph}),
+                   out / "hidden_relative.tsv")
+            slot_model, T_rel = sm, res.T_contig
         if res.weights is not None:
             Zu = None   # the decisions' posterior below is rebuilt from the mixture
             params["relatives_per_bin"] = res.weights.summary()
@@ -998,7 +1011,12 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     p_unknown = ref.p_unknown
     params.update(p_unknown=p_unknown, contamination_rate=ref.eps,
                   contamination_detection="skipped: one bin only" if H == 1 else "done")
-    if relatives_weights is not None:
+    if slot_model is not None:
+        Tv = np.broadcast_to(np.asarray(T_rel, float), (len(targets),))
+        S2 = sc.S + Tv[:, None] * np.log1p(-np.minimum(slot_model.pi, 1 - 1e-12))[None, :]
+        P = posterior(S2, None, p_unknown, Tv, Zu=slot_model.unknown_logit(sc.R, sc.Su_comm, Tv, p_unknown))
+        del S2
+    elif relatives_weights is not None:
         P = posterior(sc.S, None, p_unknown, T_rel, Zu=relatives_weights.logit(sc.R, sc.Su_comm, T_rel))
     else:
         P = posterior(sc.S, sc.Su, p_unknown, temperature) if Zu is None else posterior(sc.S, None, p_unknown, T_contig, Zu=Zu)

@@ -215,11 +215,20 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--evidence-temperature", choices=["median", "contig"], default="median",
                    help="temperature of the methylation-evidence cut-off (--min-evidence): the median over contigs, or each "
                         "contig's own (only differs with --temperature-law sites)")
-    g.add_argument("--relatives", choices=["switch", "per-bin"], default="switch",
+    g.add_argument("--relatives", choices=["switch", "per-bin", "slot"], default="switch",
                    help="model of genomes without a bin: one model for all bins, relatives or community only by a 2-SE "
                         "test (switch), or one mixture with a relatives weight per bin fitted on the calibration pieces "
                         "(per-bin; also writes hidden_relative.tsv: the probability that an unbinned relative of the bin "
-                        "explains each contig, report only)")
+                        "explains each contig, report only), or the slot model (slot: each bin's slot holds its own "
+                        "genome or an unbinned relative, a weight per bin fitted with the temperature; needs "
+                        "--unknown-share t1)")
+    g.add_argument("--slot-objective", choices=["legacy", "averaged"], default="legacy",
+                   help="calibration objective of the slot model: prior 0.1, host-present and host-absent pieces 1 : 1 (legacy), or "
+                        "averaged over priors 0.1 ... 0.9, the host-absent pieces scored with a proper prior (averaged)")
+    g.add_argument("--slot-test-b", choices=["decidable", "all"], default="decidable",
+                   help="pieces in the slot model's host-absent test: the decidable ones, or all kept pieces")
+    g.add_argument("--slot-kappa", type=float, default=None,
+                   help="shrinkage of the slot model's per-bin weights (default: by cross-validation)")
     g.add_argument("--calibration-exclusion", choices=["on", "off"], default="on", help=argparse.SUPPRESS)
     return ap
 
@@ -253,6 +262,7 @@ def main(argv=None):
                 unknown_prior_strength=a.unknown_prior_strength,
                 tau_select=a.tau_select, npmle_start=a.npmle_start, unknown_share=a.unknown_share,
                 temperature_law=a.temperature_law, evidence_temperature=a.evidence_temperature, relatives=a.relatives,
+                slot_objective=a.slot_objective, slot_test_b=a.slot_test_b, slot_kappa=a.slot_kappa,
                 calibration_exclusion=a.calibration_exclusion == "on")
         except InputError as e:
             # a problem with the inputs or options: the message says what; no traceback needed

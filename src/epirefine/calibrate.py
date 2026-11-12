@@ -1004,11 +1004,14 @@ class CoreOptions:
     evidence_temperature: str = "median"  # 'median' (0.11) | 'contig' (each contig's own T in the evidence cut-off)
     relatives: str = "switch"             # 'switch' (one model for all bins, 2-SE rule, 0.11) | 'per-bin' (weights)
     temper_then_mix: bool = False         # the unknown's explanations tempered, then mixed (feature temper-then-mix)
+    slot_kappa: float | None = None       # relatives 'slot': the shrinkage strength (None: by cross-validation)
+    slot_objective: str = "legacy"        # relatives 'slot': 'legacy' (prior 0.1, tests 1 : 1) | 'averaged' (PRIOR_GRID)
+    slot_test_b: str = "decidable"        # relatives 'slot': test B on the decidable pieces (D12) | 'all'
 
     def __post_init__(self):
         for name, ok in (("tau_select", ("per-group", "inf")), ("npmle_start", ("warm", "cold")),
                          ("unknown_share", ("deployed", "t1")), ("temperature_law", ("grid", "sites")),
-                         ("evidence_temperature", ("median", "contig")), ("relatives", ("switch", "per-bin"))):
+                         ("evidence_temperature", ("median", "contig")), ("relatives", ("switch", "per-bin", "slot"))):
             if getattr(self, name) not in ok:
                 raise ValueError(f"unknown {name} {getattr(self, name)!r}; choose from {', '.join(ok)}")
 
@@ -1129,6 +1132,8 @@ class CalibrationResult:
 
     contigs_given: np.ndarray | None = None
     weights: "RelativesWeights | None" = None
+    slot: "SlotModel | None" = None
+    slot_extra: dict | None = None
 
 
 def _su_for(contigs: ContigScores, eta, lam):
@@ -1166,6 +1171,22 @@ def calibrate_decisions(ff: FragmentFit | None, contigs: ContigScores, rules: di
     p_user = rules.pop("p_unknown", None)
     thr_c = rules.pop("contamination_threshold", 0.5)
     thr_i = rules.pop("include_threshold", 0.9)
+    if options.relatives == "slot":
+        if options.unknown_share != "t1":
+            raise ValueError("--relatives slot estimates the unknown share at T = 1: it needs --unknown-share t1")
+        if ff is None or (fit is not None and fit.get("user_temperature") is not None):
+            raise ValueError("--relatives slot needs the calibration and a fitted temperature")
+        thr_c_, thr_i_ = rules.get("contamination_threshold", 0.5), rules.get("include_threshold", 0.9)
+        rest = {k: v for k, v in rules.items() if k not in ("contamination_threshold", "include_threshold", "p_unknown")}
+        model = fit_slot_model(ff, law_mode=options.temperature_law == "sites", p_cal=p_cal, kappa=options.slot_kappa,
+                               objective=options.slot_objective, test_b=options.slot_test_b, log=log)
+        ref, p_c, T, extra = slot_decide(contigs, model, rest, thr_c_, thr_i_, share_rows=share_rows, log=log)
+        sfit = {"temperature": float(np.median(T)) if np.ndim(T) else float(T), "eta": model.eta,
+                "lam": float(1.0 - np.mean(model.pi)), "curve": model.law, "fitted_temperature": float("nan")}
+        res = CalibrationResult(fit=sfit, T_contig=T, p_unknown=ref.p_unknown, p_unknown_t1=p_c, refinement=ref,
+                                law=model.law, contigs_given=contigs.given)
+        res.slot, res.slot_extra = model, extra
+        return res
     if ff is not None and options.temper_then_mix != ff.coherent:
         # the pieces are scored in the order of tempering and mixing the decisions use
         feats = ff.features | {"temper-then-mix"} if options.temper_then_mix else ff.features - {"temper-then-mix"}
@@ -1366,3 +1387,283 @@ def hidden_relative(contigs: ContigScores, weights: RelativesWeights, p_unknown:
     l_unk = np.log(p_unknown) + weights.logit(R, contigs.Su_comm, Tv)
     l_rel = np.log(p_unknown) + lw[best_bin] + R[rows, best_bin] / Tv
     return np.exp(l_rel - np.logaddexp(l_bins, l_unk))
+
+
+# ---- candidate 3 of WP3: the slot model (design C, dev log wp3_designs/design_C.md)
+SLOT_KAPPAS = (3.0, 10.0, 30.0, 100.0, float("inf"))
+SLOT_U_BOUNDS = (-12.0, 12.0)   # logit pi_h
+
+
+def _sigmoid_logs(u):
+    """log pi, log(1 - pi) for pi = sigmoid(u)."""
+    u = np.asarray(u, float)
+    return -np.logaddexp(0.0, -u), -np.logaddexp(0.0, u)
+
+
+def slot_piece_terms(S, R, Sc, fbin, distinct, T, u, p: float, need_grad: bool = True, proper: bool = False,
+                     split: bool = False):
+    """Losses and their gradient in logit pi for the slot model on calibration pieces (rows already selected).
+
+    A piece of bin g is scored against: the community draw (prior p, exp(Sc / T)) and H slots ((1 - p) / H each), slot
+    h holding h's own genome ((1 - pi_h) exp(S_h / T)) or an unbinned relative of h (pi_h exp(R_h / T)); every
+    explanation tempered, then mixed. Test A: the right answer is g's own genome. Test B (g removed, the objective of
+    0.10: the other bins keep (1 - p) / H): right = the community draw or a relative of any other bin. Returns
+    (loss A [n], loss B [n_B], grad [H] of mean A + mean B)."""
+    n, H = S.shape
+    Tc = np.asarray(T, float).reshape(-1, 1) if np.ndim(T) else float(T)
+    lpi, l1pi = _sigmoid_logs(u)
+    pi = np.exp(lpi)
+    c = np.log1p(-p) - np.log(H)
+    d = np.log(p) + Sc / (Tc[:, 0] if np.ndim(T) else Tc)
+    A = S / Tc + l1pi[None, :]
+    B = R / Tc + lpi[None, :]
+    slot = np.logaddexp(A, B)
+    rows = np.arange(n)
+    den = np.logaddexp(c + logsumexp(slot, axis=1), d)
+    la = den - (c + A[rows, fbin])
+    cap = -np.log(1e-12)
+    okA = la < cap
+    D = np.flatnonzero(distinct)
+    A2, B2 = A[D].copy(), B[D].copy()
+    A2[np.arange(len(D)), fbin[D]] = -np.inf
+    B2[np.arange(len(D)), fbin[D]] = -np.inf
+    cB = np.log1p(-p) - np.log(max(H - 1, 1)) if proper else c   # proper: the H - 1 remaining slots share 1 - p
+    good = np.logaddexp(d[D], cB + logsumexp(B2, axis=1))
+    bad = cB + logsumexp(A2, axis=1)
+    tot = np.logaddexp(good, bad)
+    lb = tot - good
+    okB = lb < cap
+    if not need_grad:
+        return np.minimum(la, cap), np.minimum(lb, cap), None
+    P_slot = np.exp(c + slot - den[:, None])
+    rho = np.exp(B - slot)
+    gA = P_slot * (rho - pi[None, :])
+    gA[rows, fbin] += pi[fbin]
+    gA[~okA] = 0.0
+    eBt, eBg, eAt = np.exp(cB + B2 - tot[:, None]), np.exp(cB + B2 - good[:, None]), np.exp(cB + A2 - tot[:, None])
+    gB = (1.0 - pi)[None, :] * (eBt - eBg) - pi[None, :] * eAt
+    gB[~okB] = 0.0
+    gA_mean = gA.sum(0) / max(n, 1)
+    gB_mean = gB.sum(0) / len(D) if len(D) else np.zeros(H)
+    if split:   # the gradients of mean A and of mean B separately
+        return np.minimum(la, cap), np.minimum(lb, cap), (gA_mean, gB_mean)
+    return np.minimum(la, cap), np.minimum(lb, cap), gA_mean + gB_mean
+
+
+@dataclass
+class SlotModel:
+    """Fitted slot model: pi [H] (P(relative | slot h)), pi_0 and kappa of the shrinkage, the temperature (law or one
+    value), eta of the relatives, and the CV table of kappa."""
+    pi: np.ndarray
+    pi0: float
+    kappa: float
+    law: SitesLaw | None
+    T: float | None
+    eta: float = ETA_REL
+    objective: float = float("nan")
+    rounds: int = 0
+    cv: list = field(default_factory=list)
+
+    def temperature(self, n_sites):
+        return self.law(n_sites) if self.law is not None else self.T
+
+    def unknown_logit(self, R, Sc, T, p_c: float) -> np.ndarray:
+        """Zu with p_c exp(Zu) = p_c exp(Sc / T) + (1 - p_c) / H sum_h pi_h exp(R_h / T): the unknown term of refine()
+        (community draw plus every bin's relative) at prior p_c."""
+        Tv = np.asarray(T, float)
+        Tc = Tv[:, None] if Tv.ndim else Tv
+        H = R.shape[1]
+        rel = logsumexp(R / Tc + np.log(np.maximum(self.pi, 1e-300))[None, :], axis=1)
+        return np.logaddexp(Sc / Tv, np.log1p(-p_c) - np.log(p_c) - np.log(H) + rel)
+
+    def summary(self) -> dict:
+        return {"pi0": self.pi0, "kappa": self.kappa, "eta": self.eta, "rounds": self.rounds,
+                "objective": self.objective, "pi_median": float(np.median(self.pi)),
+                "bins_pi_at_least_0.15": float(np.mean(self.pi >= 0.15)), "bins_pi_at_least_0.3": int((self.pi >= 0.3).sum()),
+                **({"law_a": self.law.a, "law_b": self.law.b} if self.law is not None else {"T": self.T})}
+
+
+def _slot_objective(arr5, T, u, priors, need_grad=True, sums=False):
+    """The calibration objective of the slot model: sum over (prior p, weight A, weight B) of wA mean(loss A) +
+    wB mean(loss B); legacy = ((0.1, 1, 1),) with the 0.10 test B, averaged = PRIOR_GRID with ((1 - p) / 5, p / 5) and
+    the proper test B. sums=True returns the summed (not mean) losses for cross-validation."""
+    S, R, Sc, fb, dist = arr5
+    proper = len(priors) > 1
+    val, grad = 0.0, 0.0
+    for p, wa, wb in priors:
+        la, lb, g = slot_piece_terms(S, R, Sc, fb, dist, T, u, p, need_grad=need_grad, proper=proper, split=True)
+        if sums:
+            val += wa * la.sum() + wb * lb.sum()
+        else:
+            val += wa * la.mean() + (wb * lb.mean() if len(lb) else 0.0)
+        if need_grad:
+            grad = grad + wa * g[0] + wb * g[1]
+    return float(val), grad
+
+
+def _slot_arrays(ff: FragmentFit, eta: float, rows=None):
+    k = np.flatnonzero(ff.kept) if rows is None else rows
+    return (ff.S[k], ff.R[eta][k], ff.Su_comm[k], ff.fbin[k], ff.distinct[k],
+            np.log(np.maximum(ff.n_sites[k], 1.0) / N_REF_SITES))
+
+
+def _fit_u(arr, T, priors, u0, kappa, pi0, pooled: bool):
+    """pi given the temperature: L-BFGS-B on logit pi (one shared value when pooled) with the pseudo-count penalty."""
+    from scipy.optimize import minimize
+    N, H = len(arr[0]), arr[0].shape[1]
+
+    def f(v):
+        u = np.full(H, v[0]) if pooled else v
+        val, g = _slot_objective(arr[:5], T, u, priors)
+        if not pooled and np.isfinite(kappa):
+            pi = 1.0 / (1.0 + np.exp(-u))
+            lpi, l1pi = _sigmoid_logs(u)
+            val -= float(kappa * (pi0 * lpi + (1 - pi0) * l1pi).sum()) / N
+            g = g - (kappa / N) * (pi0 - pi)
+        return val, (np.array([g.sum()]) if pooled else g)
+    x0 = np.array([float(np.mean(u0))]) if pooled else np.asarray(u0, float)
+    r = minimize(f, x0, jac=True, method="L-BFGS-B", bounds=[SLOT_U_BOUNDS] * len(x0), options={"maxiter": 500})
+    return (np.full(H, r.x[0]) if pooled else r.x), float(r.fun)
+
+
+def _fit_T(arr, u, priors, law_mode: bool, start, temps):
+    """The temperature given pi: the law (a, b) by L-BFGS-B from `start`, or the best grid value >= 1."""
+    from scipy.optimize import minimize
+    x = arr[5]
+
+    def obj_T(T):
+        return _slot_objective(arr[:5], T, u, priors, need_grad=False)[0]
+    if not law_mode:
+        vals = [(obj_T(T), float(T)) for T in temps if T >= 1.0]
+        return min(vals)[1], min(vals)[0]
+    lo, hi = np.log(T_MIN) - 3.0, np.log(100.0)
+    f = lambda v: obj_T(np.maximum(T_MIN, np.exp(v[0] + v[1] * x)))
+    r = minimize(f, x0=[start.a, start.b], method="L-BFGS-B", bounds=[(lo, hi), (0.0, 1.0)], options={"maxiter": 100})
+    return SitesLaw(float(r.x[0]), float(r.x[1])), float(r.fun)
+
+
+def _fit_slot(arr, priors, kappa, pi0, law_mode, temps, u0, T0, pooled=False, max_rounds=20, tol=1e-6, T_fixed=None):
+    u, T, prev, it = np.asarray(u0, float), T0, np.inf, 0
+    x = arr[5]
+    for it in range(1, max_rounds + 1):
+        if T_fixed is None:
+            T, _ = _fit_T(arr, u, priors, law_mode, T, temps)
+        Tv = (T(np.exp(x) * N_REF_SITES) if law_mode else T) if T_fixed is None else T_fixed
+        u, val = _fit_u(arr, Tv, priors, u, kappa, pi0, pooled)
+        if abs(prev - val) < tol or T_fixed is not None:
+            break
+        prev = val
+    return u, T, val, it
+
+
+def fit_slot_model(ff: FragmentFit, law_mode: bool = True, p_cal: float = 0.1, kappa=None, eta: float = ETA_REL,
+                   folds: int = 5, objective: str = "legacy", test_b: str = "decidable", log=print) -> SlotModel:
+    """The slot model fitted on the calibration pieces: pi_0 by the pooled fit (kappa = inf), kappa by 5-fold CV over
+    source contigs (folds stratified by bin, the temperature held at the pooled full-data fit), then pi_h and the
+    temperature jointly at the chosen kappa (alternating; deterministic starts: pi = 0.02, T from the pooled fit)."""
+    arr = _slot_arrays(ff, eta)
+    if test_b == "all":   # design C: every kept piece in test B (the undecidable ones are the sibling evidence)
+        arr = arr[:4] + (np.ones(len(arr[0]), bool),) + arr[5:]
+    elif test_b != "decidable":
+        raise ValueError(f"unknown slot test_b {test_b!r}")
+    H = arr[0].shape[1]
+    u0 = np.full(H, np.log(0.02 / 0.98))
+    if objective not in ("legacy", "averaged"):
+        raise ValueError(f"unknown slot objective {objective!r}")
+    priors = ((p_cal, 1.0, 1.0),) if objective == "legacy" else tuple(
+        (p, (1 - p) / len(PRIOR_GRID), p / len(PRIOR_GRID)) for p in PRIOR_GRID)
+    if law_mode:
+        T_start = SitesLaw(float(np.log(3.0)), 0.0)
+    else:
+        T_start = 3.0
+    u_pool, T_pool, val_pool, it_pool = _fit_slot(arr, priors, np.inf, 0.0, law_mode, ff.temps, u0, T_start, pooled=True)
+    pi0 = float(1.0 / (1.0 + np.exp(-u_pool[0])))
+    cv_rows = []
+    if kappa is None:
+        k = np.flatnonzero(ff.kept)
+        contig = ff.contig[k] if ff.contig is not None else np.arange(len(k))
+        fold = np.zeros(len(k), int)
+        for b in np.unique(ff.fbin[k]):           # contigs of each bin dealt round-robin in sorted order
+            cs = np.unique(contig[ff.fbin[k] == b])
+            fid = {c: j % folds for j, c in enumerate(cs)}
+            sel = np.flatnonzero(ff.fbin[k] == b)
+            fold[sel] = [fid[c] for c in contig[sel]]
+        x = arr[5]
+        Tv_pool = T_pool(np.exp(x) * N_REF_SITES) if law_mode else T_pool
+        for kap in SLOT_KAPPAS:
+            tot, n_tot = 0.0, 0
+            for f in range(folds):
+                tr, te = fold != f, fold == f
+                sub = lambda a: tuple(v[tr] for v in a)
+                Ttr = Tv_pool[tr] if law_mode else Tv_pool
+                u_f, _ = _fit_u(sub(arr), Ttr, priors, u_pool if np.isinf(kap) else u_pool.copy(), kap, pi0, np.isinf(kap))
+                Tte = Tv_pool[te] if law_mode else Tv_pool
+                v_te, _ = _slot_objective(tuple(v[te] for v in arr[:5]), Tte, u_f, priors, need_grad=False, sums=True)
+                tot += v_te
+                n_tot += int(te.sum())
+            cv_rows.append({"kappa": kap, "cv_log_loss_per_piece": tot / max(n_tot, 1)})
+        kappa = min(cv_rows, key=lambda r: r["cv_log_loss_per_piece"])["kappa"]
+    if np.isinf(kappa):
+        u, T, val, it = u_pool, T_pool, val_pool, it_pool
+    else:
+        u, T, val, it = _fit_slot(arr, priors, kappa, pi0, law_mode, ff.temps, u_pool.copy(), T_pool)
+    pi = 1.0 / (1.0 + np.exp(-u))
+    m = SlotModel(pi=pi, pi0=pi0, kappa=float(kappa), law=T if law_mode else None, T=None if law_mode else float(T),
+                  eta=eta, objective=val, rounds=it, cv=cv_rows)
+    tdesc = (f"log T = {T.a:.4f} + {T.b:.4f} log(sites / {N_REF_SITES:g}) (T at 300 / 3,000 / 30,000 sites "
+             f"{T(300):.3g} / {T(3000):.3g} / {T(30000):.3g})") if law_mode else f"T {T:g}"
+    log(f"  slot model: pi_0 {pi0:.4f}, kappa {kappa:g}" + (" (CV: " + ", ".join(f"{r['kappa']:g} {r['cv_log_loss_per_piece']:.5f}" for r in cv_rows) + ")" if cv_rows else "")
+        + f"; pi_h median {np.median(pi):.4f}, >= 0.15 in {np.mean(pi >= 0.15):.1%} of bins, >= 0.3 in {int((pi >= 0.3).sum())} bins; {tdesc}; {it} rounds")
+    return m
+
+
+def slot_decide(contigs: ContigScores, model: SlotModel, rules: dict, thr_c, thr_i, share_rows=None, log=print):
+    """Decisions under the slot model: p_c by the EM at T = 1 over "community draw" against "some slot" (bin and
+    relative together), then refine() at each contig's temperature with p_unknown = p_c, the bins' scores carrying
+    log(1 - pi_h) and the unknown term = community draw + every bin's relative. Returns (Refinement, p_c, T, extra)."""
+    from .refine import em_weight, refine
+    R = contigs.R[model.eta]
+    S, Sc = contigs.S, contigs.Su_comm
+    N, H = S.shape
+    lpi, l1pi = np.log(np.maximum(model.pi, 1e-300)), np.log1p(-np.minimum(model.pi, 1 - 1e-12))
+    unb = np.flatnonzero((contigs.given < 0) & contigs.decidable) if share_rows is None else np.asarray(share_rows)
+    slot1 = logsumexp(np.logaddexp(S[unb] + l1pi[None], R[unb] + lpi[None]), axis=1) - np.log(H)
+    prior = rules.get("p_unknown_prior", (1.0, 1.0))
+    p_c = float(em_weight(slot1, Sc[unb], *prior)[0])
+    T = model.temperature(contigs.n_sites)
+    Tv = np.broadcast_to(np.asarray(T, float), (N,))
+    S2 = S + Tv[:, None] * l1pi[None, :]
+    zu = model.unknown_logit(R, Sc, Tv, p_c)
+    ref = refine(S2, None, contigs.given, contigs.testable, Tv, thr_c, thr_i, p_unknown=p_c, decidable=contigs.decidable,
+                 Zu=zu, **rules)
+    # reports: slot masses and the unknown share including relatives, over the decided unbinned contigs
+    u_all = np.flatnonzero((contigs.given < 0) & contigs.decidable)
+    Tu = Tv[u_all][:, None]
+    A = S[u_all] / Tu + l1pi[None]
+    B = R[u_all] / Tu + lpi[None]
+    slot = np.logaddexp(A, B)
+    lc = np.log(p_c) + Sc[u_all] / Tv[u_all]
+    ls = np.log1p(-p_c) - np.log(H) + slot
+    tot = np.logaddexp(lc, logsumexp(ls, axis=1))
+    P_slot = np.exp(ls - tot[:, None])
+    rel = np.exp(B - slot)
+    mass = P_slot.sum(0)
+    p_u = float(np.mean(np.exp(lc - tot) + (P_slot * rel).sum(1)))
+    pi_bar = float((mass * model.pi).sum() / max(mass.sum(), 1e-300))
+    extra = {"p_c": p_c, "p_unknown_with_relatives": p_u, "pi_bar_slot_mass": pi_bar,
+             "slot_mass_share_pi_at_least_0.3": float(mass[model.pi >= 0.3].sum() / max(mass.sum(), 1e-300))}
+    log(f"  slot model decisions: p_c {p_c:.4f} (EM at T = 1), p_unknown with relatives {p_u:.4f}, slot-mass pi_bar "
+        f"{pi_bar:.4f}, slot mass at pi >= 0.3 {extra['slot_mass_share_pi_at_least_0.3']:.1%}")
+    return ref, p_c, T, extra
+
+
+def slot_hidden_relative(contigs: ContigScores, model: SlotModel, p_c: float, T, best_bin) -> np.ndarray:
+    """Per contig: P(an unbinned relative of best_bin explains it) under the slot model (report only)."""
+    S, R, Sc = contigs.S, contigs.R[model.eta], contigs.Su_comm
+    N, H = S.shape
+    Tv = np.broadcast_to(np.asarray(T, float), (N,))[:, None]
+    lpi, l1pi = np.log(np.maximum(model.pi, 1e-300)), np.log1p(-np.minimum(model.pi, 1 - 1e-12))
+    ls = np.log1p(-p_c) - np.log(H) + np.logaddexp(S / Tv + l1pi[None], R / Tv + lpi[None])
+    tot = np.logaddexp(np.log(p_c) + Sc / Tv[:, 0], logsumexp(ls, axis=1))
+    rows = np.arange(N)
+    return np.exp(np.log1p(-p_c) - np.log(H) + lpi[best_bin] + R[rows, best_bin] / Tv[:, 0] - tot)
