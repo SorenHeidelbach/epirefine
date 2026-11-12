@@ -7,14 +7,17 @@
 
 **Refine metagenome bins with nanopore methylation.** EpiRefine takes the bins from any binner and checks every
 contig against the methylation fingerprint of its bin. It removes contigs that don't belong (contamination) and
-puts unbinned contigs, such as plasmids, into the bin whose methylation they share. Every decision comes with a
-calibrated probability.
+puts unbinned contigs into the bin whose methylation they share. Every decision comes with a probability that is
+calibrated on pieces cut from the sample's own bins; very long contigs remain overconfident (see the
+[FAQ](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/faq.md#should-i-trust-every-flag)).
 
 ![What EpiRefine does to a bin](https://raw.githubusercontent.com/SorenHeidelbach/epirefine/main/docs/images/epirefine_overview.png)
 
-Bacteria methylate short DNA motifs everywhere in the cell, on the chromosome and on its plasmids and phages
-alike, and nanopore reads record that methylation. The set of methylated motifs is therefore a signature of the
-genome a contig comes from, and it is independent of the sequence composition and coverage that binners use.
+Bacteria methylate short DNA motifs everywhere in the cell, on the chromosome and usually on its plasmids and
+phages as well, and nanopore reads record that methylation. The set of methylated motifs is therefore a signature of
+the genome a contig comes from. It is measured separately from the sequence composition and coverage that binners
+use, so it can catch errors they miss, but it is not fully independent of them: decisions need at least 5x
+coverage, and in bins without methylated motifs the remaining signal follows GC content.
 
 **Contents:** [Install](#install) · [Quick start](#quick-start) · [What you get](#what-you-get) ·
 [Documentation](#documentation) · [When to trust it](#when-to-trust-it) · [Citing](#citing)
@@ -93,11 +96,19 @@ described in [docs/outputs.md](https://github.com/SorenHeidelbach/epirefine/blob
 
 ## When to trust it
 
-- **When EpiRefine acts, it is almost always right.** On benchmarks with known truth, every flagged contig was a
-  true contaminant and 99-100% of placements were into the right bin. It found 90-97% of planted contaminants,
-  against 13-34% for Nanomotif's refinement on the same data.
+- **Most of its calls are right, though less often on new data than on the data it was developed on.** On six
+  held-out monoculture communities, built from isolates not used during development (version 0.10.1; 0.11.0 gives the
+  same results), 311 of 316 flags (98.4%) were true contaminants and 1,096 of 1,180 placements (92.9%) went into
+  the right bin: 98.4% in the test set, 89.6% in the validation set, where contigs of genomes without a bin were
+  placed into bins with few methylated motifs. It found 311 of 363 planted contaminants (85.7%). On the development
+  benchmarks every flag and 99.8% of placements were right, and on the six training communities it found 94.8% of
+  the contaminants ([benchmarks/results.tsv](https://github.com/SorenHeidelbach/epirefine/blob/main/benchmarks/results.tsv)).
 - **It declines rather than guesses.** Contigs below 5x coverage, shorter than 1 kb or without informative
-  methylation get no decision. On a complex fecal sample that was about half of the assembly.
+  methylation get no decision. On a complex fecal sample (a development sample) that was 76% of the contigs and 31%
+  of the assembled sequence.
+- **Results depend on the motif table.** With some motif tables EpiRefine includes nothing at all; see
+  [known limitations](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/faq.md#known-limitations) for how
+  to recognise it in the log.
 - **Methylation cannot separate genomes that methylate the same motifs**, such as very close strains. EpiRefine
   then keeps both bins in its credible set or leaves the contig where it is.
 
