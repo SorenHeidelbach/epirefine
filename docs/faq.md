@@ -147,8 +147,8 @@ inclusion threshold, the 5x cut-off), so it is not an independent check. Things 
   and in `params.json` as `p_unknown` near 1 with `unknown_lam` below 1. A run in this state has no usable
   inclusion result. Since version 0.11.1 the relatives model is kept only when its gain is significant over bins, not
 over single calibration pieces, and the sample above then chooses the community-only model (about 500 inclusions).
-The choice still rests on a narrow margin there (1.4-1.9 standard errors against a limit of 2 over six sets of
-calibration pieces), so check these two log lines on every sample; `--calibration legacy` gives the earlier rule. See the
+The choice still rests on a narrow margin there (0.9-1.9 standard errors over bins against a limit of 2, on five
+sets of calibration pieces), so check these two log lines on every sample; `--calibration legacy` gives the earlier rule. See the
   [changelog](https://github.com/SorenHeidelbach/epirefine/blob/main/CHANGELOG.md).
 - **Bins merged from two genomes that differ in one motif are not detected.** On development sets built by merging
   two isolates' bins, a second genome that differed in several motifs had all its contigs flagged up to at least 40%
