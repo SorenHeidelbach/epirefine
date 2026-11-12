@@ -64,6 +64,9 @@ FEATURES = {
     "common-tau": "tau values are compared on the fragments every tau fit keeps",
     "em-priors": "p_unknown has a Beta(2, 2) prior; the contamination rate counts only contigs that pass the "
                  "methylome-difference gate",
+    "bin-parsimony": "the unknown model with relatives (lam < 1) must beat the community-only model by 2 SE with the "
+                     "standard error taken over bins (the fragments of a bin share its sibling bins), not over "
+                     "single fragments",
     "deployed-unknown": "an unknown model with relatives (lam < 1) is kept only if it still beats the community-only "
                         "model by 2 SE when each is scored on the fragments at the p_unknown it would be deployed "
                         "with (EM on the unbinned contigs), not at the reference prior of the fit",
@@ -79,9 +82,25 @@ COHERENT = ("temper-then-mix", "prior-averaged", "full-test-b", "common-tau", "e
 # correct confirmed defects of the 0.10 calibration (the order of tempering and mixing, tau compared over
 # different fragment sets, a flat prior on p_unknown, a contamination rate estimated before the gate).
 CONSISTENT = ("temper-then-mix", "common-tau", "em-priors")
-# The default since 0.11.1: the calibration of 0.10 plus the check of the unknown model at its deployed prior
-# (dev log proposal 2026-11-12). 'legacy' is the calibration of 0.10 and 0.11.0 exactly.
-DEFAULT = ("deployed-unknown",)
+# The default since 0.11.1: the calibration of 0.10 with the parsimony test of the unknown model resampled over
+# bins (dev log proposal 2026-11-12). 'legacy' is the calibration of 0.10 and 0.11.0 exactly.
+DEFAULT = ("bin-parsimony",)
+
+
+def clustered_se(dA, dB, cluster_a, cluster_b, n_boot: int = 400, seed: int = 0) -> float:
+    """Standard error of mean(dA) + mean(dB) by a bootstrap that resamples whole clusters (the bins the fragments
+    were cut from): the evidence for relatives is carried by sibling pairs of bins, a few of which hold most of
+    the gain (ZymoFecal: 5 of 213 bins hold 44% of the test-B gain), so fragments are not independent draws.
+    Each replicate takes the means over the fragments of the bins it drew."""
+    cl = np.unique(np.concatenate([cluster_a, cluster_b]))
+    ia, ib = np.searchsorted(cl, cluster_a), np.searchsorted(cl, cluster_b)
+    n = len(cl)
+    sA, nA = np.bincount(ia, dA, n), np.bincount(ia, minlength=n)
+    sB, nB = np.bincount(ib, dB, n), np.bincount(ib, minlength=n)
+    draws = np.random.default_rng(seed).integers(0, n, (n_boot, n))
+    a = sA[draws].sum(1) / np.maximum(nA[draws].sum(1), 1)
+    b = sB[draws].sum(1) / np.maximum(nB[draws].sum(1), 1) if len(dB) else 0.0
+    return float(np.std(a + b))
 
 
 def parse_features(spec) -> frozenset:
@@ -351,7 +370,8 @@ class FragmentFit:
         if fit["lam"] < 1 and simple:  # parsimony (D28): relatives only when they beat community-only by 2 SE
             alt = min(simple, key=lambda r: r["log_loss"])
             gain, se = self._paired_gain((fit["temperature"], fit["eta"], fit["lam"]),
-                                         (alt["temperature"], alt["eta"], alt["lam"]), priors)
+                                         (alt["temperature"], alt["eta"], alt["lam"]), priors,
+                                         by_bin="bin-parsimony" in self.features)
             keep_flexible = gain > 2 * se
             log(f"  unknown model: relatives (eta={fit['eta']:g}, lam={fit['lam']:g}) vs community only: log-loss gain "
                 f"{gain:.4f} +- {se:.4f} -> {'relatives' if keep_flexible else 'community only (not significant)'}")
@@ -381,7 +401,7 @@ class FragmentFit:
             out["curve"] = self._curve(out, priors, ok_T, log)
         return out
 
-    def _paired_gain(self, a, b, priors, n_boot: int = 200, by_contig: bool = False, priors_b=None):
+    def _paired_gain(self, a, b, priors, n_boot: int = 200, by_contig: bool = False, priors_b=None, by_bin: bool = False):
         """Objective(b) - objective(a) with a paired-bootstrap standard error over fragments, or over
         source contigs (by_contig: fragments of one contig share its departures from the bin, so resampling
         them one by one understates the error). priors_b: b's objective at other priors than a's."""
@@ -390,6 +410,9 @@ class FragmentFit:
         dA, dB = la0 - la1, lb0 - lb1
         gain = dA.mean() + (dB.mean() if len(dB) else 0.0)
         rng = np.random.default_rng(0)
+        if by_bin:  # feature bin-parsimony: whole bins resampled
+            k = np.flatnonzero(self.kept)
+            return float(gain), clustered_se(dA, dB, self.fbin[k], self.fbin[k][self.distinct[k]] if len(dB) else self.fbin[:0])
         if by_contig and self.contig is not None:
             k = np.flatnonzero(self.kept)
             _, inv = np.unique(self.contig[k], return_inverse=True)
@@ -804,7 +827,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         return la.mean() + lb.mean(), la.mean(), lb.mean()
 
     flen = frags_k["length"].to_numpy()
-    if not features - {"common-tau", "em-priors", "deployed-unknown"}:  # no feature that touches the temperature / unknown-model fit
+    if not features - {"common-tau", "em-priors", "deployed-unknown", "bin-parsimony"}:  # no feature that touches the temperature / unknown-model fit
         # the calibration of 0.10: prior p_unknown as passed (0.1), tests A and B weighted 1 : 1, the unknown's
         # mixture summed before tempering
         temp_rows, Su_by = [], {}
@@ -841,9 +864,12 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             boots = [dA[brng.integers(0, len(dA), len(dA))].mean()
                      + (dB[brng.integers(0, len(dB), len(dB))].mean() if len(dB) else 0.0) for _ in range(200)]
             se = float(np.std(boots))
+            if "bin-parsimony" in features:
+                se = clustered_se(dA, dB, fbin, fbin[distinct] if len(dB) else fbin[:0])
             keep_flexible = gain > 2 * se
             log(f"  unknown model: relatives (eta={fit['eta']:g}, lam={fit['lam']:g}) vs community only: log-loss gain "
-                f"{gain:.4f} +- {se:.4f} -> {'relatives' if keep_flexible else 'community only (not significant)'}")
+                f"{gain:.4f} +- {se:.4f}{' (over bins)' if 'bin-parsimony' in features else ''} -> "
+                f"{'relatives' if keep_flexible else 'community only (not significant)'}")
             if not keep_flexible:
                 fit = alt
         temperature, eta, lam = fit["temperature"], fit["eta"], fit["lam"]

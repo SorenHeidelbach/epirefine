@@ -54,14 +54,30 @@ def test_feature_is_parsed_and_not_in_the_named_sets():
     assert "deployed-unknown" in FEATURES
     assert parse_features("deployed-unknown") == frozenset({"deployed-unknown"})
     assert "deployed-unknown" not in parse_features("coherent") | parse_features("consistent")
-    assert parse_features("default") == frozenset({"deployed-unknown"}) and parse_features("legacy") == frozenset()
-    assert parse_features("default,-deployed-unknown") == frozenset()
+    assert parse_features("default") == frozenset({"bin-parsimony"}) and parse_features("legacy") == frozenset()
+    assert parse_features("default,-bin-parsimony") == frozenset()
+    assert "bin-parsimony" not in parse_features("coherent") | parse_features("consistent")
 
 
-def test_the_check_is_on_by_default(small_community, tmp_path, forced_relatives):
+def test_bin_parsimony_is_the_default_and_deployed_unknown_is_not(small_community, tmp_path, forced_relatives):
     run_community(small_community, tmp_path / "out", seed=3)
     p = json.loads((tmp_path / "out" / "params.json").read_text())
-    assert p["calibration_features"] == ["deployed-unknown"] and p["unknown_model_deployed_check"]["kept_relatives"] is False
+    assert p["calibration_features"] == ["bin-parsimony"] and "unknown_model_deployed_check" not in p
+
+
+def test_clustered_se_counts_bins_not_fragments():
+    """A gain carried by 2 of 40 bins: large against the fragment bootstrap, not against the bin bootstrap; a gain
+    shared by every bin stays significant."""
+    from epirefine.calibrate import clustered_se
+    rng = np.random.default_rng(1)
+    bins = np.repeat(np.arange(40), 25)
+    few = np.where(bins < 2, 2.0, 0.0) + rng.normal(0, 0.05, len(bins))
+    se_frag = np.std([few[rng.integers(0, len(few), len(few))].mean() for _ in range(300)])
+    se_bin = clustered_se(few, few[:0], bins, bins[:0])
+    assert few.mean() > 2 * se_frag and few.mean() < 2 * se_bin
+    spread = 0.1 + rng.normal(0, 0.05, len(bins))
+    assert spread.mean() > 2 * clustered_se(spread, spread[::2], bins, bins[::2])
+    assert clustered_se(few, few[:0], bins, bins[:0]) == clustered_se(few, few[:0], bins, bins[:0])  # fixed seed
 
 
 def _decisions(out):
