@@ -1,7 +1,9 @@
 # Options
 
-All options of `epirefine run`, grouped by what they control. The defaults were chosen on benchmarks with known
-truth and checked against Hi-C on a fecal sample; most users only set the inputs, `--out` and `--workers`.
+All options of `epirefine run`, grouped by what they control. The defaults were chosen during development, on
+monoculture benchmarks with known truth and on one fecal sample with Hi-C (ZymoFecal). Several thresholds (the 0.4
+methylome difference, the 0.9 inclusion threshold, the 5x coverage cut-off) were set on that fecal sample, so its Hi-C
+agreement is not an independent check of them. Most users only set the inputs, `--out` and `--workers`.
 
 [Inputs and output](#inputs-and-output) · [Decisions](#decisions) · [What gets judged](#what-gets-judged) ·
 [Motifs](#motifs) · [Long contigs](#long-contigs) · [Model and calibration](#model-and-calibration) ·
@@ -34,7 +36,7 @@ truth and checked against Hi-C on a fecal sample; most users only set the inputs
 
 | Option | Default | What it does |
 |---|---|---|
-| `--min-contig-coverage` | 5 | Contigs with a median below this many reads per motif site get no decision (status `low_coverage`). Against Hi-C, flags below 5x were right only 12.5% of the time. 0 judges all. |
+| `--min-contig-coverage` | 5 | Contigs with a median below this many reads per motif site get no decision (status `low_coverage`). On a fecal development sample, Hi-C confirmed only 4 of 41 flags below 5x (9.8%). 0 judges all. |
 | `--min-contig-length` | 1000 | Shorter contigs get no decision (status `too_short`). 0 judges all. |
 | `--min-evidence` | 3.0 | Contigs whose expected methylation evidence (in nats) is below this get status `no_methylation_evidence`: they carry too little methylation to tell bins apart. |
 | `--min-cov` | 1 | Motif sites with fewer reads than this are ignored. |
@@ -77,8 +79,8 @@ estimates. Leave them unset unless you are testing the model.
 | `--frag-budget` | 6000 | Total number of calibration pieces, spread over bins and lengths. |
 | `--frags-per-bin` | 30 | At most this many pieces per bin and length. |
 | `--contam-eps` | 0.05 | Prior share of foreign pieces in a bin when building its fingerprint (0 = trust every piece; the regional model for long contigs is then off too, and the log says so; must be below 1). |
-| `--robust-fit` | `alternating` | `damped`: iterate the bin fingerprints in damped steps until they settle (slower; same results on every benchmark so far). |
-| `--unknown-prior` | `bins` | `unbinned`: a genome without a bin is assumed to carry each motif as often as the unbinned contigs do, not as often as the bins do. Far fewer contigs of genomes without a bin are placed into bins with no or one common motif; fewer contigs without a site of their bin's motifs are put back. |
+| `--robust-fit` | `alternating` | `damped`: iterate the bin fingerprints in damped steps until they settle (slower; the same flags and inclusions on the development benchmarks it was tried on). |
+| `--unknown-prior` | `bins` | `unbinned`: a genome without a bin is assumed to carry each motif as often as the unbinned contigs do, not as often as the bins do. On development sets, far fewer contigs of genomes without a bin were placed into bins with no or one common motif (13 -> 0 and 233 -> 16 in two test sets), and fewer removed contigs were put back (training communities 89.3% -> 81.8%). Not tested on held-out data or a metagenome. |
 | `--unknown-prior-strength` | 5 | With `--unknown-prior unbinned`: pseudo-contigs at the bins' frequency (large values return to `bins`). |
 | `--redundancy-order` | `independent` | `sequential`: inclusion candidates of a bin are compared with the bin plus the candidates already accepted (most probable first), so two unbinned copies of one sequence are not both included. |
 | `--regional-leave-out`, `--regional-withdraw`, `--regional-tempered` | `chunk`, `vs_foreign`, off | Variants of the regional model: `contig` scores a long contig's pieces against the bin without the whole contig; `largest` withdraws a flag as `mixed` only when mixed is the most probable of member / foreign / mixed. |
