@@ -117,9 +117,11 @@ stricter than this file, it wins.
 - A replay of stored calibration data is a cheap first test, not proof. A replay that holds one model
   choice fixed can predict the opposite of the full run.
 - **Speed and memory changes** must leave the decisions, tau and the temperature identical, and the
-  outputs byte-identical where possible. Report peak memory, and do not raise it without the user's
-  agreement. Iterate on the smallest input that shows the effect, one measurement per step; run the
-  full-size benchmark at milestones.
+  outputs byte-identical where possible. Report peak memory. As a rule it does not go up; an increase
+  is acceptable when a measured gain elsewhere justifies it, and then both numbers and the reason are
+  recorded. Iterate on the smallest input that shows the effect, one measurement per step; run the
+  full-size benchmark at milestones. Timings reported in a paper are the median of three runs, each
+  alone on the machine.
 - Report the effect of every implemented change as numbers: what got faster or slower and by how
   much, which metric moved, on which benchmark. Say so plainly when nothing measurable changed, or
   when something got worse.
