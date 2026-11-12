@@ -186,3 +186,21 @@ def test_per_bin_relatives_run_end_to_end(community, base_run, tmp_path):
     p = hr["p_hidden_relative"].to_numpy()
     assert np.all((p >= 0) & (p <= 1))
     assert "relatives per bin" in run.log and "relatives_per_bin" in _params(run)
+
+
+def test_core_temper_then_mix_uses_the_coherent_unknown_term():
+    from epirefine.model import unknown_logit
+    c = _contigs()
+    fit = {"temperature": 3.0, "eta": 0.05, "lam": 0.5, "curve": None}
+    rules = dict(contamination_threshold=0.5, include_threshold=0.9)
+    res = calibrate_decisions(None, c, rules, CoreOptions(temper_then_mix=True), fit=fit, log=lambda *a: None)
+    zu = unknown_logit(c.R[0.05], c.Su_comm, 0.05, 0.5, 3.0, temper_then_mix=True)
+    ref = refine(c.S, None, c.given, c.testable, 3.0, 0.5, 0.9, decidable=c.decidable, Zu=zu)
+    assert res.p_unknown == ref.p_unknown and np.array_equal(res.refinement.include_bin, ref.include_bin)
+
+
+def test_core_options_with_the_temper_then_mix_feature_run(community, base_run, tmp_path):
+    out = copy_cache(base_run, tmp_path / "out")
+    run = run_pipeline(**community.args(out), cache_dir=str(out / "cache"), unknown_share="t1",
+                       calibration="default,temper-then-mix")
+    assert "unknown share by the EM at T = 1" in run.log

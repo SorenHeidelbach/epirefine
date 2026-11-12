@@ -8,6 +8,8 @@ number of motifs is held in memory.
 """
 from __future__ import annotations
 
+import dataclasses
+
 import json
 from types import SimpleNamespace
 import os
@@ -233,11 +235,13 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     core = CoreOptions(tau_select=tau_select, npmle_start=npmle_start, unknown_share=unknown_share,
                        temperature_law=temperature_law, evidence_temperature=evidence_temperature,
                        relatives=relatives)
-    if not core.decisions_default and features & {"temper-then-mix", "sites-temperature", "prior-matched",
-                                                   "prior-averaged", "unit-temperature", "deployed-unknown"}:
-        raise ValueError("--unknown-share, --temperature-law and --evidence-temperature cannot be combined with the "
-                         "calibration features temper-then-mix, sites-temperature, prior-matched, prior-averaged, "
-                         "unit-temperature or deployed-unknown")
+    if not core.decisions_default:
+        if features & {"sites-temperature", "prior-matched", "prior-averaged", "unit-temperature", "deployed-unknown"}:
+            raise ValueError("--unknown-share, --temperature-law, --evidence-temperature and --relatives cannot be "
+                             "combined with the calibration features sites-temperature, prior-matched, prior-averaged, "
+                             "unit-temperature or deployed-unknown")
+        # the feature temper-then-mix is carried by the core path (the unknown's order of tempering and mixing)
+        core = dataclasses.replace(core, temper_then_mix="temper-then-mix" in features)
     if not core.decisions_default and (unlisted_genome or regional_inclusion or not do_calibrate):
         raise ValueError("--unknown-share, --temperature-law and --evidence-temperature need the calibration and cannot "
                          "be combined with --unlisted-genome or --regional-inclusion")
@@ -689,6 +693,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     bin_ev = bin_evidence_table(bins, grid.summarize(model.log_prof), n_sites_group, given)
     unmeth_bins = (bin_ev["status"] == "no_methylation_detected").to_numpy()
     new_path = bool(features & {"temper-then-mix", "sites-temperature", "prior-matched", "prior-averaged", "unit-temperature"})
+    new_path = new_path and core.decisions_default   # the core options carry temper-then-mix themselves
     em_kw = dict(p_unknown_prior=(2.0, 2.0), eps_after_gate=True) if "em-priors" in features else {}
     if fit is None:  # no calibration: one temperature, the unknown model as set
         fit = {"temperature": float(temperature), "eta": model.eta, "lam": model.lam, "curve": None}
@@ -737,6 +742,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
             params.update(temperature=float(np.median(np.atleast_1d(temperature))),
                           temperature_by_sites=res.law.table() if res.law is not None else None,
                           p_unknown_t1=res.p_unknown_t1, unknown_eta=fit["eta"], unknown_lam=fit["lam"])
+        if core.temper_then_mix and res.weights is None and res.fit["lam"] < 1:
+            T_contig = res.T_contig
+            Zu = unknown_logit(sc.R, sc.Su_comm, res.fit["eta"], res.fit["lam"], T_contig, temper_then_mix=True)
         if res.weights is not None:
             Zu = None   # the decisions' posterior below is rebuilt from the mixture
             params["relatives_per_bin"] = res.weights.summary()

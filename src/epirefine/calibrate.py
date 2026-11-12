@@ -25,6 +25,7 @@ from __future__ import annotations
 import numpy as np
 import polars as pl
 
+import dataclasses
 from dataclasses import dataclass, field
 
 from scipy.special import expit, logsumexp
@@ -1002,6 +1003,7 @@ class CoreOptions:
     temperature_law: str = "grid"         # 'grid' (one T from the 31-point grid, 0.11) | 'sites'
     evidence_temperature: str = "median"  # 'median' (0.11) | 'contig' (each contig's own T in the evidence cut-off)
     relatives: str = "switch"             # 'switch' (one model for all bins, 2-SE rule, 0.11) | 'per-bin' (weights)
+    temper_then_mix: bool = False         # the unknown's explanations tempered, then mixed (feature temper-then-mix)
 
     def __post_init__(self):
         for name, ok in (("tau_select", ("per-group", "inf")), ("npmle_start", ("warm", "cold")),
@@ -1013,8 +1015,8 @@ class CoreOptions:
     @property
     def decisions_default(self) -> bool:
         """True when the decision stage is that of 0.11.1 (the upstream options may still differ)."""
-        return ((self.unknown_share, self.temperature_law, self.evidence_temperature, self.relatives)
-                == ("deployed", "grid", "median", "switch"))
+        return ((self.unknown_share, self.temperature_law, self.evidence_temperature, self.relatives, self.temper_then_mix)
+                == ("deployed", "grid", "median", "switch", False))
 
 
 @dataclass
@@ -1164,6 +1166,10 @@ def calibrate_decisions(ff: FragmentFit | None, contigs: ContigScores, rules: di
     p_user = rules.pop("p_unknown", None)
     thr_c = rules.pop("contamination_threshold", 0.5)
     thr_i = rules.pop("include_threshold", 0.9)
+    if ff is not None and options.temper_then_mix != ff.coherent:
+        # the pieces are scored in the order of tempering and mixing the decisions use
+        feats = ff.features | {"temper-then-mix"} if options.temper_then_mix else ff.features - {"temper-then-mix"}
+        ff = dataclasses.replace(ff, features=frozenset(feats), _cache={})
     if fit is None:
         if ff is None:
             raise ValueError("calibrate_decisions: no calibration pieces and no fit")
@@ -1195,6 +1201,13 @@ def calibrate_decisions(ff: FragmentFit | None, contigs: ContigScores, rules: di
         Rc = contigs.R[weights.eta]
         Su1 = weights.logit(Rc, contigs.Su_comm, 1.0)          # the unknown at T = 1 (both orders agree there)
         zu_of = lambda Tx, rows=slice(None): weights.logit(Rc[rows], contigs.Su_comm[rows], Tx)
+    elif options.temper_then_mix and lam < 1:
+        if eta not in contigs.R:
+            raise ValueError(f"calibrate_decisions: no contig scores for relatives at eta {eta:g}")
+        Rc = contigs.R[eta]
+        Su1 = unknown_logit(Rc, contigs.Su_comm, eta, lam, 1.0, temper_then_mix=True)
+        zu_of = lambda Tx, rows=slice(None): unknown_logit(Rc[rows], contigs.Su_comm[rows], eta, lam, Tx,
+                                                           temper_then_mix=True)
     else:
         Su1 = _su_for(contigs, eta, lam)
         if Su1 is None:
@@ -1214,7 +1227,7 @@ def calibrate_decisions(ff: FragmentFit | None, contigs: ContigScores, rules: di
         Tu = T[unb] if np.ndim(T) else T
         l_bins = logsumexp(contigs.S[unb] / (Tu[:, None] if np.ndim(Tu) else Tu), axis=1) - np.log(contigs.S.shape[1])
         p_fixed = float(em_weight(l_bins, zu_of(Tu, unb), *prior)[0])
-    if weights is None:
+    if weights is None and not (options.temper_then_mix and lam < 1):
         ref = refine(contigs.S, Su1, contigs.given, contigs.testable, T, thr_c, thr_i, p_unknown=p_fixed,
                      decidable=contigs.decidable, **rules)
     else:
