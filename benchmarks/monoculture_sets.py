@@ -26,6 +26,16 @@ synthetic communities from them with realistic problems, in three disjoint sets:
 The data root is --data-root or the EPIREFINE_DATA environment variable; the sets are written to
 <data root>/benchmarks/mono_bench (or --out), and the suite file lists them relative to that directory.
 
+Reproducibility of the piece cuts. Each isolate is cut with its own generator, seeded from the isolate's name by
+isolate_seed() (SHA-256, the same in every process). Up to 0.11.0 the seed was Python's built-in hash() of the
+name, which is salted per process unless PYTHONHASHSEED is set, so the cuts of the sets stored under
+<data root>/benchmarks/mono_bench (built 2026-10-27) cannot be regenerated from code: no PYTHONHASHSEED from 0 to
+299 reproduces them, and the default salt is random. The cuts are kept as data instead: isolates/<isolate>.pieces.tsv
+(and every community's pieces.tsv) hold each piece's parent, start and end, and fragment_isolate() reuses the cached
+pieces of an isolate when they exist, so rebuilding into the same directory keeps the stored cuts. Everything after
+the cuts (genus split, community draws, thinning, planted errors) comes from --seed and was reproducible before.
+Building into a new directory with this version gives different cuts than the stored sets.
+
 Writes, per community, assembly.fasta, pileup.bed, contig_bin.tsv, bin-motifs.tsv, truth_actions.tsv
 (perturb_bins.py's columns) and pieces.tsv (piece, isolate, parent contig, plasmid, coverage factor),
 plus isolates.tsv (isolate, genus, split, coverage) and a suite file for benchmark_suite.py with groups
@@ -34,6 +44,7 @@ mono-train, mono-test, mono-val.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -51,6 +62,12 @@ from epirefine import io as pio  # noqa: E402
 COLS = [f"c{i}" for i in range(1, 19)]  # modkit bedMethyl, 18 columns
 COUNTS = ["c12", "c13", "c14", "c15", "c16", "c17", "c18"]  # Nmod Ncanonical Nother Ndelete Nfail Ndiff Nnocall
 SUITE_ROOT = "benchmarks/mono_bench"  # where the sets live below the data root; recorded as the suite file's "root"
+
+
+def isolate_seed(name: str) -> int:
+    """Seed of an isolate's cutting generator: the first 4 bytes of the SHA-256 of its name. The same in every
+    process (the built-in hash() used before is salted per process; see the module docstring)."""
+    return int.from_bytes(hashlib.sha256(name.encode()).digest()[:4], "little")
 
 
 def discover(table: str) -> pl.DataFrame:
@@ -106,6 +123,11 @@ def fragment_isolate(row: dict, cache: Path, lo: int, hi: int, rng) -> tuple[Pat
          .drop("c1", "p0").rename({"piece": "c1"}).select(COLS))
     p.write_parquet(pq)
     return pq, pdf
+
+
+def cut_isolate(row: dict, cache: Path, lo: int, hi: int) -> tuple[Path, pl.DataFrame]:
+    """fragment_isolate with the isolate's own generator (isolate_seed): the cuts depend on the name only."""
+    return fragment_isolate(row, cache, lo, hi, np.random.default_rng(isolate_seed(row["isolate"])))
 
 
 def thin(p: pl.DataFrame, f: float, rng) -> pl.DataFrame:
@@ -175,7 +197,7 @@ def main():
 
     covs, frag = {}, {}
     for row in iso.iter_rows(named=True):
-        pq, pieces = fragment_isolate(row, cache, a.min_len, a.max_len, np.random.default_rng(abs(hash(row["isolate"])) % 2**32))
+        pq, pieces = cut_isolate(row, cache, a.min_len, a.max_len)
         frag[row["isolate"]] = (pq, pieces)
         covs[row["isolate"]] = median_coverage(pq)
         print(f"  {row['isolate']}: {pieces.height} pieces, median coverage {covs[row['isolate']]:.0f}x")
