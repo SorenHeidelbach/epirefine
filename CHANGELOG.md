@@ -24,8 +24,9 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   - Six monoculture training communities, six ZymoOral scenarios and three simulated look-alike communities
     (where the relatives model stays, at 5.0-5.4 standard errors over bins): every benchmark metric identical to
     0.11.0.
-  - Known limit: on ZymoFecal the choice rests on a narrow margin (1.4-1.9 standard errors over bins against the
-    limit of 2), and 16 inclusions depend on which calibration pieces are drawn. Flags do not.
+  - Known limit: on ZymoFecal the choice rests on a narrow margin (0.9-1.9 standard errors over bins against the
+    limit of 2, on five draws of the calibration pieces), and 16 inclusions depend on which calibration pieces are
+    drawn. Flags do not.
 - The 0.11.0 entry below says that flagged and included contigs were identical on ZymoFecal throughout the speed
   work; those runs made no inclusion at all (the collapse above), so the inclusion path was first checked on a
   metagenome with this version.
