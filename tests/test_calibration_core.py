@@ -172,6 +172,59 @@ def test_relatives_weights_concentrate_on_sibling_bins():
     assert 0.8 < w.lam < 0.95                            # 2 of 20 bins' pieces are relatives' pieces
 
 
+def test_community_only_removes_the_switch():
+    """--relatives community-only: where the switch picks relatives, the fit becomes the community-only row the 2-SE
+    rule falls back to; the decisions are those of that fit (lam = 1)."""
+    ff = _sibling_pieces()
+    fit0 = ff.fit(0.1, log=lambda *a: None)
+    assert fit0["lam"] < 1                                   # the switch picks relatives on these pieces
+    rows = [r for r in fit0["temperature_fit"] if r["lam"] >= 1 and r["temperature"] >= 1.0]
+    best = min(rows, key=lambda r: r["log_loss"])
+    c = _contigs(H=ff.H)
+    rules = dict(contamination_threshold=0.5, include_threshold=0.9)
+    opts = CoreOptions(relatives="community-only", unknown_share="t1")
+    res = calibrate_decisions(ff, c, rules, opts, log=lambda *a: None)
+    assert res.fit["lam"] == 1.0 and res.fit["temperature"] == best["temperature"]
+    assert res.fit["switch_choice"]["lam"] == fit0["lam"]
+    same = calibrate_decisions(None, c, rules, CoreOptions(unknown_share="t1"), log=lambda *a: None,
+                               fit={"temperature": best["temperature"], "eta": best["eta"], "lam": 1.0, "curve": None})
+    assert res.p_unknown == same.p_unknown and np.array_equal(res.refinement.include_bin, same.refinement.include_bin)
+    with pytest.raises(ValueError, match="community-only"):
+        calibrate_decisions(ff, c, rules, opts, fit=dict(fit0), log=lambda *a: None)
+
+
+def test_community_only_runs_end_to_end(community, base_run, tmp_path, monkeypatch):
+    """On the test community the switch chooses community only: forcing it changes no decision. With a calibration
+    made to report relatives, the pipeline replaces them by the community-only row and decides as before."""
+    import epirefine.pipeline as P
+    out2 = copy_cache(base_run, tmp_path / "out2")
+    ref = run_pipeline(**community.args(out2), cache_dir=str(out2 / "cache"), unknown_share="t1")
+    assert _params(ref)["unknown_lam"] == 1.0
+    out = copy_cache(base_run, tmp_path / "out")
+    run = run_pipeline(**community.args(out), cache_dir=str(out / "cache"), relatives="community-only",
+                       unknown_share="t1")
+    par = _params(run)
+    assert par["relatives"] == "community-only" and par["unknown_lam"] == 1.0 and "unknown_model_forced" not in par
+    assert run.table("contig_decisions.tsv").equals(ref.table("contig_decisions.tsv"))
+
+    real = P.calibrate
+
+    def relatives_chosen(*a, **k):   # as if the switch had picked relatives at another temperature
+        cal = real(*a, **k)
+        T = cal["temperature"] * 3
+        cal["fit"] = dict(cal["fit"], eta=0.05, lam=0.1, temperature=T)
+        cal.update(eta=0.05, lam=0.1, temperature=T)
+        return cal
+    monkeypatch.setattr(P, "calibrate", relatives_chosen)
+    out3 = copy_cache(base_run, tmp_path / "out3")
+    forced = run_pipeline(**community.args(out3), cache_dir=str(out3 / "cache"), relatives="community-only",
+                          unknown_share="t1")
+    par3 = _params(forced)
+    assert par3["unknown_model_forced"]["switch_lam"] == 0.1 and par3["unknown_lam"] == 1.0
+    assert "unknown model forced to community only" in forced.log
+    assert forced.table("contig_decisions.tsv").equals(ref.table("contig_decisions.tsv"))
+
+
 def test_relatives_logit_renormalises_without_the_own_bin():
     w = RelativesWeights(lam=0.5, w=np.array([0.25, 0.25]), alpha=1.0)
     R = np.array([[0.0, 0.0]]); Su = np.array([0.0])

@@ -219,13 +219,14 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--evidence-temperature", choices=["median", "contig"], default="median",
                    help="temperature of the methylation-evidence cut-off (--min-evidence): the median over contigs, or each "
                         "contig's own (only differs with --temperature-law sites)")
-    g.add_argument("--relatives", choices=["switch", "per-bin", "slot"], default="switch",
+    g.add_argument("--relatives", choices=["switch", "per-bin", "slot", "community-only"], default="switch",
                    help="model of genomes without a bin: one model for all bins, relatives or community only by a 2-SE "
                         "test (switch), or one mixture with a relatives weight per bin fitted on the calibration pieces "
                         "(per-bin; also writes hidden_relative.tsv: the probability that an unbinned relative of the bin "
                         "explains each contig, report only), or the slot model (slot: each bin's slot holds its own "
                         "genome or an unbinned relative, a weight per bin fitted with the temperature; needs "
-                        "--unknown-share t1)")
+                        "--unknown-share t1), or the switch removed: community only always, the relatives test "
+                        "logged only (community-only)")
     g.add_argument("--slot-objective", choices=["legacy", "averaged"], default="legacy",
                    help="calibration objective of the slot model: prior 0.1, host-present and host-absent pieces 1 : 1 (legacy), or "
                         "averaged over priors 0.1 ... 0.9, the host-absent pieces scored with a proper prior (averaged)")

@@ -1003,6 +1003,7 @@ class CoreOptions:
     temperature_law: str = "grid"         # 'grid' (one T from the 31-point grid, 0.11) | 'sites'
     evidence_temperature: str = "median"  # 'median' (0.11) | 'contig' (each contig's own T in the evidence cut-off)
     relatives: str = "switch"             # 'switch' (one model for all bins, 2-SE rule, 0.11) | 'per-bin' (weights)
+    #                                       | 'slot' | 'community-only' (the switch removed: lam = 1 always)
     temper_then_mix: bool = False         # the unknown's explanations tempered, then mixed (feature temper-then-mix)
     slot_kappa: float | None = None       # relatives 'slot': the shrinkage strength (None: by cross-validation)
     slot_objective: str = "legacy"        # relatives 'slot': 'legacy' (prior 0.1, tests 1 : 1) | 'averaged' (PRIOR_GRID)
@@ -1011,7 +1012,7 @@ class CoreOptions:
     def __post_init__(self):
         for name, ok in (("tau_select", ("per-group", "inf")), ("npmle_start", ("warm", "cold")),
                          ("unknown_share", ("deployed", "t1")), ("temperature_law", ("grid", "sites")),
-                         ("evidence_temperature", ("median", "contig")), ("relatives", ("switch", "per-bin", "slot"))):
+                         ("evidence_temperature", ("median", "contig")), ("relatives", ("switch", "per-bin", "slot", "community-only"))):
             if getattr(self, name) not in ok:
                 raise ValueError(f"unknown {name} {getattr(self, name)!r}; choose from {', '.join(ok)}")
 
@@ -1146,6 +1147,21 @@ def _su_for(contigs: ContigScores, eta, lam):
     return None if R is None else unknown_score(R, contigs.Su_comm, eta, lam)
 
 
+def community_only(fit: dict, allow_sharpening: bool = False, log=print) -> dict:
+    """--relatives community-only (WP3, option E of question U13): the unknown-model switch removed. The fit of
+    FragmentFit.fit is replaced by its best community-only row (lam = 1) at a temperature that may be used, the row
+    the 2-SE rule falls back to when relatives are not significant; a fit that already chose community only is
+    returned unchanged. The relatives test itself is still run and logged by the fit (report only)."""
+    if fit["lam"] >= 1:
+        return fit
+    simple = [r for r in fit["temperature_fit"] if r["lam"] >= 1 and (allow_sharpening or r["temperature"] >= 1.0)]
+    alt = min(simple, key=lambda r: r["log_loss"])
+    log(f"  unknown model forced to community only (--relatives community-only): the switch chose relatives "
+        f"(eta={fit['eta']:g}, lam={fit['lam']:g}, T={fit['temperature']:g}); community only at T={alt['temperature']:g}")
+    return dict(fit, temperature=float(alt["temperature"]), eta=float(alt["eta"]), lam=1.0, curve=None,
+                switch_choice={"eta": fit["eta"], "lam": fit["lam"], "temperature": fit["temperature"]})
+
+
 def calibrate_decisions(ff: FragmentFit | None, contigs: ContigScores, rules: dict, options: CoreOptions = CoreOptions(),
                         fit: dict | None = None, p_cal: float = 0.1, share_rows=None, log=print) -> CalibrationResult:
     """Calibration pieces in; model choice, temperature (law), unknown share and the decisions before the redundancy
@@ -1195,6 +1211,10 @@ def calibrate_decisions(ff: FragmentFit | None, contigs: ContigScores, rules: di
         if ff is None:
             raise ValueError("calibrate_decisions: no calibration pieces and no fit")
         fit = ff.fit(p_cal, log=log)
+        if options.relatives == "community-only":
+            fit = community_only(fit, ff.allow_sharpening, log=log)
+    elif options.relatives == "community-only" and fit["lam"] < 1:
+        raise ValueError("--relatives community-only: the fit passed in has relatives (lam < 1)")
     fit = dict(fit)
     eta, lam = fit["eta"], fit["lam"]
     weights = None

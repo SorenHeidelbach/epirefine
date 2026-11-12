@@ -327,9 +327,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     temperature in the methylation-evidence cut-off). relatives: 'switch' (one unknown model for all bins, chosen by
     the 2-SE rule) or 'per-bin' (one mixture with a relatives weight per bin, fitted on the pieces; writes
     calibration/relatives_by_bin.tsv and hidden_relative.tsv, report only) or 'slot' (design C: each bin's slot holds
-    its own genome or an unbinned relative, pi_h fitted jointly with the temperature; needs unknown_share 't1';
-    slot_objective 'legacy' | 'averaged', slot_test_b 'decidable' | 'all', slot_kappa None = cross-validated). See
-    calibrate.calibrate_decisions.
+    its own genome or an unbinned relative, pi_h fitted jointly with the temperature; needs unknown_share 't1')
+    or 'community-only' (the switch removed: the community-only fit always, the relatives test logged only).
+    Slot model: slot_objective 'legacy' | 'averaged', slot_test_b 'decidable' | 'all', slot_kappa None =
+    cross-validated. See calibrate.calibrate_decisions.
     calibration_exclusion: False keeps the calibration fragments from chunks called foreign (diagnostic only).
     seed: the motif-grouping sample (and the calibration pieces unless calibration_seed is given);
     calibration_seed: the calibration pieces only (default: seed). Each random step has its own generator."""
@@ -596,6 +597,20 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                      "assignability", "fragments"):
             _write(cal[name], out / "calibration" / f"{name}.tsv")
         tau = cal["tau"] if tau is None else tau
+        if relatives == "community-only" and fit["lam"] < 1:
+            # the switch removed (WP3, U13 option E): the community-only row the 2-SE rule falls back to; the
+            # relatives test above stays in the log and in params.json as a report
+            com = cal["community"]
+            if com is None:
+                raise ValueError("--relatives community-only: the calibration has no community-only fit")
+            params["unknown_model_forced"] = {"switch_eta": cal["eta"], "switch_lam": cal["lam"],
+                                              "switch_temperature": cal["temperature"],
+                                              "community_temperature": com["temperature"]}
+            _log(f"unknown model forced to community only (--relatives community-only): the switch chose relatives "
+                 f"(eta={cal['eta']:g}, lam={cal['lam']:g}, T={cal['temperature']:g}); community only at "
+                 f"T={com['temperature']:g}")
+            fit = dict(fit, temperature=com["temperature"], eta=com["eta"], lam=1.0, curve=None)
+            cal.update(temperature=com["temperature"], eta=com["eta"], lam=1.0)
         if temperature is not None:  # a temperature given by the user overrides the fit, and any curve
             fit = dict(fit, temperature=float(temperature), curve=None)
         temperature = cal["temperature"] if temperature is None else temperature
