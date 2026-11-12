@@ -12,6 +12,13 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   (`--group-sample-mb`, 50 Mb), rebuilt the site cache (hours on a large pileup). At the default the grouping and
   the pieces are exactly those of 0.11.1 (tested against stored 0.11.1 draws, and on ZymoFecal's two motif tables
   against the groups of their site caches), so no decision changes. `params.json` records `calibration_seed`.
+- `params.json` records the code and where it ran: `commit` (from git, `EPIREFINE_COMMIT` or a `COMMIT` file),
+  `libraries`, `kernels` (installed, used, build hash), `threads` and `seeds`. `epirefine rerun --params
+  params.json --out DIR` repeats a run from it (tested: same decisions).
+- Input checks with one-line errors: a contig listed in two bins (it was silently put in the last one), a
+  contig-bin table with its columns swapped, a motif table without the needed columns (names the missing ones).
+  Bins none of whose contigs are in the assembly are named in the log. Every development input (monoculture,
+  ZymoOral, simulated, ZymoFecal, fecal_inhouse contig-bin tables) passes as before.
 
 ## 0.11.1 (2026-11-12): the unknown-genome model no longer absorbs every unbinned contig
 

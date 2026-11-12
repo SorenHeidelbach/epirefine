@@ -5,9 +5,11 @@ Nothing here touches the model; a run with valid inputs gives the same decisions
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -132,6 +134,9 @@ def match_contig_bin(cb: dict[str, str], lengths: dict[str, int], path, log=log)
     dropped otherwise (they would vanish from the refined bins without a trace)."""
     kept = {c: b for c, b in cb.items() if c in lengths}
     missing = [c for c in cb if c not in lengths]
+    if not kept and sum(b in lengths for b in cb.values()) > len(cb) / 2:
+        raise InputError(f"contig-bin table {path}: the second column holds contig names of the assembly; the columns "
+                         f"are swapped (it needs contig<TAB>bin)")
     if not kept:
         raise InputError(
             f"no bin left: none of the {len(cb)} contigs in {path} is in the assembly (contig-bin names e.g. "
@@ -140,6 +145,10 @@ def match_contig_bin(cb: dict[str, str], lengths: dict[str, int], path, log=log)
             f"FASTA header) in column 1.")
     if missing:
         share = len(kept) / len(cb)
+        emptied = sorted(set(cb.values()) - set(kept.values()))
+        if emptied:
+            log(f"WARNING: contig-bin table: {len(emptied)} bins have none of their contigs in the assembly and are "
+                f"left out: {', '.join(emptied[:5])}{', ...' if len(emptied) > 5 else ''}")
         log(f"WARNING: contig-bin table: {len(missing)} of {len(cb)} contigs are not in the assembly and are dropped "
             f"(e.g. {', '.join(missing[:3])}); {len(kept)} contigs in {len(set(kept.values()))} of "
             f"{len(set(cb.values()))} bins remain"
@@ -241,10 +250,143 @@ def provenance(args: dict) -> dict:
     }
     # the options as given (p_unknown, tau and temperature under *_given: their plain keys hold the values
     # used, estimated or calibrated when not given)
+    prov.update(environment(args))
     prov.update({given.get(k, k): v for k, v in args.items() if k not in skip})
     if prov.get("calibration_seed") is None and "seed" in prov:
         prov["calibration_seed"] = prov["seed"]  # the seed the pieces were drawn with, also when not given
     return prov
+
+
+def tool_commit(root=None) -> dict:
+    """The commit of the epirefine code that runs: from its git checkout when it runs from one (with `dirty` true
+    when tracked files differ from the commit), else from the environment variable EPIREFINE_COMMIT, else from a
+    file COMMIT next to `src` (or inside the package) that a snapshot made with `git archive` can carry. `commit`
+    is null when none of these says (an installed release: its version names it)."""
+    pkg = Path(__file__).resolve().parent
+    root = Path(root) if root is not None else pkg.parents[1]  # <checkout>/src/epirefine
+    if (root / ".git").exists():
+        try:
+            def git(*a):
+                return subprocess.run(["git", "-C", str(root), *a], capture_output=True, text=True, timeout=20,
+                                      check=True).stdout.strip()
+            commit = git("rev-parse", "HEAD")
+            dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
+            return {"commit": commit, "source": "git", "dirty": dirty}
+        except (OSError, subprocess.SubprocessError):
+            pass
+    env = os.environ.get("EPIREFINE_COMMIT", "").strip()
+    if env:
+        return {"commit": env, "source": "EPIREFINE_COMMIT"}
+    for f in (root / "COMMIT", pkg / "COMMIT"):
+        try:
+            text = f.read_text().split()
+        except OSError:
+            continue
+        if text:
+            return {"commit": text[0], "source": f"COMMIT file ({f.name} next to {'src' if f.parent == root else 'the package'})"}
+    return {"commit": None, "source": None}
+
+
+def _version(module: str):
+    try:
+        from importlib.metadata import version
+        return version(module)
+    except Exception:  # not installed, or no metadata
+        return None
+
+
+def kernels() -> dict:
+    """Whether the compiled kernels (epirefine_rs) are installed and used, and which build: version, API level,
+    features, the SHA-256 of the compiled module (identifies the build even when the version does not change) and
+    where it was installed from. `used` follows EPIREFINE_RS and the kernels' interface, as the model code does."""
+    from .model import _rs
+    rec = {"installed": False, "used": False, "EPIREFINE_RS": os.environ.get("EPIREFINE_RS")}
+    try:
+        import epirefine_rs as rs
+    except ImportError:
+        return rec
+    rec.update(installed=True, used=_rs() is not None, version=getattr(rs, "__version__", None),
+               commit=getattr(rs, "__commit__", None), api=getattr(rs, "API", None))
+    try:
+        rec["features"] = sorted(rs.features() if callable(rs.features) else rs.features)
+    except Exception:
+        rec["features"] = None
+    so = sorted(Path(rs.__file__).parent.glob("_core*"))
+    if so:
+        rec["module_sha256"] = hashlib.sha256(so[0].read_bytes()).hexdigest()
+    try:
+        from importlib.metadata import distribution
+        url = json.loads(distribution("epirefine_rs").read_text("direct_url.json") or "{}").get("url")
+        rec["installed_from"] = url
+    except Exception:
+        pass
+    return rec
+
+
+THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "POLARS_MAX_THREADS")
+
+
+def environment(args: dict) -> dict:
+    """The parts of params.json that say which code ran where: commit, libraries, kernels, threads, seeds."""
+    import numpy
+    import polars
+    import scipy
+    from .model import _cores, _n_threads
+    return {
+        "commit": tool_commit(),
+        "libraries": {"python": sys.version.split()[0], "numpy": numpy.__version__, "scipy": scipy.__version__,
+                      "polars": polars.__version__, "epirefine_rs": _version("epirefine_rs")},
+        "kernels": kernels(),
+        "threads": {"workers": n_workers(args["workers"]), "cores": _cores(), "model_threads": _n_threads(),
+                    "polars_threads": polars.thread_pool_size(),
+                    **{v.lower(): os.environ.get(v) for v in THREAD_VARS}},
+        "seeds": {"seed": args.get("seed"),
+                  "calibration_seed": args["seed"] if args.get("calibration_seed") is None else args["calibration_seed"],
+                  "bootstrap": 0},
+    }
+
+
+# options of pipeline.run recorded under another name in params.json (their plain names hold fitted values)
+_GIVEN = {"p_unknown": "p_unknown_given", "tau": "tau_given", "temperature": "temperature_given"}
+_INPUT_KEYS = {"assembly": "assembly", "pileup": "pileup", "contig_bin": "contig_bin", "motifs_path": "motifs"}
+
+
+def rerun_arguments(params: dict, out, workers=None, cache_dir=None, log=log) -> dict:
+    """Keyword arguments of pipeline.run that repeat the run params.json describes (inputs from their recorded
+    paths, every option as it was given), with a new output folder. Says in the log what differs from the
+    recorded run: the inputs' size or time, the version, the commit. The worker count and the cache do not change
+    decisions; they are taken from the arguments (default: as recorded)."""
+    import inspect
+    from .pipeline import run
+    names = [n for n in inspect.signature(run).parameters]
+    kw = {}
+    for name in names:
+        if name in _INPUT_KEYS:
+            rec = params["inputs"][_INPUT_KEYS[name]]
+            kw[name] = rec["path"]
+            try:
+                st = Path(rec["path"]).stat()
+                if (st.st_size, int(st.st_mtime)) != (rec["size"], rec["mtime"]):
+                    log(f"WARNING: {rec['path']} has changed since the recorded run (size or modification time)")
+            except OSError:
+                pass  # check_inputs reports it
+        elif name == "out":
+            kw[name] = str(out)
+        elif name == "workers":
+            kw[name] = workers if workers is not None else params.get("workers")
+        elif name == "cache_dir":
+            # the recorded run's cache (its default was <out>/cache): a rerun reads the pileup again only if that is gone
+            kw[name] = cache_dir if cache_dir is not None else (params.get("cache_dir")
+                                                                or str(Path(params["out"]) / "cache"))
+        elif _GIVEN.get(name, name) in params:
+            v = params[_GIVEN.get(name, name)]
+            kw[name] = tuple(v) if isinstance(v, list) else v
+    if params.get("version") != package_version():
+        log(f"WARNING: the recorded run used epirefine {params.get('version')}, this is {package_version()}")
+    rec, now = (params.get("commit") or {}).get("commit"), tool_commit().get("commit")
+    if rec and now and rec != now:
+        log(f"WARNING: the recorded run used commit {rec}, this code is {now}")
+    return kw
 
 
 def finish(params: dict) -> dict:

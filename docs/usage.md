@@ -99,6 +99,19 @@ estimates. Leave them unset unless you are testing the model.
 | `--workers` | number of CPUs, at most 16 | Processes for reading the pileup and building the tables. Uncompressed pileups are read in parallel; a gzipped pileup is read by one worker, so unpack large pileups first. |
 | `--cache-dir` | `<out>/cache` | Where the site cache goes. A rerun with the same assembly, pileup and motifs reuses it and skips reading the pileup, so reruns with other thresholds are fast. Point several runs at the same cache to share it. |
 
+## Repeating a run
+
+`params.json` records the inputs, every option, the seeds, the commit, the library versions, the kernels and the
+threads. `epirefine rerun` repeats the run it describes, reading the inputs from their recorded paths and reusing the
+recorded run's site cache:
+
+```bash
+epirefine rerun --params first_run/params.json --out repeat [--workers N] [--cache-dir DIR]
+```
+
+The log warns when an input file's size or modification time, the version or the commit differs from the record.
+Decisions do not depend on the worker count.
+
 ## Examples
 
 Only the most certain decisions:
