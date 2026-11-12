@@ -3,6 +3,29 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
+## Unreleased
+
+### Documentation (branch docs/review-accuracy)
+- README and `docs/`: benchmark figures now say which data they come from. Held-out monoculture communities: 311 of
+  316 flags (98.4%) and 1,096 of 1,180 placements (92.9%; validation set 89.6%) right; the development figures
+  (every flag right) are labelled as such. The comparison with Nanomotif's refinement is removed.
+- Corrected claims without a measurement behind them: "calibrated" probabilities (long contigs remain overconfident),
+  methylation "independent of composition and coverage", plasmids and phages methylated "alike" (binned ones can be
+  flagged), contaminated bins "handled" (one-motif merges are mostly missed), motifs no bin methylates "harmless",
+  a high `p_unknown` as "the right answer", Hi-C precision below 5x (4 of 41, 9.8%, replaces 12.5%), the share of
+  contigs without a decision, time and memory per version.
+- FAQ: new "Known limitations" section, including the inclusion collapse with some motif tables
+  (`p_unknown=1.000`, 0 inclusions) and how to recognise it in the log.
+
+### Benchmarks
+- `monoculture_sets.py`: an isolate's piece cuts are seeded by the SHA-256 of its name instead of Python's salted
+  `hash()`, so they no longer depend on `PYTHONHASHSEED`. The stored sets cannot be regenerated from code; their cuts
+  are kept as data (see the module docstring).
+- `benchmark_suite.py`: every row records the version the runs report, the motif table's md5 and the calibration's
+  choices (`unknown_lam`, temperature and `p_unknown` ranges), as columns appended to older record files.
+
+**Benchmark effect:** none (no package code changed).
+
 ## 0.11.0 (2026-11-11): performance and robustness; model options are opt-in
 
 **Results are those of 0.10.2.** A run without new options adds and removes the same contigs. Checked on the six
