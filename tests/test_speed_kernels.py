@@ -454,6 +454,40 @@ def test_spill_keeps_values(tmp_path, monkeypatch):
     assert not list(tmp_path.iterdir())  # unlinked temporary file
 
 
+
+def test_spill_writeback_in_the_background(tmp_path, monkeypatch):
+    """With a list for its write-back, _spill returns the map at once and syncs the file in a background thread
+    (the sync of 5.5 GB on the main thread cost about 40 s on ZymoFecal); check() waits for it. A failed sync
+    stops the run with TableFileError before the map is read (it is not trusted)."""
+    import errno
+    import threading
+    import epirefine.pipeline as P
+    from epirefine.sites import TableFileError
+    monkeypatch.setattr(P, "SPILL_MIN_BYTES", 1)
+    a = np.random.default_rng(14).random((50, 7, 64)).astype(np.float32)
+    go, synced = threading.Event(), []
+
+    def slow(fd, *args):
+        go.wait(10)
+        synced.append(threading.current_thread() is not threading.main_thread())
+    monkeypatch.setattr(P, "drop_pages", slow)
+    wb = []
+    m = P._spill(a, tmp_path, wb)
+    assert len(wb) == 1 and not synced  # returned before the sync
+    go.set()
+    wb[0].check()
+    assert synced == [True] and np.array_equal(m, a)
+
+    for err in (OSError(errno.EDQUOT, "Disk quota exceeded"), ValueError("not an OSError")):
+        def fail(fd, *args):
+            raise err
+        monkeypatch.setattr(P, "drop_pages", fail)
+        wb = []
+        P._spill(a, tmp_path, wb)
+        with pytest.raises(TableFileError):  # any error, also one that is not an OSError
+            wb[0].check()
+
+
 def test_spilled_chunk_tables_same_outputs(community, base_run, tmp_path, monkeypatch):
     """A run whose chunk tables go to a temporary file after the final fit writes the same tables."""
     import filecmp

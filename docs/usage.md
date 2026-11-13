@@ -103,6 +103,8 @@ Removed in 0.12 (they lost on the development benchmarks; see `CHANGELOG.md`): `
 | Option | Default | What it does |
 |---|---|---|
 | `--workers` | number of CPUs, at most 16 | Processes for reading the pileup and building the tables. Uncompressed pileups are read in parallel; a gzipped pileup is read by one worker, so unpack large pileups first. |
+| `--temp-dir` | `<out>` | Folder for the temporary files of the two large tables (contig tables and chunk tables) on large samples: about 12 GB on a 35,000-contig fecal sample, removed when the run ends, also when it fails. Created if missing; a folder in which no file can be made stops the run at the start. Use a folder on disk: on tmpfs (`/dev/shm`, often an HPC job's `$TMPDIR`) the files take memory, and the log warns. |
+| `--tables-in-memory` | off | Keep the contig tables in memory and the chunk tables' file in the page cache, as before 0.12: no wait for the disk, but about 6 GB more memory on a 35,000-contig fecal sample. The results are the same. |
 | `--cache-dir` | `<out>/cache` | Where the site cache goes. A rerun with the same assembly, pileup and motifs reuses it and skips reading the pileup, so reruns with other thresholds are fast. Point several runs at the same cache to share it: runs that read it share a lock on it and run at the same time; a run that has to rebuild it waits until they are done (and they wait for a rebuild). |
 
 ### The site cache
@@ -129,11 +131,13 @@ threads. `epirefine rerun` repeats the run it describes, reading the inputs from
 recorded run's site cache:
 
 ```bash
-epirefine rerun --params first_run/params.json --out repeat [--workers N] [--cache-dir DIR]
+epirefine rerun --params first_run/params.json --out repeat [--workers N] [--cache-dir DIR] [--temp-dir DIR]
 ```
 
 The log warns when an input file's size or modification time, the version or the commit differs from the record.
-Decisions do not depend on the worker count.
+Decisions do not depend on the worker count. `--tables-in-memory` and the folder of the temporary tables are
+repeated as recorded (a run that kept them in its output folder keeps them in the new one); `--temp-dir` overrides
+the folder. Neither changes a result.
 A run recorded before 0.12 that used an option removed in 0.12 (below) cannot be repeated by this version: `rerun`
 stops with one line naming the option; repeat it with the version the record names. Such options at the value that
 was their default (for example `"calibration": "default"` in a 0.11.1 record) are accepted, since that behaviour

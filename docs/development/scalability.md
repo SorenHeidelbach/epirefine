@@ -266,3 +266,64 @@ re-measured.
 - The caller fit (8 min) is limited by the 3 pooled mod-type fits.
 - Report caps (item 20) are not done: on human gut, `motif_fit.tsv` is 530 MB, too big to embed in
   the HTML report.
+
+## 7. Large tables on disk (0.12)
+
+Two tables of the main process are large and read only in row batches late in the run:
+
+- **Contig tables** (`L_t`, contigs x groups x grid, float32; 5.9 GiB on ZymoFecal). Built in the unit tables and
+  read only after the calibration (scores, then per-group summaries). From 256 MiB on they are a `sites.RowFile`:
+  an unlinked temporary file in the output directory (or `--temp-dir`).
+  - *Writing.* Each part's rows are appended as they arrive (one sequential stream, group weights multiplied in;
+    an index maps each contig to its place in the file). Writing each row at its own offset made the writes, and
+    on a rotational or virtual disk the later reads, scattered. Every 256 MiB a background thread writes the new
+    pages back (`fdatasync`) and drops them from the page cache, so the main process does not wait for the disk.
+  - *Reading.* At the final fit, 8 background readers read the file back into the page cache in sequential
+    blocks (one stream read 48 MB/s on the test server, 8 about 450 MB/s). Reads copy from the cache with `pread`
+    into fresh arrays (not a memory map, whose touched pages would count as resident memory of the main process).
+    The pages stay cached until the file is closed after the summaries: the table is read twice, from one disk
+    read. That page cache (up to the table's size) is charged to the run's cgroup from the final fit to the
+    summaries; it is clean and can be reclaimed.
+  - *Where the whole table is still read.* `FittedModel.score` reads in row batches only when the kept rows are
+    a list (the default) and the table has more than 8,192 rows, and either the row form is used or the kernels
+    (`epirefine-rs`, `score_sums`) are installed. Otherwise it reads the file whole into memory, as the in-memory
+    table was before: with `--unknown-prior unbinned`, `--unlisted-genome`, `--inclusion-support` other than
+    `none` or the `prior-matched` calibration feature, and without the kernels on samples with about 19 bins or
+    fewer. On these paths the scoring peak is that of the in-memory table; the unit-table and calibration peaks
+    are still lower.
+- **Host chunk tables** (`L_chunks`, 5.1 GiB on ZymoFecal). After the final fit only rows of a few mixed contigs
+  are read: the table moves to a memory-mapped temporary file, written back and dropped from the page cache (the
+  page cache is charged to the run's cgroup like any other memory) by a background thread. On the main thread that
+  sync took about 40 s on ZymoFecal (5.5 GB; 7.2-7.8 s per GB measured on the test server's disk), inside the
+  robust-profile stage.
+
+**Where, and how to switch it off.** `--temp-dir DIR` puts both files in DIR (default: the output directory;
+created if missing; a folder in which no file can be made stops the run at the start with one line).
+`--tables-in-memory` takes the path of 0.11 instead: the contig tables stay in memory (about 5.9 GiB more in the
+main process on ZymoFecal, from the unit tables to the scores) and the chunk tables' file is memory-mapped as
+before, without write-back or page drop, so its pages stay in the page cache. The outputs are the same either way.
+Both are recorded in `params.json` (`temp_dir`, `tables_in_memory`) and replayed by `epirefine rerun`.
+
+**Space.** A run needs free space in the temporary folder for both files: about 12 GB on ZymoFecal-size samples.
+Both are removed when the run ends, also when it fails (on NFS an unlinked open file shows as `.nfsXXXX` while the
+run goes, and stays only if the node crashes).
+
+**tmpfs.** In a folder in memory (tmpfs, `/dev/shm`) the pages cannot be dropped: the files take as much
+memory as the tables did, and on the whole-table scoring paths above the contig tables are then held twice (about
+5.9 GiB more than in memory on ZymoFecal). The log warns when the first table file is made on tmpfs or ramfs.
+For large samples give `--temp-dir` a folder on disk, or use `--tables-in-memory`.
+
+**Errors.** If the contig-table file cannot be made, or its first write fails (nothing is in it yet), the tables
+stay in memory (one warning). Any later error writing it, from `pwrite` or from a write-back (`fdatasync`, in the
+background or at the end), stops the run with one line naming the folder (and, for a space or quota error, the
+space needed); the file is never read back. After a failed write-back the system may drop the unwritten pages,
+and on NFS a `pwrite` can itself report an earlier failed write-back, after which a sync returns no error and the
+lost range reads as zeros. So a disk that fills up half way stops the run instead of continuing in memory. Where
+`posix_fadvise` is missing (macOS) the files are still synced, so these errors are seen there too. The chunk-table
+file falls back to the array still in memory if it cannot be written; if its background write-back fails, the run
+stops in the same way before the file is read (the regional step), and if nothing reads it, the run ends with one
+warning (the outputs do not depend on it).
+
+Outputs are byte-identical whether the tables are on disk or in memory (tests force the disk path on the synthetic
+community with 1 and 3 workers, down-weighted groups, the unbinned prior and without the kernels; the small suites
+were compared file by file).

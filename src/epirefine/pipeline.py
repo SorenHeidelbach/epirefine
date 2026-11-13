@@ -32,7 +32,7 @@ from .motifs import (build_records, describe_groups, group_motifs, noisy_groups,
                      specificity_ranks)
 from .redundancy import inclusion_redundancy
 from .refine import bin_evidence_table, flagged_share_per_bin, regional_pattern, withdraw_as_mixed, write_outputs
-from .sites import EncodedAssembly, extract_sites, same_pairs, unit_tables
+from .sites import EncodedAssembly, RowFile, drop_pages, table_file_error, extract_sites, same_pairs, unit_tables
 from . import sitecache
 
 
@@ -168,6 +168,7 @@ def check_cache(cache_dir, assembly, pileup, motifs_path, seed=1, group_sample_b
 
 
 _HELD_LOCKS: list = []  # site-cache locks of the run in progress; released when run() returns or fails
+_OPEN_TABLES: list = []  # tables on disk (sites.RowFile) of the run in progress; closed (removed) when it returns or fails
 
 
 def _releases_cache_locks(f):
@@ -178,6 +179,8 @@ def _releases_cache_locks(f):
         try:
             return f(*args, **kwargs)
         finally:
+            while _OPEN_TABLES:  # (a library caller that keeps the traceback would otherwise keep the file)
+                _OPEN_TABLES.pop().close()
             while _HELD_LOCKS:
                 _HELD_LOCKS.pop().release()
     return wrapped
@@ -253,9 +256,41 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 SPILL_MIN_BYTES = 256 << 20  # tables from this size on are moved to a temporary file once only rows of them are read
 
 
-def _spill(a: np.ndarray, directory) -> np.ndarray:
+class _SpillWriteback:
+    """Writes a spilled table's file back to disk and drops its pages from the page cache (charged to the run's
+    memory too) in a background thread: on the main thread this sync cost about 40 s on ZymoFecal (5.5 GB at
+    about 130 MB/s), inside the robust-profile stage. check() waits for it and stops the run with TableFileError
+    if it failed: after a failed write-back the file can no longer be trusted, so it is not read."""
+
+    def __init__(self, fh, directory, nbytes):
+        import threading
+        self.fh, self.directory, self.nbytes, self.error = fh, directory, nbytes, None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        try:
+            drop_pages(self.fh.fileno())
+        except Exception as e:  # any error, so that check() cannot pass after a failure
+            self.error = e
+
+    def check(self) -> None:
+        self._thread.join()
+        if self.error is not None:
+            raise table_file_error("chunk tables'", self.directory, self.nbytes, self.error)
+
+    def failed(self) -> BaseException | None:
+        """The write-back's error, once it has ended (for a file that was never read: the outputs stand)."""
+        self._thread.join()
+        return self.error
+
+
+def _spill(a: np.ndarray, directory, writebacks: list | None = None, keep_pages: bool = False) -> np.ndarray:
     """a as a read-only memory map of an unlinked temporary file in `directory` (the same values; its memory is freed
-    when the caller drops its last reference to the array), or a itself when it is small or the file cannot be written."""
+    when the caller drops its last reference to the array), or a itself when it is small or the file cannot be written.
+    The file is written back and its pages dropped: here, or with `writebacks` given in the background (the
+    _SpillWriteback is appended to it; call its check() before reading the map). keep_pages (--tables-in-memory):
+    neither, the file's pages stay in the page cache as before 0.12."""
     if a.nbytes < SPILL_MIN_BYTES:
         return a
     import tempfile
@@ -263,9 +298,54 @@ def _spill(a: np.ndarray, directory) -> np.ndarray:
         fh = tempfile.TemporaryFile(dir=directory)
         a.tofile(fh)
         fh.flush()
-        return np.memmap(fh, dtype=a.dtype, mode="r", shape=a.shape)
+        if writebacks is None and not keep_pages:
+            drop_pages(fh.fileno())  # written out and dropped: the page cache is charged to the run's memory too
+        m = np.memmap(fh, dtype=a.dtype, mode="r", shape=a.shape)
     except OSError:
         return a
+    if writebacks is not None and not keep_pages:
+        writebacks.append(_SpillWriteback(fh, directory, a.nbytes))
+    return m
+
+
+_MEMORY_FILE_SYSTEMS = ("tmpfs", "ramfs")
+
+
+def memory_file_system(path) -> str | None:
+    """The type of the file system that holds `path` when it keeps its files in memory (tmpfs, ramfs; /dev/shm and
+    often an HPC job's $TMPDIR), else None (also where /proc/self/mounts cannot be read). There the pages of the
+    temporary tables cannot be dropped: they take memory instead of disk."""
+    try:
+        target = os.path.realpath(path)
+        best, kind = "", None
+        with open("/proc/self/mounts") as f:
+            for line in f:
+                fields = line.split()
+                if len(fields) < 3:
+                    continue
+                mnt = fields[1].replace("\\040", " ")
+                if (target == mnt or target.startswith(mnt.rstrip("/") + "/")) and len(mnt) >= len(best):
+                    best, kind = mnt, fields[2]
+    except OSError:
+        return None
+    return kind if kind in _MEMORY_FILE_SYSTEMS else None
+
+
+def temp_dir_for(temp_dir, out: Path) -> Path:
+    """The folder of the temporary table files: --temp-dir (created if missing) or the output folder. A folder in
+    which no file can be made stops the run here, with one line, instead of after the hours of the pileup pass."""
+    from .io import InputError
+    if temp_dir is None:
+        return out
+    tmp = Path(temp_dir)
+    import tempfile
+    try:
+        tmp.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryFile(dir=tmp):
+            pass
+    except OSError as e:
+        raise InputError(f"--temp-dir {tmp}: cannot write a file there ({e.strerror or e})") from None
+    return tmp
 
 
 
@@ -328,7 +408,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         regional_tempered=False, gate_leave_out="none", gate_unweighted=False, eps_gated=False,
         redundancy_order="independent", two_state_warning=0.2,
         unknown_prior="bins", unknown_prior_strength=5.0, siteless_bin_guard=False, unknown_share=None,
-        temperature_law="grid", evidence_temperature="median", relatives=None, calibration_seed=None):
+        temperature_law="grid", evidence_temperature="median", relatives=None, calibration_seed=None,
+        temp_dir=None, tables_in_memory=False):
     """The calibration is that of 0.10 with the relatives test resampled over bins (0.11.1); the options that
     lost were removed in 0.12 (U12, D63: the calibration feature list, rejected rule variants and WP3 designs;
     see CHANGELOG).
@@ -348,7 +429,11 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     temperature in the methylation-evidence cut-off). relatives: 'community-only' or 'switch' (one unknown model for
     all bins, chosen by the 2-SE rule). See calibrate.calibrate_decisions.
     seed: the motif-grouping sample (and the calibration pieces unless calibration_seed is given);
-    calibration_seed: the calibration pieces only (default: seed). Each random step has its own generator."""
+    calibration_seed: the calibration pieces only (default: seed). Each random step has its own generator.
+
+    temp_dir: folder of the temporary files of the large tables (default: out); tables_in_memory: keep the contig
+    tables in memory and the chunk tables' file in the page cache, as before 0.12 (about 6 GiB more memory on a
+    ZymoFecal-size sample). Neither changes a result."""
     args = dict(locals())  # first statement: the options as given
     runinfo.begin(args, _log)  # first log lines (version, command, inputs) and option ranges, before any work
     # the inputs are checked before anything is read or written: a missing file or a wrong table must not
@@ -365,6 +450,16 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     runinfo.write_params(out / "params.json", provenance)  # a run that does not finish leaves its settings
+    tmp = temp_dir_for(temp_dir, out)
+    tmp_fs = None if tables_in_memory else memory_file_system(tmp)
+
+    def tables_on_tmpfs():  # once, when the first table goes to a file there
+        nonlocal tmp_fs
+        if tmp_fs:
+            _log(f"WARNING: the temporary table files in {tmp} are on {tmp_fs}, a file system in memory: they take "
+                 f"memory instead of disk there (on large samples up to twice the tables' size). Give --temp-dir a "
+                 f"folder on disk, or use --tables-in-memory")
+            tmp_fs = None
     if calibration_seed is None:
         calibration_seed = seed
     group_rng = np.random.default_rng(seed)
@@ -535,10 +630,18 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # pass 2: site cache -> likelihood tables
     tabs = unit_tables(parts, n_groups=n_groups, det=det, grid_size=grid_size, min_cov=min_cov, drop_groups=drop,
                        chunk_offset=chunk_offset, chunk_size=chunk_size, n_chunks=n_chunks_all, target_of=target_of,
-                       n_targets=len(targets), frags=frags, workers=workers, log=_log)
+                       n_targets=len(targets), frags=frags, workers=workers, log=_log,
+                       targets_dir=None if tables_in_memory else tmp,
+                       target_weight=(group_w.astype(np.float32) if group_weights and (group_w < 1).any()
+                                      and not tables_in_memory else None))
+    if isinstance(tabs["L_t"], RowFile):  # closed (removed) also if the run fails from here on
+        _OPEN_TABLES.append(tabs["L_t"])
+        tables_on_tmpfs()
+    # (on disk the contig tables L_t got their weights row by row as the parts arrived, in unit_tables; with
+    # --tables-in-memory they are weighted here, as before 0.12)
     if group_weights and (group_w < 1).any():
         wf = group_w.astype(np.float32)[None, :, None]
-        for key in ("L_chunks", "L_t", "L_frag"):
+        for key in ("L_chunks", "L_frag") + (("L_t",) if tables_in_memory else ()):
             tabs[key] *= wf
         tabs["H_frag"] = (tabs["H_frag"][0] * wf, tabs["H_frag"][1] * wf)
     L_all = tabs.pop("L_chunks")
@@ -642,11 +745,18 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     tau = (100.0 if variation == "beta" else 0.3) if tau is None else tau
     temperature = 1.0 if temperature is None else temperature
 
+    if isinstance(L_t, RowFile):  # read next (scores): read back into the page cache during the final fit
+        L_t.prefetch()
     model = FittedModel(L_chunks, chunk_bin, H, group_modtype, grid, tau, **warm, **model_kw)
     model.set_unknown_params(*unknown_params)
     # from here on the chunk tables are read only for the few mixed contigs of the regional step: kept in a temporary
     # file (memory-mapped, removed when the run ends) instead of memory, next to the model's own marginal copy
-    L_chunks = _spill(L_chunks, out)
+    spill_sync: list = []  # its write-back runs in the background (checked before the map is read)
+    spilled = _spill(L_chunks, tmp, spill_sync, keep_pages=tables_in_memory)
+    if spilled is not L_chunks:
+        tables_on_tmpfs()
+    L_chunks = spilled
+    del spilled
     p_foreign = 1 - model.w
     _write(pl.DataFrame({"contig": [asm.names[i] for i in chunk_contig], "start": chunk_no * chunk_size,
                          "bin": [bins[b] for b in chunk_bin], "p_foreign": p_foreign}),
@@ -697,6 +807,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     table_cells = L_t.shape[1] * L_t.shape[2]
     # the contigs' tables are not read after this point (the leave-one-out scores use the kept marginal rows):
     # freed before the evidence step, where the main process had its peak (6.3 GB on ZymoFecal)
+    if isinstance(L_t, RowFile):
+        L_t.close()  # the unlinked file is removed with its last descriptor
     del L_t
     diff = np.zeros(len(targets))
     llr_loo = np.zeros(len(chunk_bin))
@@ -899,6 +1011,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         mixed_u = [u for u in long_u if mixed[tidx[u]]]
         if mixed_u:
             all_ks = np.concatenate([np.asarray(by_contig[u], np.int64) for u in mixed_u])
+            for w in spill_sync:
+                w.check()
             sc_all = model.score(L_chunks[all_ks])
             at = 0
             for u in mixed_u:
@@ -966,6 +1080,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                   regional=regional,
                   withhold_candidates=bool((params.get("calibration_guard") or {}).get("fired")))
     _write(bin_ev, out / "bin_evidence.tsv")
+    for w in spill_sync:  # never read (no mixed contig): the outputs stand, but the folder had a write error
+        if w.failed() is not None:
+            _log(f"WARNING: the chunk tables' temporary file in {out} could not be written to disk ({w.error}); "
+                 f"it was not needed for the results")
     _log(f"refinement: p_unknown={p_unknown:.3f}, contamination rate={ref.eps:.3f}; "
          f"{int(ref.contaminant.sum())} of {int(testable.sum())} testable binned contigs flagged, "
          f"{int(((ref.include_bin >= 0) & (given < 0)).sum())} of {int((given < 0).sum())} unbinned included, "

@@ -1116,7 +1116,7 @@ class FittedModel:
         form = _score_form(len(L_units), self.n_bins, L_units.shape[1])
         if lp_rows is not None and len(L_units) > self.SCORE_BATCH and (form == "rows" or _rs("score_sums") is not None):
             return self._score_in_batches(L_units, np.asarray(lp_rows, dtype=np.int64), form)
-        Lp = self.marginal(L_units)
+        Lp = self.marginal(np.asarray(L_units))  # (a table on disk, sites.RowFile, is read whole here)
         Au = group_scores(Lp, self.log_pi[None])[:, 0, :]
         S, R = summed_scores(Lp, self.log_prof, rel=(self.eta if self.eta else 0.05, Au), form=form)
         Su_comm = Au.sum(1)

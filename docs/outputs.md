@@ -197,7 +197,8 @@ string `"inf"` (a `tau` of `"inf"` means no variation between a contig and its b
 **Provenance.**
 
 - `version`, `command_line`, `start_time` (UTC), `finished`, `python` (its version), `out`, `cache_dir` (`null`:
-  `<out>/cache`), `workers` (the number used);
+  `<out>/cache`), `workers` (the number used), `temp_dir` (the folder of the temporary table files, `--temp-dir`;
+  `null`: `<out>`);
 - `inputs`: for each of `assembly`, `pileup`, `contig_bin` and `motifs`, its `path`, `size` in bytes and
   modification time `mtime` (seconds since 1970);
 - `commit` (`commit`, `source`: `git` with `dirty` true when tracked files differ from the commit, or the
@@ -230,7 +231,8 @@ string `"inf"` (a `tau` of `"inf"` means no variation between a contig and its b
 (false with `--no-regional-model`), `chunk_size`. Model and calibration: `variation`,
 `tau_given` and `temperature_given` (`--tau` and `--temperature`; `null` when not given), `allow_sharpening`,
 `do_calibrate` (false with `--no-calibrate`), `frag_lengths`,
-`frags_per_bin`, `frag_budget`, `contam_eps`, `grid_size`. Extra output: `write_motif_fit` (`--motif-fit`). The rule
+`frags_per_bin`, `frag_budget`, `contam_eps`, `grid_size`. Extra output: `write_motif_fit` (`--motif-fit`).
+Memory: `tables_in_memory` (`--tables-in-memory`). The rule
 variants: `regional_leave_out`, `regional_withdraw`, `regional_tempered`, `gate_leave_out`, `gate_unweighted`,
 `eps_gated`, `unknown_prior`, `unknown_prior_strength`, `two_state_warning`, `redundancy_order`,
 `siteless_bin_guard`. The calibration-core options: `temperature_law`, `evidence_temperature`.
