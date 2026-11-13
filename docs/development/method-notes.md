@@ -583,8 +583,9 @@ and 600 bin resamples of its calibration, fecal_inhouse) and either at most 1.7 
 runs of stress set 2; nothing lies in between, so the check does not sit on a fitted threshold. Counts of pieces do
 not separate: from a single calibration piece the fit usually lands at the never-sharpen floor (1.082) and the calls
 are right (stress set 2, development: tens of runs, flag precision 100%), so a guard on few pieces would remove
-correct calls. The three stress runs at the cap made no call under option E anyway (the contamination rate and
-$\hat p$ fall to 0 at $T = 20$ and every contig has evidence / $T$ below 3); the guard makes this explicit and
+correct calls. The three stress runs at the cap made no call under option E anyway (the contamination rate falls to
+0 at $T = 20$, and every contig has evidence / $T$ below 3; $\hat p$, which option E estimates at $T = 1$ and so
+does not depend on the calibrated temperature (§7.7), was 0 on those runs); the guard makes this explicit and
 guarantees it on data where some calls would survive $T = 20$. A fixed fallback temperature was rejected: $T = 1$
 on one of those runs placed 25 contigs, one wrongly, where the calibration had found the scores untrustworthy.
 
