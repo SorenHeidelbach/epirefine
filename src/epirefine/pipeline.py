@@ -33,7 +33,7 @@ from .redundancy import inclusion_redundancy
 from .refine import (bin_evidence_table, em_weight, flagged_share_per_bin, refine, regional_pattern, suspected_merges,
                      withdraw_as_mixed,
                      write_outputs)
-from .sites import EncodedAssembly, extract_sites, same_pairs, unit_tables
+from .sites import EncodedAssembly, RowFile, drop_pages, extract_sites, same_pairs, unit_tables
 from . import sitecache
 
 
@@ -264,6 +264,7 @@ def _spill(a: np.ndarray, directory) -> np.ndarray:
         fh = tempfile.TemporaryFile(dir=directory)
         a.tofile(fh)
         fh.flush()
+        drop_pages(fh.fileno())  # written out and dropped: the page cache is charged to the run's memory too
         return np.memmap(fh, dtype=a.dtype, mode="r", shape=a.shape)
     except OSError:
         return a
@@ -503,10 +504,12 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # pass 2: site cache -> likelihood tables
     tabs = unit_tables(parts, n_groups=n_groups, det=det, grid_size=grid_size, min_cov=min_cov, drop_groups=drop,
                        chunk_offset=chunk_offset, chunk_size=chunk_size, n_chunks=n_chunks_all, target_of=target_of,
-                       n_targets=len(targets), frags=frags, workers=workers, log=_log)
+                       n_targets=len(targets), frags=frags, workers=workers, log=_log, targets_dir=out,
+                       target_weight=group_w.astype(np.float32) if group_weights and (group_w < 1).any() else None)
+    # (the contig tables L_t got their weights row by row as the parts arrived, in unit_tables)
     if group_weights and (group_w < 1).any():
         wf = group_w.astype(np.float32)[None, :, None]
-        for key in ("L_chunks", "L_t", "L_frag"):
+        for key in ("L_chunks", "L_frag"):
             tabs[key] *= wf
         tabs["H_frag"] = (tabs["H_frag"][0] * wf, tabs["H_frag"][1] * wf)
     L_all = tabs.pop("L_chunks")
@@ -574,6 +577,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     tau = (100.0 if variation == "beta" else 0.3) if tau is None else tau
     temperature = 1.0 if temperature is None else temperature
 
+    if isinstance(L_t, RowFile):  # read next (scores): the system reads the file ahead during the final fit
+        L_t.willneed()
     model = FittedModel(L_chunks, chunk_bin, H, group_modtype, grid, tau, **warm, **model_kw)
     model.set_unknown_params(*unknown_params)
     # from here on the chunk tables are read only for the few mixed contigs of the regional step: kept in a temporary
@@ -632,6 +637,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     table_cells = L_t.shape[1] * L_t.shape[2]
     # the contigs' tables are not read after this point (the leave-one-out scores use the kept marginal rows):
     # freed before the evidence step, where the main process had its peak (6.3 GB on ZymoFecal)
+    if isinstance(L_t, RowFile):
+        L_t.close()  # the unlinked file is removed with its last descriptor
     del L_t
     diff = np.zeros(len(targets))
     llr_loo = np.zeros(len(chunk_bin))

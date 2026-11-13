@@ -735,13 +735,109 @@ def _unit_part(part: str, cfg: dict) -> dict:
     return out
 
 
+TARGETS_DISK_MIN_BYTES = 256 << 20  # contig tables from this size on are written to a file as the parts arrive
+DISK_FLUSH_BYTES = 256 << 20  # written bytes between two writebacks that drop the file's pages from memory
+
+
+def drop_pages(fd: int, sync: bool = True) -> None:
+    """Write a file's dirty pages to disk and drop its pages from the page cache, so that they are no longer
+    charged to the process's memory (cgroup). A no-op where posix_fadvise does not exist (macOS)."""
+    if not hasattr(os, "posix_fadvise"):
+        return
+    if sync:
+        (os.fdatasync if hasattr(os, "fdatasync") else os.fsync)(fd)
+    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+
+
+class RowFile:
+    """A float32 table [U, M, G] in an unlinked temporary file: written row-wise as unit-table parts arrive and
+    read back in row slices.
+
+    The contig tables (L_t, 5.9 GB on ZymoFecal) are built during the unit tables but read only after the
+    calibration (scores and per-group summaries, both in row batches). Held in memory they sat under the two
+    peaks of the run; in this file only the batch being read is in memory. Reads go through pread into fresh
+    arrays, not a memory map: mapped file pages would count in the process's resident memory once touched.
+    Rows never written read as zeros, as in the np.zeros table they replace.
+    """
+
+    def __init__(self, directory, shape, dtype=np.float32):
+        import tempfile
+        self.shape, self.dtype = tuple(int(x) for x in shape), np.dtype(dtype)
+        self.ndim = len(self.shape)
+        self._row = int(np.prod(self.shape[1:], dtype=np.int64)) * self.dtype.itemsize
+        self._fh = tempfile.TemporaryFile(dir=directory)
+        self._fd = self._fh.fileno()
+        os.ftruncate(self._fd, self.shape[0] * self._row)
+        self._dirty = 0
+
+    @property
+    def nbytes(self) -> int:
+        return self.shape[0] * self._row
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def write_rows(self, ids: np.ndarray, rows: np.ndarray) -> None:
+        """rows[i] goes to row ids[i]; ids ascending (np.unique), written as runs of consecutive rows."""
+        rows = np.ascontiguousarray(rows, dtype=self.dtype)
+        cut = np.flatnonzero(np.diff(ids) != 1) + 1
+        for a, b in zip(np.r_[0, cut], np.r_[cut, len(ids)]):
+            buf, off = memoryview(rows[a:b].reshape(-1).view(np.uint8)), int(ids[a]) * self._row
+            while len(buf):
+                n = os.pwrite(self._fd, buf, off)
+                buf, off = buf[n:], off + n
+        self._dirty += rows.nbytes
+        if self._dirty >= DISK_FLUSH_BYTES:
+            drop_pages(self._fd)
+            self._dirty = 0
+
+    def finish(self) -> "RowFile":
+        drop_pages(self._fd)
+        self._dirty = 0
+        return self
+
+    def willneed(self) -> None:
+        """Ask the kernel to read the file ahead (before the rows are read back)."""
+        if hasattr(os, "posix_fadvise"):
+            os.posix_fadvise(self._fd, 0, 0, os.POSIX_FADV_WILLNEED)
+
+    def __getitem__(self, key):
+        if not isinstance(key, slice) or key.step not in (None, 1):
+            raise TypeError("RowFile reads row slices only")
+        a, b, _ = key.indices(self.shape[0])
+        b = max(a, b)
+        out = np.empty((b - a,) + self.shape[1:], self.dtype)
+        buf, off = memoryview(out.reshape(-1).view(np.uint8)), a * self._row
+        while len(buf):
+            n = os.preadv(self._fd, [buf], off)
+            if n == 0:
+                raise OSError(f"short read from the contig-table file at byte {off}")
+            buf, off = buf[n:], off + n
+        if hasattr(os, "posix_fadvise") and b > a:  # rows are read once: do not keep them in the page cache
+            os.posix_fadvise(self._fd, a * self._row, (b - a) * self._row, os.POSIX_FADV_DONTNEED)
+        return out
+
+    def __array__(self, dtype=None, copy=None):
+        a = self[:]
+        return a if dtype is None else a.astype(dtype)
+
+    def close(self) -> None:
+        self._fh.close()
+
+
 def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, min_cov: int, drop_groups=(),
                 chunk_offset: np.ndarray, chunk_size: int, n_chunks: int, target_of: np.ndarray, n_targets: int,
-                frags: pl.DataFrame | None, workers: int | None = None, log=print) -> dict:
+                frags: pl.DataFrame | None, workers: int | None = None, log=print,
+                target_weight: np.ndarray | None = None, targets_dir=None) -> dict:
     """Likelihood tables for host chunks, targets and calibration fragments, in parallel over parts.
 
     Returns float32 arrays L_chunks [K, M, G], L_t [U, M, G], L_frag, H_frag = (H1, H0), and site
     counts per chunk, per target, per (target, group) and per fragment.
+
+    target_weight: float32 group weights [M] multiplied into the target rows as they arrive (the same float32
+    product as multiplying the finished table). targets_dir: when given and L_t has at least
+    TARGETS_DISK_MIN_BYTES, L_t is a RowFile in that directory (written as the parts arrive, its pages dropped
+    from memory) instead of an array; if the file cannot be written, the table goes back to memory.
     """
     G = grid_size
     cfg = {"grid_size": G, "n_groups": n_groups, "min_cov": min_cov, "chunk_size": chunk_size, "drop_groups": list(drop_groups),
@@ -751,12 +847,22 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
     n_frags = frags.height if frags is not None else 0
     res = {"L_chunks": np.zeros((n_chunks, n_groups, G), np.float32),
            "chunk_sites": np.zeros(n_chunks, np.int64),
-           "L_t": np.zeros((n_targets, n_groups, G), np.float32),
+           "L_t": None,
            "n_sites_t": np.zeros(n_targets, np.int64),
            "n_sites_group_t": np.zeros((n_targets, n_groups), np.int32),
            "L_frag": np.zeros((n_frags, n_groups, G), np.float32),
            "H_frag": (np.zeros((n_frags, n_groups, G), np.float32), np.zeros((n_frags, n_groups, G), np.float32)),
            "frag_sites": np.zeros(n_frags, np.int64)}
+    disk = None
+    if (targets_dir is not None and hasattr(os, "pwrite") and hasattr(os, "preadv") and n_targets
+            and n_targets * n_groups * G * 4 >= TARGETS_DISK_MIN_BYTES):
+        try:
+            disk = RowFile(targets_dir, (n_targets, n_groups, G), np.float32)
+        except OSError as e:
+            log(f"WARNING: contig tables kept in memory: cannot write a file in {targets_dir} ({e})")
+    if disk is None:
+        res["L_t"] = np.zeros((n_targets, n_groups, G), np.float32)
+    wf = None if target_weight is None else np.asarray(target_weight, np.float32)[None, :, None]
     workers = workers or min(16, _cores())
     env = {k: os.environ.get(k) for k in ("POLARS_MAX_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")}
     os.environ.update({k: "1" for k in env})
@@ -775,7 +881,19 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
                         res["L_chunks"][c["ids"]] = c["L"]; res["chunk_sites"][c["ids"]] = c["n_sites"]
                     if "targets" in r:
                         t = r["targets"]
-                        res["L_t"][t["ids"]] = t["L"]; res["n_sites_t"][t["ids"]] = t["n_sites"]
+                        L = t["L"] if wf is None else t["L"] * wf
+                        if disk is not None:
+                            try:
+                                disk.write_rows(t["ids"], L)
+                            except OSError as e:
+                                log(f"WARNING: contig tables moved back to memory: writing their file failed ({e})")
+                                res["L_t"] = disk[:]
+                                disk.close()
+                                disk = None
+                        if disk is None:
+                            res["L_t"][t["ids"]] = L
+                        del L
+                        res["n_sites_t"][t["ids"]] = t["n_sites"]
                         u, g, n = t["n_sites_group"]
                         res["n_sites_group_t"][u, g] = n
                     if "frags" in r:
@@ -792,4 +910,11 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+    if disk is not None:
+        try:
+            res["L_t"] = disk.finish()
+        except OSError as e:
+            log(f"WARNING: contig tables moved back to memory: writing their file failed ({e})")
+            res["L_t"] = disk[:]
+            disk.close()
     return res
