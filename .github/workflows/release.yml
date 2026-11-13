@@ -10,7 +10,8 @@
 #
 # Uploads happen ONLY for a v* tag equal to the version in pyproject.toml: TestPyPI, then PyPI, by trusted publishing
 # (environments testpypi and pypi; no tokens), then a GitHub release with every file. A push of a branch, or a
-# manual run, builds and tests and uploads nothing (D74: branch pushes run the ARM and macOS builds).
+# manual run, builds and tests and uploads nothing (D74: branch pushes run the ARM and macOS builds). The upload jobs
+# also require a push event: a manual run (workflow_dispatch) started on a v* tag builds and tests, uploads nothing.
 name: release
 
 on:
@@ -29,7 +30,7 @@ env:
 jobs:
   version:
     name: Tag matches the package version
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -202,7 +203,7 @@ jobs:
 
   testpypi:
     name: Publish to TestPyPI
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [version, pure-and-sdist, test-wheels, test-musl, test-pure]
     runs-on: ubuntu-latest
     environment:
@@ -222,7 +223,7 @@ jobs:
 
   pypi:
     name: Publish to PyPI
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: testpypi
     runs-on: ubuntu-latest
     environment:
@@ -239,7 +240,7 @@ jobs:
 
   github-release:
     name: GitHub release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: pypi
     runs-on: ubuntu-latest
     permissions:
