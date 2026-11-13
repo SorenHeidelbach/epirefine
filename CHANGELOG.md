@@ -3,10 +3,28 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
-## Unreleased (0.12)
+## 0.12.0rc1 (2026-11-13): release candidate. Breaking: one unknown-genome model by default (option E), options that lost removed; compiled kernels in the wheels
 
-### Breaking: options that lost are removed
-The command line no longer offers the options below. None was a default; each lost on the development benchmarks or
+**Breaking.** The default model changed (the unknown-model switch is gone: option E, see Changed) and the options
+that lost on the development benchmarks are removed from the command line (below). Decisions on metagenomes differ
+from 0.11.1. This is a release candidate: not tagged, not published.
+
+**Benchmark effect (all numbers development data; Nanomotif 1.3.0 motif table on ZymoFecal).**
+- Monoculture training suite (`benchmarks/results.tsv`, mono_train_1..6, its standard motif tables): contaminants
+  found 94.81% and flag precision 100% (both as 0.11.1), contigs put back 89.30% -> 89.55%, wrongly placed 2.0 per
+  scenario (as 0.11.1), completeness after 98.29% -> 98.33%.
+- ZymoFecal, calibration seed 1: 147 flags and 589 inclusions, against 147 flags and 503 inclusions in 0.11.1; no
+  collapse (sentinel), Hi-C agreement of flags and inclusions unchanged in rate.
+- Confirmation data (looked at once, for the final candidate against the 0.11.1-equivalent baseline, release/0.12
+  before option E): ZymoFecal calibration seeds 4-10 keep the temperature (5.024), the 147 flags and the model in
+  every seed, and 3 contigs change their decision between seeds, none of them with a call at P >= 0.99 (the
+  baseline: 6, one at 0.9946). On the planted ZymoFecal scenarios s4-s8 (binned contigs hidden or swapped), hidden
+  contigs returned to their bin rise from 52.4% to 56.3% (497 -> 534 of 949; 37 returned only by 0.12, none only by
+  the baseline); swaps flagged (85.6%) and controls unchanged (99.15%) are equal. Inclusion precision and confident
+  errors: see Known limitations.
+
+### Breaking
+**Options that lost are removed.** The command line no longer offers the options below. None was a default; each lost on the development benchmarks or
 was a design that was tried and rejected (dev log U12, D63; the reason for each is in
 `docs/development/method-notes.md` §7.6 and the dev log). At the defaults nothing changes: on the 15 development
 scenarios of the small suites (monoculture training, ZymoOral, simulated look-alikes) every decision file is
@@ -74,7 +92,6 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
   `--no-calibrate` uses it when `--relatives` is not given, and says so in the log. `params.json` records the
   `relatives` and `unknown_share` actually used; `epirefine rerun` of a `params.json` written before 0.12 uses the
   switch.
-
 - **Guard for calibrations without a usable temperature.** When the calibrated temperature ends at the cap of the
   grid (20), the calibration pieces were not predicted better by any temperature the grid allows, and the fit
   says nothing about how far the scores can be trusted. Such a run now makes no call (no flag, inclusion or move;
@@ -90,24 +107,6 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
   other one has a temperature of at most 1.7), all three of which made no call under option E anyway; decisions
   are unchanged everywhere. The number of calibration pieces does not trigger it: from a single piece the
   calibration usually lands at temperature 1.08 and the calls are right.
-
-### Known limitations (new in 0.12)
-- **Unbinned genomes with a bin's methylation.** Contigs from a genome that has no bin but has the same, or nearly
-  the same, methylation as a binned genome (a strain or close sister that methylates the same motifs) are placed
-  into that genome's bin. Methylation cannot tell the two apart; with the switch of 0.11.1 such samples usually
-  got no inclusions at all. On such samples the temperature also rises (simulated look-alikes: 3.7-4.3 against 1.3
-  under 0.11.1), and because the evidence check is evidence / T < `--min-evidence`, more short contigs get no call
-  (about 12-35% of the contigs, depending on where the temperature lands: look-alike set s1 has 245, 396 and 619 no
-  calls at T 3.7, 4.3 and 5.0 of its 1,849 contigs; development data). A no call never changes a bin: the status is
-  written last, and flags, inclusions and the refined bins do not depend on it. A large relatives statistic warns
-  of such a sample.
-
-- **A calibration at the temperature cap gives no calls.** When the temperature of the calibration ends at the cap
-  of the grid (20), the guard above withholds every call. On development data this happened only on stress samples
-  of two bins with a single calibration piece without usable sites (or a confidently wrong one) or with half of the
-  methylation knocked out. On such a sample a fixed temperature (`--temperature`) can still give calls, but they
-  are not calibrated: on one development stress run, `--temperature 1` placed 25 contigs, one of them wrongly.
-### Changed
 - **Compiled kernels by default (U5, D73).** The wheels for Linux (manylinux2014 x86_64 and aarch64, musllinux_1_2
   x86_64) and macOS (arm64, x86_64) now carry the compiled kernels (pileup reader, motif scan, model kernels; the
   Rust code is in `rust/`, the module `epirefine._kernels`), and EpiRefine uses them unless `EPIREFINE_RS=0`. They
@@ -118,29 +117,6 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
   handed to the worker processes, and a worker that loads another build stops the run. A separately installed `epirefine_rs` is no longer used. Building from source
   (the sdist, or an editable install) needs Rust and a C compiler. Byte identity against 0.12 development with the
   separate kernels: see the branch's build log.
-
-### Fixed
-- **Site-cache key.** The manifest now has a format number (2) and a content fingerprint of the assembly and the
-  pileup (SHA-256 of three 1 MiB blocks: start, middle, end; files up to 16 MiB whole). A pileup replaced by one of
-  the same size and modification time was reused with the old sites; it is now rebuilt (the strict expected failure
-  in `tests/test_cache.py` is fixed). A cache whose part files are missing is rebuilt instead of failing later.
-  Caches written before 0.12 (format 1) stay valid: they are reused on path, size and time as before, and
-  `epirefine cache upgrade` adds the fingerprints, reading only the blocks.
-- **Lock on the cache directory.** Two runs no longer write one cache at once: a run that rebuilds the cache holds
-  an exclusive lock, runs that read it a shared one, so readers do not wait for each other.
-- **Tests and the benchmark suite at the lowest allowed dependency versions.** The thread test of `host_profiles`
-  compares with the package's own logsumexp (scipy before 1.15 differs in the last bits, up to 5.7e-14); the
-  benchmark suite's summary keeps the left order without `join(maintain_order=...)`, which polars 1.2.1 lacks; the
-  batch test compares the log terms with an absolute tolerance of 1e-12 (two batch shapes differ by up to 4.4e-16
-  in 7 of 73,728 cells; runs use one fixed batch size). Test and tooling changes only: the small suites are
-  byte-identical (345 of 345 tables, development data).
-- **Worker peak memory.** `peak_rss_worker_gb` in `params.json` (and the last log line) reported the main
-  process's peak at the moment the first worker pool started (a spawned worker inherits that high-water mark):
-  13.4 GB on ZymoFecal at 12 workers (development) was never a worker's size. Each worker pool now reads its live
-  workers' own peak (VmHWM) before it closes, and the largest is reported. Only run fields of `params.json`
-  change; decisions and every output table are untouched.
-
-### Changed
 - **Large tables on disk.** On large samples the contig tables (5.9 GiB on ZymoFecal) are written to a temporary
   file as they are built and read back in row batches, and the chunk tables' temporary file is written back to disk
   in the background with its pages dropped, so neither sits in memory under the run's peaks. A run needs free space
@@ -169,6 +145,27 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
 - `epirefine cache check`: says whether a run with given inputs would reuse a cache ("reused") or rebuild it
   ("would rebuild", with the reason), without the pass over the pileup.
 
+### Fixed
+- **Site-cache key.** The manifest now has a format number (2) and a content fingerprint of the assembly and the
+  pileup (SHA-256 of three 1 MiB blocks: start, middle, end; files up to 16 MiB whole). A pileup replaced by one of
+  the same size and modification time was reused with the old sites; it is now rebuilt (the strict expected failure
+  in `tests/test_cache.py` is fixed). A cache whose part files are missing is rebuilt instead of failing later.
+  Caches written before 0.12 (format 1) stay valid: they are reused on path, size and time as before, and
+  `epirefine cache upgrade` adds the fingerprints, reading only the blocks.
+- **Lock on the cache directory.** Two runs no longer write one cache at once: a run that rebuilds the cache holds
+  an exclusive lock, runs that read it a shared one, so readers do not wait for each other.
+- **Tests and the benchmark suite at the lowest allowed dependency versions.** The thread test of `host_profiles`
+  compares with the package's own logsumexp (scipy before 1.15 differs in the last bits, up to 5.7e-14); the
+  benchmark suite's summary keeps the left order without `join(maintain_order=...)`, which polars 1.2.1 lacks; the
+  batch test compares the log terms with an absolute tolerance of 1e-12 (two batch shapes differ by up to 4.4e-16
+  in 7 of 73,728 cells; runs use one fixed batch size). Test and tooling changes only: the small suites are
+  byte-identical (345 of 345 tables, development data).
+- **Worker peak memory.** `peak_rss_worker_gb` in `params.json` (and the last log line) reported the main
+  process's peak at the moment the first worker pool started (a spawned worker inherits that high-water mark):
+  13.4 GB on ZymoFecal at 12 workers (development) was never a worker's size. Each worker pool now reads its live
+  workers' own peak (VmHWM) before it closes, and the largest is reported. Only run fields of `params.json`
+  change; decisions and every output table are untouched.
+
 ### Documentation
 - The docs describe the released model (option E with the calibration guard): the method notes
   (`docs/development/method-notes.md`) are rewritten for bin refinement and the code of 0.12 (the unknown genome,
@@ -178,16 +175,53 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
   `params.json` key the code writes, and defines "5x" as the code computes it (median valid calls per motif site,
   both strands summed at two-strand sites); `usage.md` lists every option of `--help`; `tests/test_docs.py` keeps
   both complete. The README and FAQ call the monoculture test and validation communities spent, not held-out.
-- `CITATION.cff` (version 0.12.0, no DOI yet).
+- `CITATION.cff` (version 0.12.0rc1 in this release candidate; no DOI yet).
 - A small synthetic example dataset, `tests/data/example_community` (1.6 MB; the golden-snapshot community of the
   tests), with a section in `getting-started.md` and a test that runs it end to end (about 5 s on one core).
+
 ### Known limitations
+- **Unbinned genomes with a bin's methylation.** Contigs from a genome that has no bin but has the same, or nearly
+  the same, methylation as a binned genome (a strain or close sister that methylates the same motifs) are placed
+  into that genome's bin. Methylation cannot tell the two apart; with the switch of 0.11.1 such samples usually
+  got no inclusions at all. On such samples the temperature also rises (simulated look-alikes: 3.7-4.3 against 1.3
+  under 0.11.1), and because the evidence check is evidence / T < `--min-evidence`, more short contigs get no call
+  (about 12-35% of the contigs, depending on where the temperature lands: look-alike set s1 has 245, 396 and 619 no
+  calls at T 3.7, 4.3 and 5.0 of its 1,849 contigs; development data). A no call never changes a bin: the status is
+  written last, and flags, inclusions and the refined bins do not depend on it. A large relatives statistic warns
+  of such a sample.
+- **A calibration at the temperature cap gives no calls.** When the temperature of the calibration ends at the cap
+  of the grid (20), the guard above withholds every call. On development data this happened only on stress samples
+  of two bins with a single calibration piece without usable sites (or a confidently wrong one) or with half of the
+  methylation knocked out. On such a sample a fixed temperature (`--temperature`) can still give calls, but they
+  are not calibrated: on one development stress run, `--temperature 1` placed 25 contigs, one of them wrongly.
+- **Planted confirmation scenarios: one contig each behind a lower inclusion precision and two more confident
+  errors** (development data, planted ZymoFecal scenarios s4-s8, against the 0.11.1-equivalent baseline). Inclusion
+  precision is 95.018% (534 of 562) against 95.029% (497 of 523), lower by 0.011 points, because one contig,
+  m2_u19042189ctg (56 kb), is placed in a wrong bin twice (s6, s7, P 0.974 and 0.976), where the baseline leaves it
+  unbinned. Wrong placements at P >= 0.99 are 30 against 28, because one contig, m2_u10058973ctg (145 kb), is placed
+  in the same wrong bin at P 0.9961 (s6) and 0.9966 (s8), where the baseline makes the same placement at 0.984-0.985.
+  For both contigs the planted truth is contradicted by the unplanted runs: every unplanted run of both versions
+  flags m2_u19042189ctg as a contaminant of its own bin (P 1.0) and moves m2_u10058973ctg to that bin. Hi-C has no
+  verdict on either; on the Hi-C-confirmed hidden contigs inclusion precision is 100% for both versions. The gate
+  as written ("not lower than baseline") is missed literally; the user accepted option E knowing this (dev log D76).
+- **The temperature grid has steps.** The calibration chooses the temperature on a 31-point grid. When the bins of
+  the calibration are resampled (ZymoFecal tuning seeds, development data), about 1 resample in 6 lands one grid
+  step away, which moves about 17-19% of the inclusions. A continuous temperature search was tried and is not part
+  of 0.12.0 (it changed the look-alike results beyond their allowed spread; dev log D75).
 - `params.json` `kernels.ran` counts calls without a lock. On the usual (GIL) Python builds no count is lost; on a
   free-threaded build (3.13t and later, which installs the pure wheel) concurrent counts from threads can be lost,
   so the numbers may be low there. Decisions are not affected.
 - The site cache does not record which code built it (compiled reader or Python pass). The site rows are the same
   integers on both paths, but a run that reuses a cache shows no pileup-reader calls in `kernels.ran`, and nothing
   says which path built the cache.
+- **Stress runs that do not finish.** On stress set 2 (690 runs on development genomes, replicate seeds 101-103
+  included), 37 runs stop with the error "no calibration fragments", with and without the guard, the same 37 as
+  under 0.10.1. All 37 are grid runs whose contigs are 1-2 kb pieces: the error says that no calibration piece
+  could be cut from the bins; nothing beyond that message was examined. The other 653 finish; the guard fires on
+  3 of them (above).
+- **Timings.** 0.12.0 has no wall-time target (dev log D80: the 600 s target on ZymoFecal at 12 workers is not a
+  gate for this version). The timings of the release candidate (ZymoFecal and fecal_inhouse at 4, 8 and 12 workers)
+  are single runs, not medians of three (dev log D78, D79), and are stated as such.
 
 ## 0.11.1 (2026-11-12): the unknown-genome model no longer absorbs every unbinned contig
 
