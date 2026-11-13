@@ -12,7 +12,8 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   were a separate, unpublished package (`epirefine-rs`) before; no new dependency is added. Every other platform
   gets a pure wheel of the same version and runs the numpy code, which takes the same decisions (slower), with one
   warning line. The log's third line and `params.json` (`kernels`: `available`, `used`, `reason`, `commit`,
-  `cpu_path`) say which code ran. A separately installed `epirefine_rs` is no longer used. Building from source
+  `cpu_path`, and per kernel the calls on each path, `ran`) say which code ran; the choice is made once per run and
+  handed to the worker processes, and a worker that loads another build stops the run. A separately installed `epirefine_rs` is no longer used. Building from source
   (the sdist, or an editable install) needs Rust and a C compiler. Byte identity against 0.12 development with the
   separate kernels: see the branch's build log.
 

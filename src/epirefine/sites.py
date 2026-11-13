@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
+from . import _rs as _rs_state
 from ._rs import kernels as _rs_kernels
 from .model import _cores
 from .runinfo import note_worker_peaks
@@ -536,11 +537,12 @@ def _run_range_rs(rs, cfg: dict, path: str, start: int, end: int, out_prefix: st
         parts.append(f)
     names = reader.contigs
     return {"parts": parts, "contigs": sorted(names), "first": names[0] if names else None,
-            "last": names[-1] if names else None}
+            "last": names[-1] if names else None, "kernel_counts": _rs_state.take_counts()}
 
 
 def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, block: int, flush_rows: int):
     rs = _rs(cfg)
+    _rs_state.count("pileup_reader", rs is not None)
     if rs is not None:
         return _run_range_rs(rs, cfg, path, start, end, out_prefix, flush_rows)
     w = _Worker(cfg)
@@ -587,7 +589,8 @@ def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, bloc
         if s is not None:
             buf.append(s)
     flush()
-    return {"parts": parts, "contigs": sorted(seen), "first": first_contig, "last": last_contig}
+    return {"parts": parts, "contigs": sorted(seen), "first": first_contig, "last": last_contig,
+            "kernel_counts": _rs_state.take_counts()}
 
 
 def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: list[int], motif_rank,
@@ -615,6 +618,7 @@ def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: l
             results = []
             for i, f in enumerate(futs):
                 results.append(f.result())
+                _rs_state.add_counts(results[-1].pop("kernel_counts", None))  # which code the worker ran
                 if (i + 1) % max(1, len(futs) // 10) == 0:
                     log(f"  pileup pass: {i + 1}/{len(futs)} ranges done")
             note_worker_peaks()
@@ -729,6 +733,7 @@ def _unit_part(part: str, cfg: dict) -> dict:
         units, rows = _fragment_rows(cid, pos, fr)
         if len(rows):
             out["frags"] = tables(units, rows, True)
+    out["kernel_counts"] = _rs_state.take_counts()  # which code this worker ran, for params.json
     return out
 
 
@@ -767,6 +772,7 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
                 done, pending = wait(pending, return_when=FIRST_COMPLETED)
                 while done:
                     r = done.pop().result()
+                    _rs_state.add_counts(r.pop("kernel_counts", None))
                     if "chunks" in r:
                         c = r["chunks"]
                         res["L_chunks"][c["ids"]] = c["L"]; res["chunk_sites"][c["ids"]] = c["n_sites"]

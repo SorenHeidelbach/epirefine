@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import numpy as np
 import polars as pl
 
+from ._rs import count as _count
 from ._rs import kernels as _rs_kernels
 
 IUPAC = {
@@ -196,6 +197,7 @@ class MotifMatcher:
         cuts = np.unique(starts[idx[idx < len(starts)]]) if n_pieces > 1 else []
         bounds = [0, *[int(c) for c in cuts if 0 < c < len(codes)], len(codes)]
         scanner = self._scanner()
+        _count("motif_scan", scanner is not None)
         find = self.find if scanner is None else scanner.find
         if len(bounds) <= 2:
             return find(codes)

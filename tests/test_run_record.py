@@ -69,6 +69,10 @@ def test_rerun_from_params_repeats_the_decisions(community, base_run, tmp_path):
     assert run.reused_cache
     assert_same_outputs(base_run.out, run.out, DECISION_FILES + ["calibration/fragments.tsv"])
     a, b = _params(base_run), _params(run)
+    # kernels.ran counts the calls of this run: a rerun from the cache makes no pileup pass
+    ka, kb = a["kernels"].pop("ran"), b["kernels"].pop("ran")
+    assert {k: v for k, v in ka.items() if k != "pileup_reader"} == {k: v for k, v in kb.items() if k != "pileup_reader"}
+    assert "pileup_reader" in ka and "pileup_reader" not in kb
     assert {k for k in set(a) | set(b) if a.get(k) != b.get(k)} <= RUN_SPECIFIC
 
 

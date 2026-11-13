@@ -1076,6 +1076,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         "motifs": np.tile(group_label, nb), "phi_mean": mean.ravel(), "phi_lo95": lo.ravel(), "phi_hi95": hi.ravel(),
         "p_phi_gt_0.5": pp.ravel()}), out / "host_profiles.tsv")
     runinfo.write_params(out / "params.json", runinfo.finish(params))
+    from . import _rs
+    _log("kernels ran: " + (", ".join(f"{k} {v['compiled']} compiled / {v['numpy']} numpy" for k, v in _rs.ran().items())
+                            or "no kernel calls"))
     _log(f"done -> {out}; peak memory {runinfo.peak_rss_gb():.2f} GB (main process), "
          f"{runinfo.peak_rss_gb(children=True):.2f} GB (largest worker process)")
     return out

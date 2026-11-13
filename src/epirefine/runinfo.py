@@ -338,7 +338,7 @@ def kernels() -> dict:
     this run (`used`; decided once at its start, epirefine._rs.start_run), and if not, why; and which build: the
     commit it was built from, the CPU path of the model kernels (avx2_fma or generic), the API level, the features
     and the SHA-256 of the loaded compiled module (identifies the build exactly). Which code each kernel's calls
-    actually took is not recorded yet."""
+    actually took is added at the end of the run (`ran`, finish)."""
     from . import _rs
     rs, _ = _rs.load()
     used = _rs.kernels() is not None
@@ -423,6 +423,11 @@ def rerun_arguments(params: dict, out, workers=None, cache_dir=None, log=log) ->
 
 
 def finish(params: dict) -> dict:
-    """Closing entries of params.json."""
+    """Closing entries of params.json; under `kernels`, which code each kernel's calls took in this run, the
+    workers' included (`ran`: {kernel: {compiled, numpy}}), and the features a call asked for that the build lacks."""
+    from . import _rs
+    if isinstance(params.get("kernels"), dict):
+        params = {**params, "kernels": {**params["kernels"], "ran": _rs.ran(),
+                                        "missing_features": _rs.missing_features()}}
     return {**params, "finished": True, "elapsed_s": round(elapsed(), 1), "peak_rss_gb": round(peak_rss_gb(), 3),
             "peak_rss_worker_gb": round(peak_rss_gb(children=True), 3)}

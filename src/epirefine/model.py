@@ -31,6 +31,7 @@ from scipy.special import expit
 
 from .detection import DetectionParams, bb_logpmf
 from .grid import Grid
+from ._rs import count as _count
 from ._rs import kernels as _rs_kernels
 
 
@@ -158,6 +159,7 @@ def _cell_sums(table: np.ndarray, r: np.ndarray, w: np.ndarray, starts: np.ndarr
     the others), in blocks of whole cells of about chunk_rows rows, so that the [rows, G] products are never
     held for more than a block. The compiled kernel (cell_sums) does the same additions in one pass (same bits)."""
     rs = _rs("cell_sums")
+    _count("cell_sums", rs is not None)
     if rs is not None:
         return rs.cell_sums(table, r, w, starts, threads=1 if len(r) < 100_000 else _n_threads())
     res = np.empty((len(starts), table.shape[1]))
@@ -398,6 +400,7 @@ def bin_loglik(Lp_chunks: np.ndarray, chunk_bin: np.ndarray, n_bins: int, w: np.
     at once as keep the float64 copies of their chunks within BIN_BYTES (the largest bin sets the number)."""
     w = np.ones(len(chunk_bin)) if w is None else w
     rs = _rs()
+    _count("bin_loglik", rs is not None and Lp_chunks.dtype == np.float32 and Lp_chunks.ndim == 3)
     if rs is not None and Lp_chunks.dtype == np.float32 and Lp_chunks.ndim == 3:
         return rs.bin_loglik(Lp_chunks, chunk_bin, n_bins, w, threads=_n_threads())
     ell = np.zeros((n_bins,) + Lp_chunks.shape[1:])
@@ -437,6 +440,7 @@ def npmle(ell: np.ndarray, iters: int = 300, tol: float = 1e-6, init: np.ndarray
     lik = np.exp(ell - ell.max(-1, keepdims=True)).transpose(1, 0, 2).copy()  # M, B, G
     pi = np.full((M, G), 1.0 / G) if init is None else init.copy()
     rs = _rs() if blocks is None else None
+    _count("npmle", rs is not None)
     if rs is not None:
         return rs.npmle(lik, pi, iters, tol, threads=_n_threads())
     n_blocks = min(8, _n_threads()) if blocks is None else blocks  # more threads than 8 wait for each other
@@ -732,11 +736,13 @@ def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None
     H = log_prof.shape[0]
     rs = _rs("score_sums") if U * H * M >= 100_000 else None
     if rs is None or (form or _score_form(U, H, M)) == "rows":
+        _count("score_sums", False)
         return _summed_scores_rows(Lp, log_prof, rel)
     # The kernel does the sums; the exponentials stay numpy's (the float32 exp of the unit tables decides the
     # eighth digit of a score).
     if rel is not None:
         le1, le0 = np.log1p(-rel[0]), np.log(rel[0]) + rel[1]
+    _count("score_sums", True)
     bm = log_prof.max(-1)                                                          # [H, M]
     eb = np.ascontiguousarray(_profile_exp(log_prof).transpose(1, 2, 0))           # [M, G, H]
     bm = np.ascontiguousarray(bm.T)
@@ -1074,6 +1080,7 @@ class FittedModel:
         only, so the batch size does not change it.
         """
         rs = _rs() if batch is None and self.Lp_chunks.dtype == np.float32 else None
+        _count("chunk_terms", rs is not None)
         if rs is not None:
             if getattr(self, "_s_out", None) is None:
                 self._s_out = rs.community_terms(self.Lp_chunks, self.log_pi, threads=_n_threads())
