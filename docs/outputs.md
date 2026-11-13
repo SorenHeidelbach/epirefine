@@ -140,7 +140,7 @@ outputs can read EpiRefine's.
     `include_threshold`, `include_threshold_unmethylated`, `min_methylome_difference`, `max_redundancy`,
     `min_evidence`, `min_contig_coverage`, `min_contig_length`, `min_cov`, `chunk_size`, `grid_size`, `contam_eps`,
     `min_jaccard`, `variation`, `frag_lengths`, `frags_per_bin`, `frag_budget`, `allow_sharpening`, and the switches
-    `motif_noise_filter`, `group_weights`, `regional_model`, `regional_inclusion`, `do_calibrate`,
+    `motif_noise_filter`, `group_weights`, `regional_model`, `do_calibrate`,
     `write_motif_fit`; `group_sample_bp` is `--group-sample-mb` in bp). `p_unknown_given`, `tau_given` and
     `temperature_given` hold `--p-unknown`, `--tau` and `--temperature` (`null` when not given).
   - Fitted values: `temperature` (used) and `fitted_temperature`, `tau` (variation), `unknown_eta`, `unknown_lam`,

@@ -5,6 +5,42 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
 
 ## Unreleased (0.12)
 
+### Breaking: options that lost are removed
+The command line no longer offers the options below. None was a default; each lost on the development benchmarks or
+was a design that was tried and rejected (dev log U12, D63; the reason for each is in
+`docs/development/method-notes.md` §7.6 and the dev log). At the defaults nothing changes: on the 15 development
+scenarios of the small suites (monoculture training, ZymoOral, simulated look-alikes) every decision file is
+byte-identical to the run before the removal. A command line that names one of them now fails with argparse's
+usage error, and `epirefine rerun` of a `params.json` that used one at a non-default value stops with one line
+naming it (the same option at its old default, as every 0.11.1 record holds, is accepted).
+- `--calibration` with its sets (`default`, `legacy`, `consistent`, `coherent`) and features (`temper-then-mix`,
+  `prior-averaged`, `prior-matched`, `conservative-temperature`, `full-test-b`, `unit-temperature`,
+  `sites-temperature`, `common-tau`, `em-priors`, `tempered-bin-prior`, `deployed-unknown`). The 0.11.1 default
+  (`default`: the relatives test's standard error over bins) is built in; the module-level switch of
+  `tempered-bin-prior` is gone with it.
+- `--robust-fit` (`damped`: no flag or inclusion changed on any development set).
+- `--max-flagged-share` (withheld 8 of 12 correct flags in a merge stress set and fired in none of 42 merges). The
+  `flagged_share` column and the `warning` column of `bin_evidence.tsv` stay; the warning
+  `merged_bin_suspected_flags_not_applied` can no longer occur.
+- `--tau-support` (`leave_bin_out`: no decision changed).
+- `--unlisted-genome` and `--inclusion-support` (rejected inclusion designs: inclusion recall 89.3% -> 87.4% and
+  58.4% on the training communities, development). `params.json` no longer has `unlisted_share`.
+- `--regional-inclusion` (no benchmark gained an inclusion; on ZymoFecal it placed long contigs the contig-level
+  model gives to an unknown genome).
+- The calibration-core designs that lost (mission WP3): `--tau-select`, `--npmle-start`, `--relatives per-bin`,
+  `--relatives slot` with `--slot-objective`, `--slot-test-b` and `--slot-kappa`; with them the report files
+  `hidden_relative.tsv` and `calibration/relatives_by_bin.tsv` (written only by `per-bin` and `slot`) and the
+  `params.json` keys `relatives_per_bin` and `relatives_slot`. The hidden diagnostic `--calibration-exclusion` too.
+- `params.json` no longer holds the keys of these options (`calibration`, `calibration_features`, `robust_fit`,
+  `max_flagged_share`, `tau_support`, `unlisted_genome`, `inclusion_support`, `regional_inclusion`, `tau_select`,
+  `npmle_start`, `calibration_exclusion`, `slot_objective`, `slot_test_b`, `slot_kappa`) nor
+  `unknown_model_deployed_check`. No column of any output table changed.
+- Kept: `--relatives switch` (hidden, deprecated; the 0.11.1 path, for comparison with option E), now used
+  automatically only with `--no-calibrate`; `--unknown-share`; the experimental `--temperature-law` and
+  `--evidence-temperature`; and the rule variants not yet judged (`--regional-leave-out`, `--regional-withdraw`,
+  `--regional-tempered`, `--gate-leave-out`, `--gate-unweighted`, `--eps-gated`, `--unknown-prior`,
+  `--redundancy-order`, `--siteless-bin-guard`, and the site options).
+
 ### Changed
 - **Method: the unknown-model switch is removed (new default, "option E").** Up to 0.11.1 EpiRefine chose, during
   calibration, between two models of a genome without a bin: a random draw from the community, or a relative of
@@ -31,10 +67,8 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   (development data: 4.4-5.4 on the simulated look-alikes, 0.4-1.9 on ZymoFecal). When the switch would have
   chosen the relatives, `params.json` also holds `unknown_model_forced`.
 - `--relatives switch` (hidden, deprecated, for comparison only) restores the switch of 0.11.1 and, unless
-  `--unknown-share` is given, its share estimate at the deployed temperature: it reproduces 0.11.1. Runs with an
-  option that only works on that path (`--no-calibrate`, `--unlisted-genome`, `--regional-inclusion`, the
-  calibration features `sites-temperature`, `prior-matched`, `prior-averaged`, `unit-temperature`,
-  `deployed-unknown`) use it when `--relatives` is not given, and say so in the log. `params.json` records the
+  `--unknown-share` is given, its share estimate at the deployed temperature: it reproduces 0.11.1. A run with
+  `--no-calibrate` uses it when `--relatives` is not given, and says so in the log. `params.json` records the
   `relatives` and `unknown_share` actually used; `epirefine rerun` of a `params.json` written before 0.12 uses the
   switch.
 
