@@ -140,5 +140,8 @@ def test_score_in_batches_is_score(monkeypatch):
     parts = m.score(Lt, lp_rows=rows)
     for f in ("S", "R", "Lp", "lp_rows"):
         assert np.array_equal(getattr(parts, f), getattr(whole, f)), f
+    # Au comes from a BLAS product (group_scores); with several BLAS threads a product of 4,096 rows may sum in
+    # another order than one of 8,192 rows: one ulp of a log-sum near 1 (4.4e-16 absolute), which a purely
+    # relative test fails on cells whose log is near 0. These are log values: compare them absolutely too.
     for f in ("Au", "Su", "Su_comm"):
-        assert np.allclose(getattr(parts, f), getattr(whole, f), rtol=1e-12, atol=0), f
+        assert np.allclose(getattr(parts, f), getattr(whole, f), rtol=1e-12, atol=1e-12), f
