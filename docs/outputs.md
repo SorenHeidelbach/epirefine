@@ -146,5 +146,13 @@ outputs can read EpiRefine's.
   - Fitted values: `temperature` (used) and `fitted_temperature`, `tau` (variation), `unknown_eta`, `unknown_lam`,
     `n_fragments`, `p_unknown` (share of unbinned contigs from genomes without a bin) and `contamination_rate`
     (share of contaminants among binned contigs).
+  - The unknown model (since 0.12): `relatives` and `unknown_share`, the values used (`community-only` and `t1` by
+    default; see `docs/usage.md`); `p_unknown_t1`, the share estimated at temperature 1; `relatives_statistic`, the
+    relatives test of 0.11 as a report: `gain` (mean log-loss gain per calibration piece of the best model with
+    relatives over the best community-only one, each at its own temperature), `se` (its standard error,
+    `se_over_bins` true when resampled over bins), `statistic` = `gain` / `se`, `relatives_eta`, `relatives_lam`,
+    `relatives_temperature`, `community_temperature`, and `switch_choice` (what the 2-SE switch of 0.11.1 would have
+    chosen); `null` without calibration or with one bin. `unknown_model_forced` (only when the switch would have chosen
+    the relatives): its `switch_eta`, `switch_lam`, `switch_temperature` and the `community_temperature` used.
   - The file is strict JSON: an infinite value is written as the string `"inf"` (a `tau` of `"inf"` means no
     variation between a contig and its bin), a missing one as `null`.
