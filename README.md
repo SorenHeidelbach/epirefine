@@ -28,19 +28,17 @@ coverage, and in bins without methylated motifs the remaining signal follows GC 
 pip install epirefine
 ```
 
-or with conda (Bioconda):
-
-```bash
-conda install -c conda-forge -c bioconda epirefine
-```
-
-Python 3.10 or newer; Linux and macOS. Check it works with `epirefine --version`.
+Python 3.10 or newer; Linux and macOS. Check it works with `epirefine --version`. A Bioconda recipe follows the
+PyPI release; until it is there, install with pip (also inside a conda environment).
 
 The wheels for Linux (x86_64, aarch64; glibc 2.17 or newer, and musl on x86_64) and macOS (Apple silicon and Intel)
 carry compiled kernels, which EpiRefine uses by default. On any other platform pip installs the pure-Python wheel
 and EpiRefine runs its numpy code: the same decisions, more slowly. The log's third line says which code runs
 (`kernels: compiled (...)` or `kernels: numpy (<reason>)`), a run on numpy without being asked says so in a
-warning, and `params.json` records it under `kernels`. `EPIREFINE_RS=0` forces the numpy code.
+warning, and `params.json` records it under `kernels`. `EPIREFINE_RS=0` forces the numpy code. pip never compiles
+anything: the pure wheel fits every platform, so building from source happens only when asked for
+(`pip install --no-binary epirefine epirefine`, which needs Rust and a C compiler). A separately installed
+`epirefine_rs` (the unpublished kernel package of earlier development versions) is not used.
 
 ## Quick start
 
@@ -48,10 +46,10 @@ You need four files for the sample:
 
 | Input | What it is | Made with |
 |---|---|---|
-| `assembly.fasta` | the assembled contigs | any assembler (e.g. metaFlye) |
+| `assembly.fasta` | the assembled contigs | any long-read assembler (e.g. myloasm or metaFlye) |
 | `contig_bin.tsv` | which bin each binned contig is in: `contig<TAB>bin`, no header | any binner |
 | `pileup.bed` | reads called modified / unmodified at every position | `modkit pileup` |
-| `bin-motifs.tsv` | the methylated motifs found in the bins | `nanomotif motif_discovery` |
+| `bin-motifs.tsv` | the methylated motifs found in the bins | `nanomotif motif_discovery` ([Nanomotif](https://github.com/MicrobialDarkMatter/nanomotif); the benchmarks of 0.12 used version 1.3.0) |
 
 Then run:
 
@@ -85,8 +83,8 @@ contaminants and with the included contigs added. Every contig's decision, with 
 | `redundant` | unbinned; would be included, but its sequence is already in the bin |
 | `low_coverage`, `too_short`, `no_methylation_evidence`, `sole_contig_of_bin` | not judged: too few reads, too short, no informative methylation, or nothing to compare it with |
 
-The files `bin_contamination.tsv`, `include_contigs.tsv` and `decontaminated_contig_bin.tsv` have the same format
-as Nanomotif's, so pipelines built for Nanomotif's refinement can use EpiRefine's output directly. All files are
+`bin_contamination.tsv`, `include_contigs.tsv` and `decontaminated_contig_bin.tsv` list the flags, the inclusion
+candidates and the bins without their contaminants in a fixed column format for downstream scripts. All files are
 described in [docs/outputs.md](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/outputs.md).
 
 ## Documentation
@@ -106,14 +104,17 @@ described in [docs/outputs.md](https://github.com/SorenHeidelbach/epirefine/blob
   monoculture test and validation communities (spent: they were looked at during development, so they are no longer
   an unseen evaluation; version 0.10.1; 0.11.0 gives the same results), 311 of 316 flags (98.4%) were true contaminants and 1,096 of 1,180 placements (92.9%) went into
   the right bin: 98.4% in the test set, 89.6% in the validation set, where contigs of genomes without a bin were
-  placed into bins with few methylated motifs. It found 311 of 363 planted contaminants (85.7%). On the development
-  benchmarks every flag and 99.8% of placements were right, and on the six training communities it found 94.8% of
-  the contaminants ([benchmarks/results.tsv](https://github.com/SorenHeidelbach/epirefine/blob/main/benchmarks/results.tsv)).
+  placed into bins with few methylated motifs. It found 311 of 363 planted contaminants (85.7%). With the same
+  version, on the development benchmarks every flag and 99.8% of placements were right. With 0.12.0rc1, on the six
+  training communities (development) it found 94.8% of the contaminants with a flag precision of 100% and put back
+  89.6% of the removed contigs ([benchmarks/results.tsv](https://github.com/SorenHeidelbach/epirefine/blob/main/benchmarks/results.tsv)).
+  No evaluation on data held out from development has been run yet; the manuscript will report it.
 - **It declines rather than guesses.** Contigs below 5x coverage, shorter than 1 kb or without informative
-  methylation get no decision. On a complex fecal sample (a development sample) that was 76% of the contigs and 31%
-  of the assembled sequence.
+  methylation get no call. On a complex fecal sample (a development sample, version 0.8.0) that was 76% of the
+  contigs and 31% of the assembled sequence. If the calibration finds no usable temperature (it ends at the cap of
+  its grid), the run makes no call at all and says so in the log.
 - **Results depend on the motif table**, and on whether unbinned genomes share a bin's methylation (their contigs
-  are then placed in that bin); see
+  are then placed in that bin, and more short contigs get no call); see
   [known limitations](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/faq.md#known-limitations).
 - **Methylation cannot separate genomes that methylate the same motifs**, such as very close strains. EpiRefine
   then keeps both bins in its credible set or leaves the contig where it is.
@@ -123,8 +124,8 @@ More in the [FAQ](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/fa
 ## Citing
 
 A manuscript is in preparation. Until then, please cite this repository and the version you used
-(`epirefine --version`); `CITATION.cff` holds the citation data (GitHub's "Cite this repository"). EpiRefine builds on [Nanomotif](https://github.com/MicrobialDarkMatter/nanomotif) for
-motif discovery and on [modkit](https://github.com/nanoporetech/modkit) for the pileup.
+(`epirefine --version`); `CITATION.cff` holds the citation data (GitHub's "Cite this repository"). EpiRefine takes its motifs from [Nanomotif](https://github.com/MicrobialDarkMatter/nanomotif)
+(motif discovery) and its read counts from [modkit](https://github.com/nanoporetech/modkit) (the pileup).
 
 ## Contributing
 
