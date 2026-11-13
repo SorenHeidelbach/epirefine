@@ -63,7 +63,7 @@ jobs:
           - { name: manylinux2014 x86_64, runner: ubuntu-latest, target: x86_64, manylinux: "2014" }
           - { name: manylinux2014 aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: "2014" }
           - { name: musllinux_1_2 x86_64, runner: ubuntu-latest, target: x86_64-unknown-linux-musl, manylinux: musllinux_1_2 }
-          - { name: macOS arm64, runner: macos-14, target: aarch64-apple-darwin, manylinux: "", macos: "11.0" }
+          - { name: macOS arm64, runner: macos-15, target: aarch64-apple-darwin, manylinux: "", macos: "11.0" }
           - { name: macOS x86_64, runner: macos-15-intel, target: x86_64-apple-darwin, manylinux: "", macos: "10.12" }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0 (2026-11-13)
@@ -144,11 +144,11 @@ jobs:
         include:
           - { wheel: x86_64, runner: ubuntu-latest, simd: true }
           - { wheel: aarch64, runner: ubuntu-24.04-arm, simd: false }
-          - { wheel: aarch64-apple-darwin, runner: macos-14, simd: false }
+          - { wheel: aarch64-apple-darwin, runner: macos-15, simd: false }
           - { wheel: x86_64-apple-darwin, runner: macos-15-intel, simd: true }
           - { wheel: x86_64, runner: ubuntu-latest, simd: true, python: "3.10", lowest: true }
           - { wheel: aarch64, runner: ubuntu-24.04-arm, simd: false, python: "3.10", lowest: true }
-          - { wheel: aarch64-apple-darwin, runner: macos-14, simd: false, python: "3.10", lowest: true }
+          - { wheel: aarch64-apple-darwin, runner: macos-15, simd: false, python: "3.10", lowest: true }
           - { wheel: x86_64-apple-darwin, runner: macos-15-intel, simd: true, python: "3.10", lowest: true }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0 (2026-11-13)
