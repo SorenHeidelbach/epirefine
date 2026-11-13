@@ -699,6 +699,28 @@ deployed temperature unless `--unknown-share` is given.
 
 ---
 
+### 7.8 The calibration guard (since 0.12)
+
+*Code: `calibrate.calibration_guard`, `pipeline.run` (after the calibration block).*
+
+On the default path (option E, no `--temperature`), the run checks whether the calibrated temperature is at the
+largest point of the grid (the cap, 20). If so, it makes no call: the contamination and inclusion thresholds are
+set beyond 1 for the run, so no contig is flagged, included or moved, and the posteriors are written at the cap
+for inspection only. One log line (`WARNING: calibration guard`) and `params.json` `calibration_guard` say so.
+
+**Why the cap and not the number of pieces.** A temperature at the boundary of the search means no tempering the
+grid allows predicted the pieces better: the loss is flat in $T$ (pieces without usable sites) or still falling
+at 20 (pieces confidently wrong); either way the fit gives no temperature to decide with. On development data the
+temperature is at most 5.9 on every normal run (monoculture training set, ZymoOral, simulated look-alikes,
+ZymoFecal and 600 bin resamples of its calibration, fecal_inhouse) and either at most 1.7 or exactly 20 on the 690
+runs of stress set 2; nothing lies in between, so the check does not sit on a threshold. Counts of pieces do not
+separate: from a single calibration piece the fit usually lands at the never-sharpen floor (1.08) and the calls
+are right (stress set 2: tens of runs, flag precision 100%), so a guard on few pieces would remove correct calls.
+The three stress runs at the cap made no call under option E anyway (the contamination rate and $p_	ext{unknown}$
+fall to 0 at $T = 20$ and every contig has evidence / $T$ below 3); the guard makes this explicit and guarantees
+it on data where some calls would survive $T = 20$. A fixed fallback temperature was rejected: $T = 1$ on one of
+those runs placed 25 contigs, one wrongly, where the calibration had found the scores untrustworthy.
+
 ## 8. Uncertainty, assignability and diagnostics
 
 ### 8.1 Credible sets and Bayes factors

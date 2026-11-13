@@ -149,6 +149,21 @@ inclusion threshold, the 5x cut-off), so it is not an independent check. Things 
   4.3 and 5.0; development data). On the fecal development sample the temperature did not change (5.0) and
   neither did the no calls. A no call never changes a bin: the status is written last, and flags, inclusions and
   the refined bins do not depend on it.
+- **A calibration that ends at the temperature cap gives no calls.** The temperature is fitted on pieces cut from
+  the bins (a grid from 0.2 to 20; never below 1). If it ends at the cap of 20, no tempering made the pieces
+  predictable, and the fit says nothing about how far the scores can be trusted. EpiRefine then makes no call at all
+  (no flag, inclusion or move; the posteriors are still written, for inspection only), says so in one log line
+
+  ```
+  WARNING: calibration guard: the calibrated temperature is at the grid cap (20; 1 calibration pieces, 0 in test B): ...
+  ```
+
+  and records `calibration_guard` in `params.json`. On development data this happened only on two-bin stress
+  samples with a single calibration piece holding almost no motif sites (or one scored confidently to the wrong
+  bin) or with half of the methylation knocked out; never on the monocultures, the mock communities or the two
+  fecal samples, where the temperature stayed between 1.08 and 5.9. More or longer binned contigs (more
+  calibration pieces) are the remedy. `--temperature` overrides the guard with an uncalibrated temperature; on one
+  development stress run, `--temperature 1` placed 25 contigs, one of them wrongly.
 - **The relatives statistic.** Up to 0.11.1 EpiRefine chose between the community model and a "relatives" model
   (a genome without a bin resembles one of the bins) by a test on the calibration pieces, and the relatives model
   could take every unbinned contig ("nothing is included"). The test is still run and reported, but decides

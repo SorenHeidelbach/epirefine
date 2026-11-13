@@ -38,6 +38,19 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   `relatives` and `unknown_share` actually used; `epirefine rerun` of a `params.json` written before 0.12 uses the
   switch.
 
+- **Guard for calibrations without a usable temperature.** When the calibrated temperature ends at the cap of the
+  grid (20), the calibration pieces were not predicted better by any temperature the grid allows, and the fit
+  says nothing about how far the scores can be trusted. Such a run now makes no call (no flag, inclusion or move;
+  the posteriors are still written, for inspection only), writes one log line `WARNING: calibration guard: ...`
+  and records `params.json` `calibration_guard` (`fired`, `reason`, `temperature`, `cap`, the numbers of
+  calibration pieces and of test-B pieces, `fallback`). `--temperature` bypasses it. It is checked on the default
+  path only (not with the deprecated `--relatives switch`). Measured (development data): it fires on none of the
+  normal development runs (temperature at most 5.9 on the monoculture training set, ZymoOral, the simulated
+  look-alikes, ZymoFecal and its 600 bin resamples, fecal_inhouse) and on 3 of the 690 stress-set-2 runs (every
+  other one has a temperature of at most 1.7), all three of which made no call under option E anyway; decisions
+  are unchanged everywhere. The number of calibration pieces does not trigger it: from a single piece the
+  calibration usually lands at temperature 1.08 and the calls are right.
+
 ### Known limitations (new in 0.12)
 - **Unbinned genomes with a bin's methylation.** Contigs from a genome that has no bin but has the same, or nearly
   the same, methylation as a binned genome (a strain or close sister that methylates the same motifs) are placed
@@ -48,6 +61,12 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   calls at T 3.7, 4.3 and 5.0 of its 1,849 contigs; development data). A no call never changes a bin: the status is
   written last, and flags, inclusions and the refined bins do not depend on it. A large relatives statistic warns
   of such a sample.
+
+- **A calibration at the temperature cap gives no calls.** When the temperature of the calibration ends at the cap
+  of the grid (20), the guard above withholds every call. On development data this happened only on stress samples
+  of two bins with a single calibration piece without usable sites (or a confidently wrong one) or with half of the
+  methylation knocked out. On such a sample a fixed temperature (`--temperature`) can still give calls, but they
+  are not calibrated: on one development stress run, `--temperature 1` placed 25 contigs, one of them wrongly.
 
 ### Fixed
 - On the decision path of the calibration-core options, the `coverage` column of `contig_decisions.tsv` held the

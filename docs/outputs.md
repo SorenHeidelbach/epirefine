@@ -154,5 +154,9 @@ outputs can read EpiRefine's.
     `relatives_temperature`, `community_temperature`, and `switch_choice` (what the 2-SE switch of 0.11.1 would have
     chosen); `null` without calibration or with one bin. `unknown_model_forced` (only when the switch would have chosen
     the relatives): its `switch_eta`, `switch_lam`, `switch_temperature` and the `community_temperature` used.
+  - `calibration_guard` (since 0.12): `fired` (true when the calibrated temperature is at the cap of the grid; the
+    run then makes no call), `reason`, `temperature`, `cap` (20), `pieces` (calibration pieces used),
+    `test_b_pieces` (pieces in test B) and `fallback` (`"no calls"` when fired); `null` without calibration, with
+    `--temperature` or with the deprecated `--relatives switch`. See the FAQ, "Known limitations".
   - The file is strict JSON: an infinite value is written as the string `"inf"` (a `tau` of `"inf"` means no
     variation between a contig and its bin), a missing one as `null`.
