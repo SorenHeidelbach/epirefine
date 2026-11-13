@@ -44,7 +44,7 @@ def switched_off() -> bool:
 def _load():
     """(module, None) when the compiled kernels load and offer the interface this code needs, else (None, reason).
     Does not look at EPIREFINE_RS. The interface number is the one the compiled extension exports (`_core.API`), so
-    a build older than this Python code is refused; a build that lacks a function this code calls at load (an
+    a build older or newer than this Python code is refused; a build that lacks a function this code calls at load (an
     AttributeError or TypeError) counts as one that does not load."""
     try:
         _kernels = importlib.import_module("epirefine._kernels")  # by name: honours sys.modules, as tests rely on
@@ -56,8 +56,10 @@ def _load():
         return None, f"the compiled extension does not load: {e}"  # shared library, an incomplete build
     try:
         api = int(getattr(_kernels._core, "API", 0))
-        if api < REQUIRED_API:
-            return None, f"the compiled extension has interface {api}, this code needs {REQUIRED_API} (a stale build?)"
+        if api != REQUIRED_API:  # a raised number means changed meanings or signatures, in either direction
+            age = "older" if api < REQUIRED_API else "newer"
+            return None, (f"the compiled extension has interface {api}, this code needs {REQUIRED_API} "
+                          f"(a {age} build than this code)")
         _kernels.cpu_path(), _kernels.features()  # every run records them: a build without them is refused here
     except (AttributeError, TypeError, ValueError) as e:
         return None, f"the compiled extension does not load: {type(e).__name__}: {e}"

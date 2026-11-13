@@ -88,13 +88,33 @@ def test_old_interface_is_refused(monkeypatch):
     assert R.kernels() is None and R.reason().startswith(f"the compiled extension has interface {rs.API}")
 
 
-def test_interface_number_comes_from_the_build():
+def test_interface_number_comes_from_the_build(monkeypatch):
     """The interface number is exported by the compiled extension, not by a Python file of the same tree (that
-    compared the code with itself: a stale build passed)."""
+    compared the code with itself: a stale build passed). The check reads _core.API live: with the build's number
+    changed (and _kernels.API, read at import, left as it was) the build is refused; a check of a Python constant
+    (_kernels.API or supports("api>=N")) would pass it."""
     rs = R.load()[0]
     if rs is None:
         pytest.skip("no compiled kernels in this install")
-    assert isinstance(rs._core.API, int) and rs.API == rs._core.API >= R.REQUIRED_API
+    assert isinstance(rs._core.API, int) and rs.API == rs._core.API == R.REQUIRED_API
+    monkeypatch.delenv("EPIREFINE_RS", raising=False)
+    monkeypatch.setattr(rs._core, "API", R.REQUIRED_API + 5)
+    R.reset()
+    assert rs.API == R.REQUIRED_API and R.kernels() is None
+
+
+def test_newer_build_is_refused(monkeypatch):
+    """A build with a higher interface number (a branch that raised it, left in an editable install) has other
+    meanings or signatures: numpy, not a TypeError or wrong numbers mid-run."""
+    rs = R.load()[0]
+    if rs is None:
+        pytest.skip("no compiled kernels in this install")
+    monkeypatch.delenv("EPIREFINE_RS", raising=False)
+    monkeypatch.setattr(rs._core, "API", R.REQUIRED_API + 1)
+    R.reset()
+    assert R.kernels() is None
+    assert R.reason() == (f"the compiled extension has interface {R.REQUIRED_API + 1}, this code needs "
+                          f"{R.REQUIRED_API} (a newer build than this code)")
 
 
 def test_stale_build_is_refused(monkeypatch):
