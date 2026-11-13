@@ -5,6 +5,17 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
 
 ## Unreleased (0.12)
 
+### Changed
+- **Compiled kernels by default (U5, D73).** The wheels for Linux (manylinux2014 x86_64 and aarch64, musllinux_1_2
+  x86_64) and macOS (arm64, x86_64) now carry the compiled kernels (pileup reader, motif scan, model kernels; the
+  Rust code is in `rust/`, the module `epirefine._kernels`), and EpiRefine uses them unless `EPIREFINE_RS=0`. They
+  were a separate, unpublished package (`epirefine-rs`) before; no new dependency is added. Every other platform
+  gets a pure wheel of the same version and runs the numpy code, which takes the same decisions (slower), with one
+  warning line. The log's third line and `params.json` (`kernels`: `available`, `used`, `reason`, `commit`,
+  `cpu_path`) say which code ran. A separately installed `epirefine_rs` is no longer used. Building from source
+  (the sdist, or an editable install) needs Rust and a C compiler. Byte identity against 0.12 development with the
+  separate kernels: see the branch's build log.
+
 ### Fixed
 - **Site-cache key.** The manifest now has a format number (2) and a content fingerprint of the assembly and the
   pileup (SHA-256 of three 1 MiB blocks: start, middle, end; files up to 16 MiB whole). A pileup replaced by one of
@@ -23,7 +34,7 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   the pieces are exactly those of 0.11.1 (tested against stored 0.11.1 draws, and on ZymoFecal's two motif tables
   against the groups of their site caches), so no decision changes. `params.json` records `calibration_seed`.
 - `params.json` records the code and where it ran: `commit` (from git, `EPIREFINE_COMMIT` or a `COMMIT` file),
-  `libraries`, `kernels` (installed, used, build hash), `threads` and `seeds`. `epirefine rerun --params
+  `libraries`, `kernels` (available, used, reason, build commit, CPU path, build hash), `threads` and `seeds`. `epirefine rerun --params
   params.json --out DIR` repeats a run from it (tested: same decisions).
 - Input checks with one-line errors: a contig listed in two bins (it was silently put in the last one), a
   contig-bin table with its columns swapped, a motif table without the needed columns (names the missing ones).

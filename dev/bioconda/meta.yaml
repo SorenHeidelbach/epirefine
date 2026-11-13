@@ -1,0 +1,72 @@
+# Draft Bioconda recipe for EpiRefine with its compiled kernels (D73). Not submitted and not built; the copy for
+# bioconda-recipes takes the version and the sha256 of the sdist on PyPI. The package is no longer noarch: the
+# kernels in rust/ are compiled per platform and Python version. Bioconda builds linux-64 and osx-64, and the two
+# ARM platforms listed under additional-platforms.
+{% set name = "epirefine" %}
+{% set version = "0.12.0" %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  url: https://pypi.org/packages/source/{{ name[0] }}/{{ name }}/{{ name }}-{{ version }}.tar.gz
+  sha256: "<sha256 of the sdist>"
+
+build:
+  number: 0
+  skip: true  # [py < 310]
+  script:
+    - cargo-bundle-licenses --format yaml --output CRATE_LICENSES.yml --manifest-path rust/Cargo.toml
+    - {{ PYTHON }} -m pip install . --no-deps --no-build-isolation --no-cache-dir -vv
+  entry_points:
+    - epirefine = epirefine.cli:main
+  run_exports:
+    - {{ pin_subpackage(name, max_pin="x.x") }}
+
+requirements:
+  build:
+    - {{ compiler('c') }}
+    - {{ compiler('rust') }}
+    - cargo-bundle-licenses
+  host:
+    - python
+    - pip
+    - maturin >=1.16,<2
+  run:
+    - python
+    - numpy >=1.26
+    - scipy >=1.11
+    - polars >=1.2
+
+test:
+  imports:
+    - epirefine
+    - epirefine._kernels
+  commands:
+    - epirefine --help
+    - epirefine run --help
+    - python -c "from epirefine import _rs; print(_rs.summary()); assert _rs.kernels('model_kernels') is not None"
+
+about:
+  home: https://github.com/SorenHeidelbach/epirefine
+  summary: "Refine metagenome bins from nanopore methylation: flag contaminants and place unbinned contigs, with calibrated probabilities."
+  description: |
+    EpiRefine refines an existing metagenome binning from a modkit pileup and the motifs Nanomotif found in the
+    bins. It flags binned contigs whose methylation does not fit their bin and places unbinned contigs into the
+    bin whose methylation they share, with calibrated probabilities and Nanomotif-compatible outputs.
+  license: MIT
+  license_family: MIT
+  license_file:
+    - LICENSE
+    - rust/THIRD_PARTY_LICENSES.txt
+    - CRATE_LICENSES.yml
+  dev_url: https://github.com/SorenHeidelbach/epirefine
+  doc_url: https://github.com/SorenHeidelbach/epirefine/blob/main/README.md
+
+extra:
+  additional-platforms:
+    - linux-aarch64
+    - osx-arm64
+  recipe-maintainers:
+    - SorenHeidelbach

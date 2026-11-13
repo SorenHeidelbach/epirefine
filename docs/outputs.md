@@ -130,8 +130,10 @@ outputs can read EpiRefine's.
   - The code and where it ran: `commit` (`commit`, `source`: `git` with `dirty` true when tracked files differ from
     the commit, or the environment variable `EPIREFINE_COMMIT`, or a file `COMMIT` next to `src` as a snapshot made
     with `git archive` can carry; `null` for an installed release, whose `version` names it), `libraries` (python,
-    numpy, scipy, polars, epirefine_rs versions), `kernels` (`installed`, `used`, `EPIREFINE_RS`, `version`, `api`,
-    `features`, `module_sha256` of the compiled module, `installed_from`), `threads` (`workers`, `cores` this process
+    numpy, scipy, polars versions), `kernels` (`available`: the install has the compiled kernels; `used`;
+    `reason` the numpy code ran, or `null`; `EPIREFINE_RS`, `EPIREFINE_RS_NO_SIMD`; for a compiled install also
+    `commit` the module was built from, `cpu_path` (`avx2_fma` or `generic`), `api`, `features` and `module_sha256`
+    of the compiled module), `threads` (`workers`, `cores` this process
     may use, `model_threads`, `polars_threads`, and the variables `omp_num_threads`, `openblas_num_threads`,
     `mkl_num_threads`, `polars_max_threads` as set, or `null`), `seeds` (`seed`, `calibration_seed`, and `bootstrap`,
     the fixed seed of the resampling in the calibration tests).

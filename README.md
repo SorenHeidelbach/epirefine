@@ -36,6 +36,12 @@ conda install -c conda-forge -c bioconda epirefine
 
 Python 3.10 or newer; Linux and macOS. Check it works with `epirefine --version`.
 
+The wheels for Linux (x86_64, aarch64; glibc 2.17 or newer, and musl on x86_64) and macOS (Apple silicon and Intel)
+carry compiled kernels, which EpiRefine uses by default. On any other platform pip installs the pure-Python wheel
+and EpiRefine runs its numpy code: the same decisions, more slowly. The log's third line says which code runs
+(`kernels: compiled (...)` or `kernels: numpy (<reason>)`), a run on numpy without being asked says so in a
+warning, and `params.json` records it under `kernels`. `EPIREFINE_RS=0` forces the numpy code.
+
 ## Quick start
 
 You need four files for the sample:
@@ -130,6 +136,9 @@ git clone https://github.com/SorenHeidelbach/epirefine.git && cd epirefine
 uv venv && uv pip install -e ".[dev]"
 .venv/bin/pytest -q
 ```
+
+The editable install compiles the kernels in `rust/` and needs a Rust toolchain and a C compiler (with a conda
+toolchain, set `AR=gcc-ar`). `EPIREFINE_RS=0` runs the numpy code in such an install.
 
 Development rules are in [CLAUDE.md](https://github.com/SorenHeidelbach/epirefine/blob/main/CLAUDE.md), the
 benchmark used for every release in `benchmarks/` (results per version in

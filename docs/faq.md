@@ -189,11 +189,22 @@ with another number of workers (`--workers`) or threads (cores, `OMP_NUM_THREADS
 same kind of machine. `--calibration-seed` draws other calibration pieces and leaves the motif groups and the site
 cache alone, so running a few values of it shows which decisions depend on the pieces drawn.
 
-Two things can change the last digits of the probabilities without changing the decisions: the optional compiled
-kernels (package `epirefine-rs`) against the numpy code, and another machine or BLAS library. Both change only how
+Two things can change the last digits of the probabilities without changing the decisions: the compiled
+kernels against the numpy code (the pure wheel, or `EPIREFINE_RS=0`), and another machine or BLAS library. Both change only how
 floating-point sums and exponentials are rounded. On the development benchmarks (monoculture training communities,
 ZymoOral pieces, simulated look-alikes) runs with and without the kernels made the same calls, with probabilities
-that agreed to 1e-10 or better.
+that agreed to 1e-10 or better. The kernels' two CPU paths (`avx2_fma` on x86-64 CPUs with AVX2 and FMA, `generic`
+elsewhere; `params.json` names the one used) give the same bits.
+
+### Does EpiRefine use the compiled kernels on my machine?
+
+The third line of the log says so: `kernels: compiled (avx2_fma; built from <commit>)`, or `kernels: numpy
+(<reason>)`. When the numpy code runs without `EPIREFINE_RS=0`, the log also has one warning line. The reasons:
+no compiled wheel for the platform (pip then installs the pure wheel: Windows, free-threaded Python, PyPy, glibc
+older than 2.17, other CPUs), a compiled module that does not load, or one too old for this version of EpiRefine.
+The numpy code takes the same decisions and is slower, most in the pass over the pileup and in the model. To compile the kernels for such a
+platform, install from the source distribution with a Rust toolchain and a C compiler:
+`pip install --no-binary epirefine epirefine`.
 
 ### Something went wrong
 
