@@ -131,11 +131,13 @@ threads. `epirefine rerun` repeats the run it describes, reading the inputs from
 recorded run's site cache:
 
 ```bash
-epirefine rerun --params first_run/params.json --out repeat [--workers N] [--cache-dir DIR]
+epirefine rerun --params first_run/params.json --out repeat [--workers N] [--cache-dir DIR] [--temp-dir DIR]
 ```
 
 The log warns when an input file's size or modification time, the version or the commit differs from the record.
-Decisions do not depend on the worker count.
+Decisions do not depend on the worker count. `--tables-in-memory` and the folder of the temporary tables are
+repeated as recorded (a run that kept them in its output folder keeps them in the new one); `--temp-dir` overrides
+the folder. Neither changes a result.
 A run recorded before 0.12 that used an option removed in 0.12 (below) cannot be repeated by this version: `rerun`
 stops with one line naming the option; repeat it with the version the record names. Such options at the value that
 was their default (for example `"calibration": "default"` in a 0.11.1 record) are accepted, since that behaviour

@@ -211,3 +211,22 @@ def test_memory_file_system():
         assert memory_file_system("/dev/shm/not/yet/made") == "tmpfs"
     if mounts.get("/") not in ("tmpfs", "ramfs"):
         assert memory_file_system("/") is None
+
+
+def test_rerun_keeps_the_table_options_beside_removed_options(base_run, tmp_path):
+    """A record with the table options and the removed 0.12 options at their old defaults (a 0.11.1-style record
+    as the merge of perf/lt-disk with the U12 removals sees it) replays the table options; a removed option at
+    another value stops the rerun whatever the table options say."""
+    from epirefine.io import InputError
+    from epirefine.runinfo import REMOVED_OPTIONS, rerun_arguments
+    p = json.loads((base_run.out / "params.json").read_text())
+    p.update({k: d for k, (_, d) in REMOVED_OPTIONS.items()})
+    p.update(temp_dir=str(tmp_path / "t1"), tables_in_memory=True)
+    kw = rerun_arguments(p, tmp_path / "o", log=lambda m: None)
+    assert kw["temp_dir"] == str(tmp_path / "t1") and kw["tables_in_memory"] is True
+    assert not set(REMOVED_OPTIONS) & set(kw)  # run() no longer takes them
+    kw = rerun_arguments(p, tmp_path / "o", log=lambda m: None, temp_dir=str(tmp_path / "t2"))
+    assert kw["temp_dir"] == str(tmp_path / "t2")
+    p.update(unlisted_genome=True)
+    with pytest.raises(InputError, match="--unlisted-genome"):
+        rerun_arguments(p, tmp_path / "o", log=lambda m: None)
