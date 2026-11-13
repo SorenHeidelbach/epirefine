@@ -8,12 +8,16 @@ Everything EpiRefine writes into `--out`. For most uses you need only the first 
 | [`contig_decisions.tsv`](#contig_decisionstsv) | **Every contig's decision, with probabilities.** |
 | [`decontaminated_contig_bin.tsv`](#nanomotif-compatible-files) | The bins with contaminants removed, nothing added. |
 | [`bin_contamination.tsv`, `include_contigs.tsv`](#nanomotif-compatible-files) | Nanomotif-format flags and inclusion candidates. |
-| [`bin_evidence.tsv`, `host_profiles.tsv`, `motif_fit.tsv`](#bins-and-motifs) | What each bin's methylation looks like. |
+| [`bin_evidence.tsv`, `host_profiles.tsv`, `motif_fit.tsv`](#bins-and-motifs) | What each bin's methylation looks like (`motif_fit.tsv` with `--motif-fit`). |
 | [`motif_groups.tsv`, `motif_noise.tsv`, `group_weights.tsv`, `detection_model.tsv`](#bins-and-motifs) | How the motifs were grouped, filtered and modelled. |
-| [`host_chunk_outliers.tsv`, `calibration/`, `params.json`](#diagnostics) | Diagnostics and fitted parameters. |
+| [`host_chunk_outliers.tsv`](#diagnostics) | Pieces of binned contigs that look foreign to their bin. |
+| [`calibration/`](#the-calibration-folder) | Eleven tables on the calibration of the probabilities. |
+| [`params.json`](#paramsjson) | What the run was made with and what it fitted. |
+| [`unbinned_prior.tsv`, `hidden_relative.tsv`, `calibration/relatives_by_bin.tsv`](#outputs-of-non-default-options) | Only with some non-default options. |
 | `cache/` | The site cache, reused by reruns (see `--cache-dir`). `manifest.json` holds its key (`inputs`), its part files (`parts`), `format` (2 since 0.12; missing in older caches) and `fingerprints` of the assembly and the pileup; `.lock` is the lock file runs share. |
 
-All tables are tab-separated with a header. Empty fields are written as `""`.
+All tables are tab-separated with a header. Empty text fields are written as `""`, missing numbers as `NaN`, and
+decimals with 4 digits after the point.
 
 ## `new_contig_bin.tsv`
 
@@ -39,8 +43,8 @@ One row per contig of the assembly.
 | `map`, `p_map` | the most probable explanation overall (own bin, another bin or `unknown`) and its probability |
 | `p_unknown` | probability that the contig comes from a genome without a bin |
 | `credible_set_95` | the smallest set of bins (and `unknown`) that together hold 95% of the probability; one entry = a clear answer, several = methylation cannot decide between them |
-| `expected_evidence` | how much methylation evidence (nats) the contig is expected to carry to tell bins apart; below `--min-evidence` (3) it is not judged |
-| `coverage` | median reads per motif site; below `--min-contig-coverage` (5) it is not judged |
+| `expected_evidence` | how much methylation evidence (nats) the contig is expected to carry for its bin (its input bin; for an unbinned contig, its best-scoring bin) against a random genome of the community, computed from its sites and read counts only and divided by the run's temperature; below `--min-evidence` (3), a contig that would be kept or unbinned gets no call (status no_methylation_evidence) |
+| `coverage` | the contig's coverage as EpiRefine counts it: the median, over all its motif sites, of the valid calls at a site (["5x" below](#coverage-and-5x)); 0 for a contig without motif sites; below `--min-contig-coverage` (5) it is not judged |
 | `p_regional_foreign`, `p_regional_mixed` | long binned contigs: probability that it is foreign along its whole length, and that it is partly its bin's and partly foreign |
 | `foreign_segments`, `segment_bins` | for `mixed` contigs: the foreign stretches (`start-end` in bp, `;`-separated) and the bin each fits best |
 
@@ -56,9 +60,24 @@ One row per contig of the assembly.
 | `unbinned` | unbinned; no bin is probable enough | no |
 | `redundant` | unbinned; would be included, but ≥ 30% of its 21-mers are already in that bin (an assembly duplicate) | no |
 | `sole_contig_of_bin` | the only contig of its bin, so there is no profile without it to compare it with | yes, unchanged |
-| `no_methylation_evidence` | too little informative methylation to tell bins apart | binned: yes, unchanged |
-| `low_coverage` | median coverage below 5 reads per motif site | binned: yes, unchanged |
-| `too_short` | shorter than 1 kb | binned: yes, unchanged |
+| `no_methylation_evidence` | a no call: the contig would be `kept` or `unbinned`, but its `expected_evidence` is below `--min-evidence`, so methylation cannot support that. Set last, after every flag and inclusion: it never changes a bin | binned: yes, unchanged |
+| `low_coverage` | `coverage` below `--min-contig-coverage` (5): no call | binned: yes, unchanged |
+| `too_short` | shorter than `--min-contig-length` (1 kb): no call | binned: yes, unchanged |
+
+`low_coverage` and `too_short` contigs take no part in any estimate; `no_methylation_evidence` is a label only. When the [calibration guard](#paramsjson) fires, no contig is `contaminant`, `moved` or `included`.
+
+### Coverage and "5x"
+
+`coverage` and `--min-contig-coverage` count valid calls per motif site, not read depth. For each motif site the
+pileup's valid calls (`N_valid`, column 10 of modkit's bedMethyl) are summed over the rows that belong to the site;
+the contig's `coverage` is the median of these sums over all its motif sites (every motif group, including groups
+the noise filter drops). With the default `--strand-sites sum`, a site of a palindromic motif (such as GATC), or of
+a motif listed with its reverse complement, holds both strands, so its count is the valid calls of both strands
+summed; a site of any other motif is one strand. "5x" (the default cut-off) therefore means a median of 5 valid
+calls per site: at a given read depth a palindromic site counts about twice what a one-strand site counts, and the
+median mixes the two kinds in the proportions the contig's motifs have. Valid calls exclude reads that modkit
+filtered or could not call at the site, so they are below the read depth. With `--strand-sites auto` the sites
+stored as single strands count double here, so the coverage does not depend on how the strands were split.
 
 ## Nanomotif-compatible files
 
@@ -78,85 +97,189 @@ outputs can read EpiRefine's.
 
 ## Bins and motifs
 
-- **`bin_evidence.tsv`**: per bin: `status` (`methylated`, or `no_methylation_detected` for bins without any
-  methylated motif group, which need the stricter inclusion threshold), motif groups with sites, methylated,
-  confidently unmethylated and undetermined, and the number of sites. Then four columns about the bin as a whole:
-  `robust_fit` (`converged`, or `not_converged` when the bin's fingerprint did not settle), `flagged_share` (share of
-  the bin's judged sequence that was flagged), `two_state_share` with `two_state_group` (the motif group in which
-  the bin's pieces fall into two methylation states, one below and one above 0.5, and the share of the smaller state;
-  0 when the pieces agree) and `warning`. A `two_state_share` or `flagged_share` of 0.2 or more means the bin
-  probably holds two methylomes: two genomes or strains merged by the binner, or one genome with part of its
-  sequence in another state. When the two differ in a single sparse motif nothing is flagged in such a bin (the
-  fingerprint settles between them), so this column is then the only sign; look at the bin before trusting it.
-- **`unbinned_prior.tsv`** (with `--unknown-prior unbinned`): per motif group, how often it is methylated among the
-  bins and among the unbinned contigs.
-- **`host_profiles.tsv`**: each bin's fingerprint: per bin and motif group, the methylated fraction (`phi_mean`),
-  its 95% interval (`phi_lo95`, `phi_hi95`) and the probability that it is above 0.5.
-- **`motif_fit.tsv`** (with `--motif-fit`): per contig and motif group, the contig's methylated fraction with its 95%
-  interval next to its bin's. Useful to see why a contig was flagged.
-- **`motif_groups.tsv`**: which Nanomotif motifs were merged into which motif group (`group`, `mod_type`, `motifs`),
-  with the number of sites and reads.
-- **`motif_noise.tsv`**: per motif group, whether it was dropped as basecaller noise (`noisy`), with the bins it
-  was measured in, its typical level, and the share of those bins where it is unmethylated (`off_bin_share`, level
-  below 0.05; a dropped group that is off in many bins may be a real, weakly detected motif).
-- **`group_weights.tsv`**: groups that behave as one enzyme and share one weight (`cluster`, `cluster_size`,
-  `weight`).
-- **`detection_model.tsv`**: the basecaller model per motif group: the share of reads called modified at
-  unmethylated (`mu0`) and methylated (`mu1`) sites, their spread (`kappa0`, `kappa1`), and the methylated share
-  across all sites (`pi1`).
+- **`bin_evidence.tsv`**, one row per bin:
+  - `bin`; `status`: `methylated` (some motif group's 95% interval lies above 0.5), `no_methylation_detected` (every
+    group with sites lies confidently below 0.5; such a bin needs the stricter inclusion threshold) or
+    `no_methylation_evidence` (neither: too few sites or reads to say);
+  - `groups_with_sites`, `groups_methylated`, `groups_confidently_unmethylated`, `groups_undetermined`: motif groups
+    with sites on the bin's contigs, and how many of them are methylated, confidently unmethylated (95% interval
+    below 0.5) or neither; `sites`: the motif sites on the bin's contigs;
+  - `robust_fit`: `converged`, or `not_converged` when the bin's fingerprint did not settle;
+  - `flagged_share`: share of the bin's judged sequence that was flagged;
+  - `two_state_share` with `two_state_group`: the motif group in which the bin's pieces fall into two methylation
+    states, one below and one above 0.5, and the share of the smaller state (0 when the pieces agree);
+  - `warning`: `;`-separated, empty when none: `two_methylation_states` (`two_state_share` ≥ `--two-state-warning`,
+    0.2), `large_flagged_share` (`flagged_share` ≥ the same 0.2), `profile_not_converged`, and
+    `merged_bin_suspected_flags_not_applied` (only with `--max-flagged-share` below 1).
+
+  A `two_state_share` or `flagged_share` of 0.2 or more means the bin probably holds two methylomes: two genomes or
+  strains merged by the binner, or one genome with part of its sequence in another state. When the two differ in a
+  single sparse motif nothing is flagged in such a bin (the fingerprint settles between them), so this column is
+  then the only sign; look at the bin before trusting it.
+- **`host_profiles.tsv`**: each bin's fingerprint, one row per bin and motif group (`bin`, `group`, `motifs`): the
+  mean methylated fraction (`phi_mean`), its 95% interval (`phi_lo95`, `phi_hi95`) and the probability that it is
+  above 0.5 (`p_phi_gt_0.5`). The rows with `bin` = `_population_prior_` describe the community: the distribution of
+  methylated fractions over all bins, which is also the model of a genome without a bin.
+- **`motif_fit.tsv`** (with `--motif-fit`): one row per contig and motif group with sites (`contig`, `group`,
+  `motifs`, `n_sites`): the contig's methylated fraction (`phi_observed`) with its 95% interval
+  (`phi_observed_lo95`, `phi_observed_hi95`), next to the mean of `reference_bin` (`phi_bin`). The reference bin is
+  the contig's own bin, or for an unbinned contig its best alternative bin (empty when that is `unknown`). Useful to
+  see why a contig was flagged.
+- **`motif_groups.tsv`**: which Nanomotif motifs were merged into which motif group (`group`, `mod_type`, `motifs`,
+  written as `MOTIF_modtype-position`), with the group's motif sites with at least `--min-cov` calls on all contigs
+  (`n_sites`) and the valid calls at them (`n_reads`); both empty for a group the noise filter dropped.
+- **`motif_noise.tsv`**: the noise filter, one row per motif group measured on binned contigs of at least 10x
+  (`group`, `mod_type`, `motifs`). A contig is noise-like for a group when it has at least 20 sites with at least 5
+  calls, their mean modified fraction of reads lies between 0.15 and 0.6, and at least 20% of them lie between 0.2
+  and 0.8; a bin is noise-like when at least half its measured contigs are. `bins`: bins that measure the group;
+  `noise_bins` and `noise_bin_share`: how many of them are noise-like, and their share; `median_level`: over bins,
+  the median of the bin's level (the median over its contigs of the mean modified fraction); `off_bin_share`: share of the bins
+  where the group is unmethylated (level below 0.05; a dropped group that is off in many bins may be a real, weakly
+  detected motif, see `--noise-max-off-share`); `noisy`: dropped as basecaller noise (at least 3 noise-like bins
+  making up at least 20% of the bins).
+- **`group_weights.tsv`**: groups that behave as one enzyme and share one weight (`group`, `motifs`, `cluster`,
+  `cluster_size`, `weight` = 1 / `cluster_size`).
+- **`detection_model.tsv`**: the basecaller model per motif group (`group`): the mean share of reads called modified
+  at unmethylated (`mu0`) and at methylated sites (`mu1`), their concentrations (`kappa0`, `kappa1`; small = more
+  spread between sites), `pi1`, the share of the labelled sites (those of bins clearly unmethylated or clearly
+  methylated in the group) that come from methylated bins, and `n_sites`, the group's sites with at least
+  `--min-cov` calls on binned contigs.
 
 ## Diagnostics
 
-- **`host_chunk_outliers.tsv`**: every 50 kb piece of every binned contig (`contig`, `start`, `bin`) with its
-  probability of being foreign to its bin (`p_foreign`). Pieces likely to be foreign are down-weighted when the bin's
-  fingerprint is built.
-- **`calibration/`**: how the probabilities were calibrated on pieces cut from the bins: accuracy, calibration error
-  and credible-set coverage per piece length before and after calibration (`summary.tsv`, `reliability.tsv`), the
-  fitted temperature, overall and by length (`temperature_fit.tsv`, `temperature_by_length.tsv`), the variation
-  parameter (`tau_fit.tsv`, `tau_groups.tsv`), the pieces themselves (`fragments.tsv`), how well each bin can be told
-  apart (`assignability.tsv`) and bins whose methylation looks alike (`lookalikes.tsv`). Two tables describe the
-  probabilities as they are used for the decisions: `false_flag_rate.tsv`, per piece length the share of pieces
-  of true members (scored without their own contig) that would be flagged at the run's settings, for all pieces
-  and for those kept by the calibration (`false_flag_rate`, `false_flags`; on the development benchmarks
-  0 of 5,723 kept member pieces of the training communities would have been flagged, so a clearly higher rate means
-  flags in this sample deserve a second look; no threshold for it has been validated), and `reliability_deployed.tsv`, predicted against observed
-  probabilities at the estimated priors and the temperature in use.
-- **`params.json`**: what the run was made with and what it fitted. Written when the run starts (`finished` is
-  `false`) and completed at the end, so an interrupted run still shows its settings.
-  - Provenance: `version`, `command_line`, `start_time` (UTC), `python`, `inputs` (path, size in bytes and
-    modification time of the assembly, pileup, contig-bin table and motif table), `out`, `cache_dir`, `workers`,
-    `seed`, `calibration_seed` (the seed the calibration pieces were drawn with: `--calibration-seed`, or `seed`
-    when it was not given).
-  - The code and where it ran: `commit` (`commit`, `source`: `git` with `dirty` true when tracked files differ from
-    the commit, or the environment variable `EPIREFINE_COMMIT`, or a file `COMMIT` next to `src` as a snapshot made
-    with `git archive` can carry; `null` for an installed release, whose `version` names it), `libraries` (python,
-    numpy, scipy, polars, epirefine_rs versions), `kernels` (`installed`, `used`, `EPIREFINE_RS`, `version`, `api`,
-    `features`, `module_sha256` of the compiled module, `installed_from`), `threads` (`workers`, `cores` this process
-    may use, `model_threads`, `polars_threads`, and the variables `omp_num_threads`, `openblas_num_threads`,
-    `mkl_num_threads`, `polars_max_threads` as set, or `null`), `seeds` (`seed`, `calibration_seed`, and `bootstrap`,
-    the fixed seed of the resampling in the calibration tests).
-  - `epirefine rerun --params params.json --out <dir>` repeats the run from this file (see `docs/usage.md`).
-  - Every option as given, under the name of the command-line option with underscores (`contamination_threshold`,
-    `include_threshold`, `include_threshold_unmethylated`, `min_methylome_difference`, `max_redundancy`,
-    `min_evidence`, `min_contig_coverage`, `min_contig_length`, `min_cov`, `chunk_size`, `grid_size`, `contam_eps`,
-    `min_jaccard`, `variation`, `frag_lengths`, `frags_per_bin`, `frag_budget`, `allow_sharpening`, and the switches
-    `motif_noise_filter`, `group_weights`, `regional_model`, `regional_inclusion`, `do_calibrate`,
-    `write_motif_fit`; `group_sample_bp` is `--group-sample-mb` in bp). `p_unknown_given`, `tau_given` and
-    `temperature_given` hold `--p-unknown`, `--tau` and `--temperature` (`null` when not given).
-  - Fitted values: `temperature` (used) and `fitted_temperature`, `tau` (variation), `unknown_eta`, `unknown_lam`,
-    `n_fragments`, `p_unknown` (share of unbinned contigs from genomes without a bin) and `contamination_rate`
-    (share of contaminants among binned contigs).
-  - The unknown model (since 0.12): `relatives` and `unknown_share`, the values used (`community-only` and `t1` by
-    default; see `docs/usage.md`); `p_unknown_t1`, the share estimated at temperature 1; `relatives_statistic`, the
-    relatives test of 0.11 as a report: `gain` (mean log-loss gain per calibration piece of the best model with
-    relatives over the best community-only one, each at its own temperature), `se` (its standard error,
-    `se_over_bins` true when resampled over bins), `statistic` = `gain` / `se`, `relatives_eta`, `relatives_lam`,
-    `relatives_temperature`, `community_temperature`, and `switch_choice` (what the 2-SE switch of 0.11.1 would have
-    chosen); `null` without calibration or with one bin. `unknown_model_forced` (only when the switch would have chosen
-    the relatives): its `switch_eta`, `switch_lam`, `switch_temperature` and the `community_temperature` used.
-  - `calibration_guard` (since 0.12): `fired` (true when the calibrated temperature is at the cap of the grid; the
-    run then makes no call), `reason`, `temperature`, `cap` (20), `pieces` (calibration pieces used),
-    `test_b_pieces` (pieces in test B) and `fallback` (`"no calls"` when fired); `null` without calibration, with
-    `--temperature` or with the deprecated `--relatives switch`. See the FAQ, "Known limitations".
-  - The file is strict JSON: an infinite value is written as the string `"inf"` (a `tau` of `"inf"` means no
-    variation between a contig and its bin), a missing one as `null`.
+- **`host_chunk_outliers.tsv`**: every 50 kb piece of every binned contig that has motif sites (`contig`, `start`,
+  `bin`) with its probability of being foreign to its bin (`p_foreign`). Pieces likely to be foreign are
+  down-weighted when the bin's fingerprint is built.
+
+### The calibration folder
+
+`calibration/` describes how the probabilities were calibrated on pieces cut from the binned contigs (written
+unless `--no-calibrate`). Each piece is scored as if it were unbinned, against all bins with its own bin rebuilt
+without its source contig (**test A**, the right answer is its bin), and against the bins without its own bin
+(**test B**, the right answer is "unknown", a genome without a bin). Test B uses only the pieces whose bin can be
+told from its nearest competitor ("distinct": the bin has no look-alike and the piece's expected log Bayes factor
+for its bin over the nearest other bin is at least 3). Pieces that overlap a 50 kb chunk the robust fit calls foreign
+to its bin are left out of the calibration (`foreign_excluded`). Lengths are in bp. `fragments.tsv`, `summary.tsv`,
+`reliability.tsv` and `assignability.tsv` are computed at the temperature and with the model of a genome without a
+bin that the calibration's own fit chose; that is the model in use except on runs where `params.json` holds
+`unknown_model_forced` (the forced community-only model then has its own temperature, `temperature` in
+`params.json`). `false_flag_rate.tsv` and `reliability_deployed.tsv` always use the settings of the decisions.
+
+| Table | One row per | Columns |
+|---|---|---|
+| `fragments.tsv` | calibration piece | `unit` (piece number), `contig` (source contig), `bin`, `tile` (position of the piece on the contig, in piece lengths), `length`, `start`, `end`; `foreign_excluded` (true: left out, see above); for the kept pieces: `expected_log_bf_vs_nearest` and `expected_log_bf_vs_unknown` (the evidence the piece is expected to give for its bin over the nearest other bin and over a community genome, from its sites and calls only, divided by the temperature), `posterior_true` (the test-A probability of its bin at the calibrated settings), `map_correct` (its most probable label is its bin); `NaN` for excluded pieces |
+| `tau_fit.tsv` | value of the variation parameter tau tried, plus `per-group` when the groups disagree | `tau` (`NaN` for the per-group row), `label`, `loo_loglik` (summed log-likelihood of the kept pieces under their own bin, built without their contig), `n_fragments` (pieces kept by that fit) |
+| `tau_groups.tsv` | motif group | `group`, `tau` (the value chosen for it; `inf` = no variation between contigs and their bin), `loo_loglik_gain_vs_no_variation` (gain of that choice over tau = inf, in nats) |
+| `temperature_fit.tsv` | model of a genome without a bin and temperature on the grid | `eta`, `lam` (`lam` = 1: community draw, the model in use by default; `lam` < 1: a mixture, with weight 1 - `lam`, with an unbinned relative of a bin, which takes each motif group's level from that bin with probability 1 - `eta`; by default only scored, for the relatives statistic), `temperature`, `log_loss` (`log_loss_A` + `log_loss_B_distinct`), `log_loss_A` (mean log loss of test A), `log_loss_B_distinct` (of test B, `NaN` when no piece is distinct) |
+| `temperature_by_length.tsv` | piece length | `length`, `fragments` (kept pieces), `temperature` (the grid temperature that would fit those pieces alone, any value of the grid, also below 1), `median_sites` (motif sites per piece); a diagnostic, not used |
+| `summary.tsv` | scaling and piece length (`all` = every length) | `scaling`: `uncalibrated` (temperature 1), `fitted_temperature` (the best grid value, also below 1) or `calibrated` (the temperature in use); `length`, `n`; test A: `A_accuracy` (share whose most probable label is right), `A_mean_confidence` (mean probability of the most probable label), `A_ece` (expected calibration error over 10 probability bins), `A_log_loss`, `A_set95_coverage` (share whose 95% credible set holds the right answer), `A_set95_mean_size`, `A_mean_p_unknown` (mean probability of "unknown"); test B over all kept pieces: `B_unknown_rate` (share with "unknown" most probable), `B_false_confident_rate` (share with some bin at probability ≥ 0.95), `B_log_loss`; and over the distinct pieces: `B_distinct_n`, `B_distinct_unknown_rate`, `B_distinct_false_confident_rate`. Probabilities at the reference share of unknown genomes, 0.1 (or `--p-unknown`) |
+| `reliability.tsv` | test and probability bin of width 0.1 | `test` (`A` or `B`, all kept pieces, calibrated temperature, reference share 0.1), `conf_lo`, `conf_hi` (the bin), `n`, `mean_confidence` (mean probability of the most probable label), `accuracy` (share whose most probable label is right) |
+| `assignability.tsv` | class of expected evidence | `expected_log_bf_lo`, `expected_log_bf_hi` (the class of `expected_log_bf_vs_nearest`: below 0.5, 0.5-1, 1-2, 2-3, 3-5, 5-10, 10 and more), `n`, `accuracy`, `mean_confidence`, `set95_mean_size` (test A), `mean_observed_log_bf_true_vs_nearest` (the observed log Bayes factor of the right bin over the best other bin, divided by the temperature). Shows whether the expected evidence, computed without looking at methylation, predicts accuracy |
+| `lookalikes.tsv` | bin | `bin`, `nearest_bin` (the bin with the closest fingerprint), `max_phi_difference` (the largest difference of mean methylated fraction between the two over motif groups), `has_lookalike` (that difference is below 0.15: the two cannot be told apart, and the bin's pieces are left out of test B) |
+| `false_flag_rate.tsv` | piece length (`all` = every length) and set of pieces | `length`, `fragments` (`all` pieces, or those `kept` by the calibration), `n`, `median_sites`, `mean_p_foreign` (mean probability of being foreign when each piece is judged as a binned contig of its own bin, at the run's share of unknown genomes, contamination rate and temperature), `rate_p_foreign_above_threshold` (share at or above `--contamination-threshold`), `rate_gate_passed` (share that clears `--min-methylome-difference`), `false_flag_rate` (share meeting both: true members that would be flagged), `false_flags` (their number) |
+| `reliability_deployed.tsv` | test, piece length and probability bin of width 0.1 | `test`: `A_any_candidate` (every candidate's probability in test A; observed = it is the right one), `A_map` (the most probable label; observed = it is right), `B_unknown` (the probability of "unknown" in test B on the distinct pieces; observed = 1); `length`, `p_lo`, `p_hi` (the bin), `n`, `mean_p` (mean predicted probability), `observed` (observed share). At the share of unknown genomes and the temperature used for the decisions |
+
+`false_flag_rate.tsv` brackets the false-flag rate: the `kept` row leaves out the pieces of chunks the robust fit
+calls foreign (a lower bound), the `all` row counts them (an upper bound: where a bin really holds foreign contigs,
+their pieces are correctly flagged and counted here as false). On the development benchmarks 0 of 5,723 kept member
+pieces of the training communities would have been flagged (development data), so a clearly higher rate means flags
+in this sample deserve a second look; no threshold for it has been validated.
+
+## `params.json`
+
+What the run was made with and what it fitted. Written when the run starts (`finished` is `false`) and completed at
+the end, so an interrupted run still shows its settings. The file is strict JSON: an infinite value is written as the
+string `"inf"` (a `tau` of `"inf"` means no variation between a contig and its bin), a missing one as `null`.
+`epirefine rerun --params params.json --out <dir>` repeats the run from this file (see `docs/usage.md`).
+
+**Provenance.**
+
+- `version`, `command_line`, `start_time` (UTC), `finished`, `python` (its version), `out`, `cache_dir` (`null`:
+  `<out>/cache`), `workers` (the number used);
+- `inputs`: for each of `assembly`, `pileup`, `contig_bin` and `motifs`, its `path`, `size` in bytes and
+  modification time `mtime` (seconds since 1970);
+- `commit` (`commit`, `source`: `git` with `dirty` true when tracked files differ from the commit, or the
+  environment variable `EPIREFINE_COMMIT`, or a file `COMMIT` next to `src` as a snapshot made with `git archive`
+  can carry; `null` for an installed release, whose `version` names it);
+- `libraries` (versions of `python`, `numpy`, `scipy`, `polars`, `epirefine_rs`);
+- `kernels` (`installed`, `used`, `EPIREFINE_RS`, `version`, `api`, `features`, `module_sha256` of the compiled
+  module, `installed_from`);
+- `threads` (`workers`, `cores` this process may use, `model_threads`, `polars_threads`, and the variables
+  `omp_num_threads`, `openblas_num_threads`, `mkl_num_threads`, `polars_max_threads` as set, or `null`);
+- `seeds` (`seed`, `calibration_seed`, and `bootstrap`, the fixed seed of the resampling in the calibration tests);
+  `seed` and `calibration_seed` also at the top level (`calibration_seed` is the seed the pieces were drawn with:
+  `--calibration-seed`, or `seed` when it was not given);
+- at the end: `elapsed_s` (wall time in seconds), `peak_rss_gb` (peak memory of the main process, GB) and
+  `peak_rss_worker_gb` (of the largest worker process).
+
+**Every option as given**, under the name of the command-line option with underscores. Decisions:
+`contamination_threshold`, `min_methylome_difference`, `include_threshold`, `include_threshold_unmethylated`,
+`max_redundancy`, and `p_unknown_given` (`--p-unknown`). Which contigs are judged: `min_evidence`,
+`min_contig_coverage`, `min_contig_length`, `min_cov`. Motifs: `group_weights` (false with `--no-group-weights`),
+`motif_noise_filter` (false with `--no-motif-noise-filter`), `min_jaccard`, `noise_max_off_share`, `shared_sites`,
+`complement_pairs`, `strand_sites`, `group_sample_bp` (`--group-sample-mb` in bp). Long contigs: `regional_model`
+(false with `--no-regional-model`), `regional_inclusion`, `chunk_size`. Model and calibration: `variation`,
+`tau_given` and `temperature_given` (`--tau` and `--temperature`; `null` when not given), `allow_sharpening`,
+`do_calibrate` (false with `--no-calibrate`), `calibration` (`--calibration` as given), `frag_lengths`,
+`frags_per_bin`, `frag_budget`, `contam_eps`, `grid_size`. Extra output: `write_motif_fit` (`--motif-fit`). The rule
+variants: `robust_fit`, `max_flagged_share`, `regional_leave_out`, `regional_withdraw`, `regional_tempered`,
+`gate_leave_out`, `gate_unweighted`, `eps_gated`, `unlisted_genome`, `inclusion_support`, `unknown_prior`,
+`unknown_prior_strength`, `tau_support`, `two_state_warning`, `redundancy_order`, `siteless_bin_guard`. The
+calibration-core options: `tau_select`, `npmle_start`, `temperature_law`, `evidence_temperature`, `slot_objective`,
+`slot_test_b`, `slot_kappa`, and `calibration_exclusion` (an internal switch, always `true` from the command line).
+`relatives` and `unknown_share` hold the values used (`community-only` and `t1` by default), not `null`.
+
+**Fitted values.**
+
+- `calibration_features`: the calibration features `--calibration` stands for (`["bin-parsimony"]` by default;
+  `["legacy"]` for none);
+- `tau` (the variation parameter used: one value, or one per motif group), `temperature` (used) and
+  `fitted_temperature` (the best value of the grid, also below 1), `n_fragments` (calibration pieces drawn);
+- `unknown_eta`, `unknown_lam`: the model of a genome without a bin in use (`unknown_lam` = 1: a community draw);
+- `p_unknown`: the share of unbinned contigs from genomes without a bin used in the decisions (estimated, or
+  `--p-unknown`); `p_unknown_t1`: the share estimated at temperature 1 (the same value by default; `null` when
+  `--p-unknown` is given; absent with `--relatives switch`);
+- `contamination_rate`: the estimated share of foreign contigs among the testable binned contigs, estimated before
+  the methylome-difference requirement withdraws flags (so it can be well above the share flagged), `null` with
+  one bin; `contamination_detection`: `done`, or `skipped: one bin only`;
+- `temperature_by_sites`: `null`, unless the temperature depends on the number of sites (`--temperature-law sites`,
+  or the calibration feature `sites-temperature`): then the law (`law`, `a`, `b`, `n_ref`, `t_min` and the
+  temperatures `T_at_300_sites` ... `T_at_30000_sites`);
+- `relatives_statistic` (since 0.12; `null` without calibration or with one bin): the relatives test of 0.11 as a
+  report: `gain` (mean log-loss gain per calibration piece of the best model with relatives over the best
+  community-only one, each at its own temperature), `se` (its standard error, `se_over_bins` true when resampled over
+  bins), `statistic` = `gain` / `se` (`null` when `se` is 0), `relatives_eta`, `relatives_lam`,
+  `relatives_temperature`, `community_temperature`, and `switch_choice` (what the 2-SE switch of 0.11.1 would have
+  chosen). It changes no score or call;
+- `unknown_model_forced` (only when the switch would have chosen the relatives): its `switch_eta`, `switch_lam`,
+  `switch_temperature` and the `community_temperature` used;
+- `calibration_guard` (since 0.12): `fired` (true when the calibrated temperature is at the cap of the grid; the run
+  then makes no call), `reason`, `temperature`, `cap` (20), `pieces` (calibration pieces used), `test_b_pieces`
+  (pieces in test B) and `fallback` (`"no calls"` when fired); `null` without calibration, with `--temperature` or
+  with the deprecated `--relatives switch`. See the FAQ, "Known limitations".
+
+**Keys written only with non-default options.**
+
+- `unknown_model_deployed_check` (calibration feature `deployed-unknown`, when the fit chose relatives):
+  `p_unknown_relatives`, `p_unknown_community`, `gain`, `se`, `kept_relatives`;
+- `relatives_per_bin` (`--relatives per-bin`): `lam`, `alpha` (concentration of the per-bin weights), `eta`,
+  `pieces`, `rounds`, `share_of_relatives_on_top10_bins`, `bins_with_Hw_below_0.05`, `bins_with_Hw_at_least_0.2`
+  (shares of bins whose weight times the number of bins is below 0.05 or at least 0.2);
+- `relatives_slot` (`--relatives slot`): `pi0`, `kappa`, `kappa_cv` (a list of `kappa` with its cross-validated
+  `cv_log_loss_per_piece`), `eta`, `rounds`, `objective`, `pi_median`, `bins_pi_at_least_0.15`,
+  `bins_pi_at_least_0.3`, `T` (or `law_a`, `law_b` with `--temperature-law sites`), `p_c`,
+  `p_unknown_with_relatives`, `pi_bar_slot_mass`, `slot_mass_share_pi_at_least_0.3`;
+- `unlisted_share` (`--unlisted-genome`): the share of genomes without a bin that carry none of the listed motifs.
+
+## Outputs of non-default options
+
+- **`unbinned_prior.tsv`** (with `--unknown-prior unbinned`): per motif group (`group`, `motifs`), how often it is
+  methylated among the bins (`methylated_among_bins`) and among the unbinned contigs that get a decision
+  (`methylated_among_unbinned`), and how many of those unbinned contigs have sites in the group
+  (`unbinned_contigs_with_sites`).
+- **`hidden_relative.tsv`** (with `--relatives per-bin` or `slot`): per contig (`contig`) and its bin (`bin`: its
+  input bin, or for an unbinned contig its best-scoring bin), `p_hidden_relative`, the probability that an unbinned
+  relative of that bin explains the contig. A report; no call depends on it.
+- **`calibration/relatives_by_bin.tsv`** (with `--relatives per-bin` or `slot`): per bin, the fitted weight of an
+  unbinned relative: `weight` and `H_weight` (the weight times the number of bins) for `per-bin`, `pi_relative` for
+  `slot`.

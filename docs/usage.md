@@ -37,7 +37,7 @@ agreement is not an independent check of them. Most users only set the inputs, `
 
 | Option | Default | What it does |
 |---|---|---|
-| `--min-contig-coverage` | 5 | Contigs with a median below this many reads per motif site get no decision (status `low_coverage`). On a fecal development sample, Hi-C confirmed about a quarter of the flags below 5x (12 of 46). 0 judges all. |
+| `--min-contig-coverage` | 5 | Contigs whose coverage (the median of the valid calls per motif site, both strands summed at sites of palindromic motifs; see [outputs.md](outputs.md#coverage-and-5x)) is below this get no decision (status `low_coverage`). On a fecal development sample, Hi-C confirmed about a quarter of the flags below 5x (12 of 46). 0 judges all. |
 | `--min-contig-length` | 1000 | Shorter contigs get no decision (status `too_short`). 0 judges all. |
 | `--min-evidence` | 3.0 | Contigs whose expected methylation evidence (in nats) is below this get status `no_methylation_evidence`: they carry too little methylation to tell bins apart. |
 | `--min-cov` | 1 | Motif sites with fewer reads than this are ignored. |
@@ -93,6 +93,10 @@ estimates. Leave them unset unless you are testing the model.
 | `--tau-support` | `all` | `leave_bin_out`: a motif group gets between-contig variation only if the calibration supports it without its best bin. |
 | `--unlisted-genome`, `--inclusion-support` | off, `none` | Two rejected inclusion designs, kept for comparison. |
 | `--grid-size` | 64 | Points on the grid of methylated fractions. |
+| `--two-state-warning` | 0.2 | Share at which `bin_evidence.tsv` warns about a bin with two methylation states, or with a large flagged share (reporting only). |
+| `--tau-select`, `--npmle-start`, `--temperature-law`, `--evidence-temperature`, `--slot-objective`, `--slot-test-b`, `--slot-kappa` | `per-group`, `warm`, `grid`, `median`, `legacy`, `decidable`, by cross-validation | Experimental options of the calibration redesign (`epirefine run --help`, group "calibration core"), each at the behaviour of 0.11.1 by default: no between-contig variation (`--tau-select inf`); population-prior fits from the uniform (`--npmle-start cold`); a temperature that grows with a contig's number of motif sites (`--temperature-law sites`) and, with it, each contig's own temperature in the evidence check (`--evidence-temperature contig`); and the settings of `--relatives slot`. For testing the model only. |
+
+`epirefine --version` prints the version (also the first line of every log and `version` in `params.json`).
 
 ## Speed and caching
 
