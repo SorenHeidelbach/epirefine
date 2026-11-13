@@ -96,9 +96,9 @@ described in [docs/outputs.md](https://github.com/SorenHeidelbach/epirefine/blob
 
 ## When to trust it
 
-- **Most of its calls are right, though less often on new data than on the data it was developed on.** On six
-  held-out monoculture communities, built from isolates not used during development (version 0.10.1; 0.11.0 gives the
-  same results), 311 of 316 flags (98.4%) were true contaminants and 1,096 of 1,180 placements (92.9%) went into
+- **Most of its calls are right, though less often on new data than on the data it was developed on.** On the six
+  monoculture test and validation communities (spent: they were looked at during development, so they are no longer
+  an unseen evaluation; version 0.10.1; 0.11.0 gives the same results), 311 of 316 flags (98.4%) were true contaminants and 1,096 of 1,180 placements (92.9%) went into
   the right bin: 98.4% in the test set, 89.6% in the validation set, where contigs of genomes without a bin were
   placed into bins with few methylated motifs. It found 311 of 363 planted contaminants (85.7%). On the development
   benchmarks every flag and 99.8% of placements were right, and on the six training communities it found 94.8% of
@@ -106,9 +106,9 @@ described in [docs/outputs.md](https://github.com/SorenHeidelbach/epirefine/blob
 - **It declines rather than guesses.** Contigs below 5x coverage, shorter than 1 kb or without informative
   methylation get no decision. On a complex fecal sample (a development sample) that was 76% of the contigs and 31%
   of the assembled sequence.
-- **Results depend on the motif table.** With some motif tables EpiRefine includes nothing at all; see
-  [known limitations](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/faq.md#known-limitations) for how
-  to recognise it in the log.
+- **Results depend on the motif table**, and on whether unbinned genomes share a bin's methylation (their contigs
+  are then placed in that bin); see
+  [known limitations](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/faq.md#known-limitations).
 - **Methylation cannot separate genomes that methylate the same motifs**, such as very close strains. EpiRefine
   then keeps both bins in its credible set or leaves the contig where it is.
 

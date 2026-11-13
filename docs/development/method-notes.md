@@ -1,39 +1,34 @@
 # Method notes (developer)
 
-> **For users:** see [how-it-works.md](../how-it-works.md). These are developer notes on the statistical model,
-> written for EpiRefine's predecessor, a plasmid-host assigner, and kept for the derivations.
+> **For users:** see [how-it-works.md](../how-it-works.md). These notes give the statistical model behind
+> EpiRefine, how each part is estimated, how uncertainty is reported, and why each design choice was made.
 >
-> **Status (0.5.0):** EpiRefine is now bin refinement only (contamination detection and contig
-> inclusion). This document was written for the plasmid-host version and still describes the
-> shared model (sites, caller model, grid, host profiles, population prior, "unknown", calibration)
-> correctly. Obsolete: own MTases (4.7, 6.5), the plasmid parameters δ and τ_p (6.6), plasmid
-> statuses and detectability (8.2). Not yet described here: the refinement decisions (EM share of
-> foreign contigs per bin, the credible-interval effect size, inclusion posterior), the caller
-> model fitted with bins as labels, the "relative of a bin" unknown, the logit-normal variation
-> kernel and the k-mer redundancy check. Those are documented in the dev log's DECISIONS.md
-> (D11, D19, D20, D21) and in the docstrings of `refine.py`, `detection.py` and `redundancy.py`.
-
-**Probabilistic plasmid–host assignment from nanopore DNA methylation**
-
-This document describes the statistical model behind EpiRefine v2, how each part is estimated, how
-uncertainty is reported, and why each design choice was made. It matches the implementation in
-`src/epirefine/` (module names are given in each section). For usage, see the [README](../../README.md).
+> **Status (0.12).** The notes describe the model of version 0.12 at its defaults: the unknown genome is a random
+> draw from the community on every run, its share among the unbinned contigs is estimated at temperature 1, the
+> relatives statistic is reported but decides nothing ("option E", §7.7), the temperature is one value from a
+> 31-point grid (§7.4), and a calibration that ends at the cap of that grid makes no call (§7.8). Module and
+> function names are given in each section; options with their defaults. Non-default designs kept for comparison
+> are listed in §7.6. Every number quoted from a dataset is labelled development (the data the defaults were chosen
+> on) or spent (the monoculture test and validation communities, looked at during development). Earlier versions
+> of these notes described EpiRefine's predecessor, a plasmid-host assigner; its parts that EpiRefine does not have
+> (own methyltransferases of a plasmid, plasmid parameters δ and τ_p, plasmid statuses) are removed. The design
+> history is in the development log's `DECISIONS.md`.
 
 ---
 
 ## Contents
 
 1. [Problem statement](#1-problem-statement)
-2. [Overview of the approach](#2-overview-of-the-approach)
+2. [Overview](#2-overview)
 3. [Data and features](#3-data-and-features)
 4. [The generative model](#4-the-generative-model)
-5. [Inference: scoring a contig against a host](#5-inference-scoring-a-contig-against-a-host)
+5. [Scoring a contig against a bin](#5-scoring-a-contig-against-a-bin)
 6. [Estimating the model's parameters](#6-estimating-the-models-parameters)
-7. [Self-calibration with pseudo-plasmids](#7-self-calibration-with-pseudo-plasmids)
-8. [Uncertainty, assignability and diagnostics](#8-uncertainty-assignability-and-diagnostics)
+7. [Calibration on pieces of the sample's own bins](#7-calibration-on-pieces-of-the-samples-own-bins)
+8. [Decisions, uncertainty and no calls](#8-decisions-uncertainty-and-no-calls)
 9. [Why this approach](#9-why-this-approach)
 10. [Assumptions and limitations](#10-assumptions-and-limitations)
-11. [Validation so far](#11-validation-so-far)
+11. [Validation](#11-validation)
 12. [Computation](#12-computation)
 13. [Parameter reference](#13-parameter-reference)
 14. [Notation](#14-notation)
@@ -43,139 +38,159 @@ uncertainty is reported, and why each design choice was made. It matches the imp
 
 ## 1. Problem statement
 
-A metagenome assembly contains contigs from many organisms. Genome binning groups chromosomal
-contigs into metagenome-assembled genomes (MAGs, here "bins"). Plasmids are poorly served by
-binning:
-- they are short
-- their sequence composition differs from the host's
-- their coverage reflects copy number rather than host abundance
-- they can occur in several hosts
+A metagenome assembly holds contigs from many organisms, and a binner groups them into bins
+(metagenome-assembled genomes). Binners use sequence composition and coverage, and they make two kinds of error:
+a bin holds contigs of another genome (contamination), and contigs of a binned genome stay unbinned (incompleteness).
 
-So they usually end up unbinned or in the wrong bin.
+Bacterial DNA methyltransferases (MTases) modify adenine or cytosine at specific sequence motifs (for example 6mA
+at G**A**TC, 4mC or 5mC at other motifs). Each strain has its own set of active MTases (its *methylome*), and every
+DNA molecule replicated in the cell carries their marks. Nanopore sequencing reads these marks directly, and
+Nanomotif (Heidelbach *et al.*) finds the motifs that are methylated in each bin. Methylation is measured
+separately from composition and coverage, so it can find binning errors the binner cannot see.
 
-Bacterial DNA methyltransferases (MTases) modify adenine or cytosine at specific sequence motifs
-(e.g. 6mA at G**A**TC, 4mC or 5mC at other motifs). Each strain has its own set of active MTases (its
-*methylome*), and every DNA molecule replicated in that cell is methylated by them, including
-plasmids. Nanopore sequencing detects these modifications directly. A plasmid therefore carries its
-current host's methylation "fingerprint". Nanomotif (Heidelbach et al.) discovers the methylated motifs
-of each bin from such data.
+**The task.** For every contig $u$ of the assembly, given the read counts at the motif sites, the bins and the motif
+list, compute:
 
-**The task.** For each plasmid candidate contig $u$, given the per-site methylation calls across the
-assembly, the bins and the motif set, compute:
-
-- a posterior distribution over the host bins **and an explicit "unknown host" class**;
-- an honest measure of how confident that assignment can be (credible set, Bayes factors);
-- whether the data could have resolved the host at all (*assignability*);
-- which motifs the plasmid methylates with its own MTase, and which motifs its assigned host fails
-  to explain.
+- a posterior over the bins **and an explicit "unknown genome" class** (a genome of the sample without a bin);
+- for a binned contig, the probability that it does not belong to its bin, and a call: kept, flagged, or moved to
+  another bin;
+- for an unbinned contig, a call: included into a bin, or left unbinned;
+- whether the data can support a call at all; where they cannot, **no call**.
 
 ---
 
-## 2. Overview of the approach
+## 2. Overview
 
 ```mermaid
 flowchart TD
-  P[modkit pileup<br/>per-site read counts] --> S[Motif sites<br/>dedup + grouping]
-  M[Nanomotif motif set] --> S
-  S --> DET[Caller model per motif group<br/>empirical Bayes]
-  S --> UL[Unit likelihoods on a phi grid]
+  P[modkit pileup<br/>read counts per position] --> S[Motif sites, motif groups,<br/>noise filter, group weights]
+  M[motif list] --> S
+  S --> DET[Caller model per motif group<br/>fitted with the bins as labels]
+  S --> UL[Likelihood tables on a phi grid<br/>per contig, chunk and piece]
   DET --> UL
-  B[Bins] --> CH[Host chunks 50 kb]
-  CH --> HP[Robust host profiles +<br/>population prior NPMLE]
+  B[Bins] --> CH[50 kb chunks of binned contigs]
+  CH --> HP[Robust bin profiles +<br/>community prior NPMLE]
   UL --> HP
-  HP --> CAL[Pseudo-plasmid calibration<br/>tau, temperature]
-  HP --> PP[Plasmid parameters<br/>delta, tau_p]
-  ANN[MTase annotations] --> RHO[Own-MTase prior rho]
-  HP --> RHO
-  CAL --> SC[Score plasmids:<br/>posterior over bins + unknown]
-  PP --> SC
-  RHO --> SC
-  SC --> OUT[Status, credible sets,<br/>assignability, misfit, own MTases]
+  HP --> CAL[Calibration on pieces of the bins:<br/>tau, temperature T, guard]
+  HP --> SC[Scores of every contig against<br/>every bin and the unknown genome]
+  CAL --> SC
+  SC --> SH[Unknown share at T = 1]
+  SH --> DEC[Flags, moves, inclusions]
+  DEC --> EV[Evidence check: no call<br/>for kept/unbinned without evidence]
+  EV --> OUT[Regional model, redundancy check,<br/>outputs]
 ```
 
-The method is a **hierarchical Bayesian model**:
+The pipeline (`pipeline.run`) runs in this order:
+
+1. motif groups from a sample of the assembly; one streaming pass over the pileup into a site cache (`sites.py`);
+2. the noise filter and the group weights; the caller model per motif group (`detection.py`);
+3. likelihood tables on the methylation grid for every contig, every 50 kb chunk of a binned contig and every
+   calibration piece (`model.py`, `grid.py`);
+4. robust bin profiles and the community prior, fitted for every value of the variation parameter τ, and the
+   calibration on pieces cut from the bins: τ, the temperature $T$, the relatives statistic (`calibrate.calibrate`);
+   the calibration guard (`calibrate.calibration_guard`);
+5. scores of every contig against every bin (binned contigs leave-one-out) and against the unknown genome;
+6. the unknown share at $T = 1$ and the decisions (`calibrate.calibrate_decisions`, `refine.refine`);
+7. the methylation-evidence check (`assignability.py`), the regional model of long contigs, the redundancy check
+   (`redundancy.py`) and the outputs (`refine.write_outputs`).
+
+The method is a **hierarchical model**:
 
 $$
-\underbrace{k_i \mid n_i, s_i}_{\text{reads at a site}}
+\underbrace{k_i \mid n_i, s_i}_{\text{calls at a site}}
 \;\leftarrow\; \underbrace{s_i \mid \phi_{um}}_{\text{site methylated?}}
-\;\leftarrow\; \underbrace{\phi_{um} \mid \phi_{hm}, w_{um}}_{\text{contig vs host}}
-\;\leftarrow\; \underbrace{\phi_{hm}}_{\text{host methylome}}
+\;\leftarrow\; \underbrace{\phi_{um} \mid \phi_{hm}, \tau_m}_{\text{contig vs bin}}
+\;\leftarrow\; \underbrace{\phi_{hm}}_{\text{bin methylome}}
 \;\leftarrow\; \underbrace{\pi_m}_{\text{community}}
 $$
 
-**What is learned from the sample itself (empirical Bayes):**
-- every level's parameters: caller error rates, overdispersion, between-contig variation, plasmid offsets
-- the community prior over methylomes
-- the reliability of MTase annotations
-
-**External information it uses:** only the motif list from Nanomotif and, optionally, plasmid
-candidates and MTase annotations.
-
-**What it reports:** posteriors, which are made trustworthy by calibrating on pseudo-plasmids cut
-from the sample's own host contigs.
+**Learned from the sample itself:** the caller's error rates per motif group, the bin profiles, the community
+prior, the variation between contigs and their bin, the temperature, the share of unbinned contigs from genomes
+without a bin and the contamination rate. **External information:** only the motif list. The decision thresholds
+are fixed defaults that were chosen on development data (§13).
 
 ---
 
 ## 3. Data and features
 
-*Modules: `io.py`, `motifs.py`.*
+*Modules: `io.py`, `motifs.py`, `sites.py`.*
 
 ### 3.1 Inputs
 
 | Input | Content used |
 |---|---|
-| Assembly FASTA | Contig sequences (for motif search) and lengths |
-| `modkit pileup` bedMethyl | For each reference position, strand and modification code: $N_{\text{valid}}$ (reads with a valid call) and $N_{\text{mod}}$ (reads called modified) |
-| `contig_bin.tsv` | Host bins |
-| Nanomotif `bin-motifs.tsv` | The **union** of motifs (IUPAC sequence, modified position, modification type), including `motif_complement` |
-| Plasmid candidates (optional) | geNomad summary or a contig list |
-| MTase annotations (optional) | Per MTase gene: contig, modification type, predicted motif |
+| Assembly FASTA | contig sequences (motif search, redundancy check) and lengths |
+| `modkit pileup` bedMethyl | per position, strand and modification code: $N_{\text{valid}}$ (column 10, reads with a valid call) and $N_{\text{mod}}$ (column 12, reads called modified). Codes other than `a`, `m`, `h`, `21839` are ignored, rows with $N_{\text{valid}} = 0$ dropped |
+| `contig_bin.tsv` | the bins; contigs not listed are unbinned |
+| motif table (Nanomotif `bin-motifs.tsv`) | the **union** of motifs: sequence (IUPAC), modification type as a modkit code, 0-based modified position, and `motif_complement` where given |
 
-**Only the motif list is taken from Nanomotif**, not its per-bin presence calls. Which hosts
-methylate which motif is re-estimated from the read counts (§6.3). This keeps the method robust to
-motif-calling errors in individual bins and lets it use motifs that are present in only some bins.
+**Only the motif list is taken from Nanomotif**, not its per-bin calls. Which bins methylate which motif is
+estimated from the read counts (§6). A motif needs to be found in at least one bin to be used.
 
-### 3.2 Records
+### 3.2 Records and sites
 
-A motif $M$ with modified position $p$ and length $\ell$ is searched on both strands with overlapping
-IUPAC regular expressions. An occurrence starting at $s$ on the forward strand gives a record at
-$(s+p, +)$. An occurrence of the reverse complement at $s$ gives a record at $(s + \ell - 1 - p, -)$.
-A *record* is one (contig, position, strand, modification type) and matches exactly one pileup row.
+A motif is matched on both strands of every contig. An occurrence on the forward strand at $s$ with modified
+position $p$ gives a record at $(s + p, +)$; an occurrence of the reverse complement at $s$, of length $\ell$, gives a
+record at $(s + \ell - 1 - p, -)$. A record is joined to pileup rows of its own modification code only.
 
-### 3.3 Sites: removing double counting
+The unit of evidence is a **site**. With the default `--strand-sites sum`, the two records of one occurrence of a
+palindrome (GATC), or of a motif listed with its reverse complement of the same modification type
+(`--complement-pairs sequence`, for example a Type I bipartite pair), form one two-strand site; other motifs give
+single-strand sites. For site $i$ with matched rows $r$,
 
-The model's unit of evidence is a **site**, a set of records that share one biological methylation
-event. Three rules prevent the same evidence being counted twice:
+$$
+n_i = \sum_r N_{\text{valid},r}, \qquad k_i = \sum_r N_{\text{mod},r} .
+$$
 
-1. **Palindromes.** For a palindromic motif (e.g. GATC) the $+$ and $-$ records of one occurrence form
-   one site. Their counts are summed: $n_i = \sum_r N_{\text{valid},r}$ and $k_i = \sum_r N_{\text{mod},r}$.
-2. **Reverse-complement pairs.** A motif and its reverse complement with the same modification type
-   (typically a Type I bipartite motif and its complement, e.g. GAGNNNNNGTCA / TGACNNNNNCTC) are
-   canonicalised to one motif, so the records of one occurrence share a site.
-3. **Motif groups.** Motifs with the same modification type whose record sets overlap strongly are
-   merged into a *group* (the model's feature) by union–find. The criterion is
-   $$
-   \frac{|R_A \cap R_B|}{\min(|R_A|, |R_B|)} \;\ge\; 0.5 ,
-   $$
-   which merges nested motifs (e.g. GATC ⊃ RGATCY). Each record is counted at most once within a
-   group, and is claimed by the group's motif with the most records.
+No site is reduced to a methylated or unmethylated call; the counts are the data. Sites with $n_i <$ `--min-cov` (1)
+are not used in the likelihood.
 
-**Cross-group records are dropped.** A record matched by motifs of *different* groups is removed
-from all of them. Example: the A in TCGANTC belongs to both TCGA and GANTC. Its methylation could
-come from either MTase, so keeping it in both groups would leak one MTase's signal into the other.
-This was observed directly in testing: a plasmid's own GANTC MTase made about 8% of "TCGA" sites look
-methylated, and no host explained that. The cost is a few percent of records.
+### 3.3 Motif groups
 
-### 3.4 Units and chunks
+Motifs that measure the same bases are merged into **motif groups**, the features of the model. Two motifs of one
+modification type join when they are a reverse-complement pair, or when the Jaccard index of their sets of matched
+bases is at least `--min-jaccard` (0.9), measured on whole contigs drawn at random (seeded by `--seed`) until they
+total `--group-sample-mb` (50 Mb), or on the whole assembly if it is smaller. Merging is transitive. A nested
+motif (RGATCY in GATC) overlaps its parent too little and stays a group of its own.
 
-A **unit** $u$ is any stretch of sequence scored as one entity:
-- a **plasmid candidate contig**;
-- a **host chunk**: host (binned, non-candidate) contigs are cut into chunks of $C = 50$ kb, and each
-  chunk is a unit;
-- a **pseudo-plasmid fragment** used for calibration (§7).
+A base matched by motifs of several groups is counted once: it goes to the group whose member motifs have the
+fewest records in the sample (`--shared-sites sample`), and within the group to the member with the most records.
+Each read count therefore enters one site of one group, and a methyltransferase that methylates one motif is not
+seen again through an overlapping motif of another group.
 
-Plasmid candidates that a binner placed inside a bin are removed from that bin before host profiles
-are built.
+### 3.4 Coverage, length and "5x"
+
+A contig's coverage $\text{cov}_u$ is the median of $n_i$ over all its sites (all groups, before the noise filter;
+0 without sites). Because $n_i$ sums both strands at two-strand sites, $\text{cov}_u$ counts valid calls per site,
+not read depth: at a read depth $D$ a palindromic site has $n \approx D$ and a single-strand site $n \approx D/2$ (fewer
+where modkit filtered calls), and the median mixes the two. "5x", the default `--min-contig-coverage`, means
+$\text{cov}_u \ge 5$ in this sense. With `--strand-sites auto`, sites stored as single strands are counted double
+here. Contigs below the coverage cut-off, or shorter than `--min-contig-length` (1,000 bp), get no call (§8.2).
+
+### 3.5 Noise filter and group weights
+
+Two steps act on the groups before any model is fitted.
+
+- **Noise filter** (`motifs.noisy_groups`; off with `--no-motif-noise-filter`). On binned contigs with
+  $\text{cov}_u \ge 10$, a contig is noise-like for a group when it has at least 20 sites with $n \ge 5$, a mean
+  read fraction $k/n$ in $[0.15, 0.6]$, and at least 20% of those sites at $0.2 < k/n < 0.8$; a bin is noise-like
+  when at least half of its measured contigs are. A group is dropped when noise-like bins number at least 3 and make
+  up at least 20% of the bins that measure it (and, with `--noise-max-off-share` below 1, at most that share of its
+  bins are unmethylated). A real motif is methylated at (nearly) all of a genome's sites or at none; a group whose
+  sites are intermediate in many genomes is a caller leak (on ZymoFecal, development: 4mC calls in CCNGG-type
+  contexts, most likely 5mC leaking into the 4mC call).
+- **Group weights** (`motifs.redundancy_weights`; off with `--no-group-weights`). A group is "on" in a bin when more
+  than half of at least 50 sites with $n \ge 5$ have $k/n > 0.5$. Two groups that can share a modified base and are
+  "on" in the same bins (Jaccard index of their "on" bins at least 0.9 over at least 5 bins that measure both, each
+  "on" in at least two) are linked; each group of a linked cluster $C$ gets weight $v_m = 1/|C|$, others 1. One
+  methyltransferase seen through several motif variants then counts once.
+
+### 3.6 Units and chunks
+
+A **unit** $u$ is a stretch of sequence scored as one: a **contig**; a **chunk**, one of the 50 kb pieces
+(`--chunk-size`) of a binned contig, from which bin profiles are built (chunks without sites are dropped); or a
+**calibration piece** cut from a binned contig (§7.1). A contig is always scored as a whole; its chunks matter for
+its own bin's profile (left out when it is scored, §5) and for the regional model (§8.6).
 
 ---
 
@@ -183,645 +198,521 @@ are built.
 
 *Modules: `detection.py`, `grid.py`, `model.py`.*
 
-### 4.1 Detection layer: read counts given a site's state
+### 4.1 Detection layer: calls given a site's state
 
-Each site $i$ of motif group $m$ is either methylated ($s_i = 1$) or not ($s_i = 0$) in the
-population of molecules it came from. Given the state, the number of reads called modified follows a
-beta-binomial distribution:
-
-$$
-k_i \mid n_i, s_i = 0 \;\sim\; \mathrm{BetaBin}\!\big(n_i;\; \mu_{0m}\kappa_{0m},\; (1-\mu_{0m})\kappa_{0m}\big),
-$$
-$$
-k_i \mid n_i, s_i = 1 \;\sim\; \mathrm{BetaBin}\!\big(n_i;\; \mu_{1m}\kappa_{1m},\; (1-\mu_{1m})\kappa_{1m}\big),
-$$
-
-with pmf
+Each site $i$ of group $m$ is methylated ($s_i = 1$) or not ($s_i = 0$). Given the state, the number of reads called
+modified is beta-binomial:
 
 $$
+k_i \mid n_i, s_i \;\sim\; \mathrm{BetaBin}\!\big(n_i;\; \mu_{s m}\kappa_{s m},\; (1-\mu_{s m})\kappa_{s m}\big),
+\qquad
 \mathrm{BetaBin}(k; n, a, b) = \binom{n}{k} \frac{B(k + a,\, n - k + b)}{B(a, b)} .
 $$
 
-**The four parameters per group:**
-- $\mu_{0m}$: mean fraction of reads called modified at an *unmethylated* site, i.e. the caller's
-  **false-positive level** for this sequence context.
-- $\mu_{1m}$: the same at a *methylated* site, i.e. the **detection ceiling**: incomplete methylation,
-  missed calls and threshold effects keep it below 1.
-- $\kappa_{0m}$, $\kappa_{1m}$: concentrations. A small $\kappa$ means strong overdispersion between
-  sites, beyond binomial read sampling.
+- $\mu_{0m} \in (0, 0.5)$: mean fraction of reads called modified at an *unmethylated* site, the caller's
+  false-positive level in this sequence context;
+- $\mu_{1m} \in (0.5, 1)$: the same at a *methylated* site, the detection ceiling;
+- $\kappa_{0m}, \kappa_{1m} \in [0.3, 10^4]$: concentrations; small $\kappa$ = strong overdispersion between sites.
 
-The parameterisation keeps the components ordered: $\mu_0 \in (0, 0.5)$ and $\mu_1 \in (0.5, 1)$.
+The binomial coefficient is the same under every hypothesis and is dropped from the likelihoods (it is kept in the
+expected-evidence sums of §8.5).
 
-The binomial coefficient is the same under every hypothesis, so it is dropped from all likelihoods.
-Bayes factors and posteriors are unaffected; reported log-likelihoods are therefore relative.
+### 4.2 Site layer
 
-### 4.2 Site layer: how many of a unit's sites are methylated
-
-Within unit $u$, the sites of group $m$ are methylated independently with probability $\phi_{um}$:
+Within unit $u$, the sites of group $m$ are methylated independently with probability $\phi_{um}$, the
+**methylated fraction**. It is near 1 when the genome has an active MTase for the motif, near 0 when it has none,
+and intermediate for partial or phase-variable methylation, or for a group whose motifs are only partly methylated.
+Summing over the state, the per-site log-likelihood at $\phi = x$ is
 
 $$
-s_i \mid \phi_{um} \;\sim\; \mathrm{Bernoulli}(\phi_{um}) .
+\ell_m(n, k; x) = \log\big[x\, f_{1m}(k \mid n) + (1 - x)\, f_{0m}(k \mid n)\big],
 $$
 
-$\phi$ is the biologically interpretable quantity: **the fraction of the motif's sites that are
-methylated**. It is near 1 when the host has an active MTase for the motif, near 0 when it does not,
-and intermediate for partial or phase-variable methylation, or for groups that merge motifs only
-some of which are methylated (e.g. GATC ∪ RGATCY in a host methylating only RGATCY gives
-$\phi \approx 0.25$).
-
-Summing over $s_i$, the likelihood of the unit's sites in group $m$ is
+and the unit table is the weighted sum over its sites,
 
 $$
-L_{um}(\phi) \;=\; \prod_{i \in u,m} \Big[\phi\, f_{1m}(k_i \mid n_i) + (1 - \phi)\, f_{0m}(k_i \mid n_i)\Big],
+L_{umg} = v_m \sum_{i \in u,\; m(i) = m,\; n_i \ge n_{\min}} \ell_m(n_i, k_i; x_g) .
 $$
 
-where $f_{sm}$ are the two beta-binomials above.
+A unit without sites in a group has a flat table (0): missing data are neutral. The group weight $v_m$ acts as a
+power on the group's likelihood.
 
 ### 4.3 The φ grid
 
-$\phi$ is represented on a fixed grid of $G = 64$ points $x_1 < \dots < x_G$, evenly spaced in logit
-space between $\mathrm{logit}(10^{-3})$ and $\mathrm{logit}(1 - 10^{-3})$. Cell edges are the
-logit-midpoints between neighbouring points, with $0$ and $1$ as the outer edges.
+$\phi$ is represented on $G$ = `--grid-size` (64) points $x_1 < \dots < x_G$, evenly spaced in logit between
+$10^{-3}$ and $1 - 10^{-3}$, so the grid is fine near 0 and 1 where nearly all genomes sit. Cell edges are the
+logit midpoints, with 0 and 1 outside. Densities are stored as cell masses (CDF differences), so the uneven spacing
+adds no bias; log-likelihoods are stored per grid point and reused for every hypothesis.
 
-- **Densities are stored as cell masses.** A Beta density on the grid is
-  $\Pr(\text{cell } j) = F_{\mathrm{Beta}}(e_{j+1}) - F_{\mathrm{Beta}}(e_j)$ (CDF differences), so the
-  uneven spacing introduces no bias.
-- **Log-likelihoods are stored per grid point.** For every unit and group:
-  $$
-  \mathcal{L}_{um}(g) = \log L_{um}(x_g) .
-  $$
-  This is computed once (vectorised over unique $(u, m, n, k)$ tuples) and reused for every
-  hypothesis.
+### 4.4 Unit layer: how a contig varies around its bin
 
-### 4.4 Unit layer: how a contig relates to its host
-
-A unit's methylation level scatters around its host's level $\phi_{hm}$:
+A unit of a genome with level $x_g$ need not have exactly that level. With the default `--variation beta`,
 
 $$
-\phi_{um} \mid \phi_{hm} \;\sim\; \mathrm{Beta}\!\big(\delta\,\phi_{hm}\,\tau,\; (1 - \delta\,\phi_{hm})\,\tau\big).
+\phi_{um} \mid \phi_{hm} = x_g \;\sim\; \mathrm{Beta}\big(x_g \tau_m,\; (1 - x_g)\tau_m\big),
 $$
 
-- $\tau$ (concentration) controls between-unit variation; $\tau \to \infty$ means every unit shares
-  its host's level exactly.
-- $\delta \in (0, 1]$ scales the host level down. It captures **plasmid under-methylation**, for
-  example an MTase that cannot keep up with a high-copy plasmid, or protein-bound sites.
-
-Two parameter sets are used:
-
-| Unit type | $\delta$ | $\tau$ |
-|---|---|---|
-| Host chunks and pseudo-plasmid fragments | 1 | $\tau_c$ (calibrated, §7) |
-| Plasmid candidates | $\delta$ (fitted, §6.6) | $\tau_p$ (fitted, §6.6) |
-
-On the grid this becomes a transition matrix,
+integrated out on the grid:
 
 $$
-T_{ij} = \Pr\big(\phi_u \in \text{cell } j \mid \phi_h = x_i\big),
+L'_{umg} = \log \sum_{g'} K^{(\tau_m)}_{g g'}\, e^{L_{umg'}},
 $$
 
-a point mass at the cell containing $\delta x_i$ when $\tau = \infty$. The unit's own $\phi_{um}$ is
-integrated out:
+where $K^{(\tau)}_{gg'}$ is the mass of that Beta distribution in cell $g'$; $\tau = \infty$ makes $K$ the identity
+(no variation). $\tau_m$ is chosen per group by the calibration (§7.3). `--variation logit` uses a logit-normal
+kernel with spread $\sigma$ instead.
+
+### 4.5 Bin layer: bin profiles
+
+With chunk weights $w_c \in [0, 1]$ (§6.3), bin $h$'s log-likelihood in group $m$ is
 
 $$
-\mathcal{L}'_{um}(i) \;=\; \log \sum_{j} T_{ij}\, e^{\mathcal{L}_{um}(j)}
-\qquad \text{(log-likelihood as a function of the host level } x_i).
+\Lambda_{hmg} = \sum_{c:\, b_c = h} w_c\, L'_{cmg},
 $$
 
-### 4.5 Host layer: host profiles
+and its **profile** is the posterior over its level, $p_{hmg} \propto \pi_{mg}\, e^{\Lambda_{hmg}}$.
 
-A bin $h$ is a set of chunks $k$. With chunk weights $w_k$ (all 1 unless the robust step down-weights
-them, §6.4), the bin's log-likelihood for group $m$ is
+### 4.6 Community layer
 
-$$
-\ell_{hm}(i) = \sum_{k \in h} w_k\, \mathcal{L}'_{km}(i),
-$$
+$\pi_{m\cdot}$ is the distribution of bin levels in group $m$ across the community, estimated nonparametrically
+from all bins (§6.2).
 
-and its **host profile** is the posterior over its methylation level:
+### 4.7 The unknown genome
 
-$$
-p_{hm}(i) \;\propto\; \pi_m(i)\, e^{\ell_{hm}(i)} .
-$$
-
-### 4.6 Community layer: the population prior
-
-$\pi_m$ is the distribution of host methylation levels for group $m$ across the community. It is
-estimated nonparametrically from all bins (§6.3).
-
-### 4.7 Own MTases
-
-Plasmids often encode their own MTases (orphan MTases or complete restriction–modification systems).
-Such a plasmid is methylated at the host's motifs *and* at its own. For each unit $u$ and group $m$
-there is a latent indicator
+A sample always holds genomes without a bin (not binned, low abundance, not assembled). EpiRefine models such a
+genome as a **random draw from the community**: each group's level is drawn independently from $\pi_{m\cdot}$. Its
+likelihood is the prior predictive,
 
 $$
-w_{um} \sim \mathrm{Bernoulli}(\rho_{um}),
+S^U_u = \sum_m \log \sum_g e^{L'_{umg}}\, \pi_{mg} .
 $$
 
-where $\rho_{um}$ comes from MTase annotations (§6.5).
-
-- If $w_{um} = 0$, the unit's level follows its host as in §4.4.
-- If $w_{um} = 1$, the level is set by the plasmid's own MTase and drawn from the **"present" part
-  of the community prior**:
-  $$
-  q_m(i) \;\propto\; \pi_m(i)\,\mathbb{1}[x_i > 0.5],
-  $$
-  falling back to a $\mathrm{Beta}(20, 2)$ mass if no host in the community methylates $m$.
-
-The unit still varies around that level through the same $(\delta, \tau)$ transition, so plasmid
-under-methylation applies to the plasmid's own MTase too. (This matters in practice: without it, an
-under-methylated plasmid with an unannotated own MTase was wrongly called "unknown".)
-
-### 4.8 The "unknown host" class
-
-The host of a plasmid is often not among the bins: it was unbinned, low-abundance or not assembled.
-EpiRefine models this with an extra class, $h = 0$, whose methylation levels are a **random draw from
-the community**. Its profile is the population prior itself, $p_{0m} = \pi_m$. The likelihood of a
-unit under "unknown" is therefore the prior predictive: how probable the data are for a host chosen
-at random from this community's methylome distribution.
-
-### 4.9 Host prior
-
-$$
-\Pr(h = 0) = p_0, \qquad \Pr(h = b) = \frac{1 - p_0}{H} \quad (b = 1, \dots, H),
-$$
-
-with $p_0 = 0.1$ by default.
+A contig whose methylation is unlike every bin, but plausible for a genome of this community, scores higher here
+than under any bin. This is the only unknown model used for decisions since 0.12 (§7.7). An alternative model, in
+which an unknown genome can also be an unbinned *relative* of a bin (each group's level taken from that bin with
+probability $1 - \eta$ and from the community otherwise, mixed with the community draw at weight $\lambda$), is
+fitted during calibration only to compute the relatives statistic (§7.7).
 
 ---
 
-## 5. Inference: scoring a contig against a host
+## 5. Scoring a contig against a bin
 
-*Module: `model.py` (`group_scores`, `combine`, `posterior`).*
+*Module: `model.py` (`FittedModel.score`, `loo_rescore_many`, `posterior`).*
 
-For unit $u$, group $m$ and candidate host $h$ (including $h = 0$), there are two explanations of
-the group's data. If the host's MTase explains it:
-
-$$
-A_{uhm} = \log \sum_i \exp\!\big(\mathcal{L}'_{um}(i) + \log p_{hm}(i)\big) .
-$$
-
-If the plasmid's own MTase explains it:
+The score of unit $u$ under bin $h$ is
 
 $$
-O_{um} = \log \sum_i \exp\!\big(\mathcal{L}'_{um}(i) + \log q_m(i)\big) .
+S_{uh} = \sum_m \log \sum_g e^{L'_{umg}}\, p_{hmg} .
 $$
 
-Groups are treated as conditionally independent given the host, so
+Groups are treated as conditionally independent given the bin; a group without sites adds 0. For a **binned
+contig**, its own bin's score is leave-one-out: the weighted contributions of the contig's chunks are removed from
+$\Lambda_{b_u}$ and the profile is rebuilt with the same $\pi$, so the contig does not vouch for itself. A contig
+that holds all of its bin's chunks has no independent profile and is not tested (`sole_contig_of_bin`).
 
-$$
-S_{uh} \;=\; \log p(\text{data}_u \mid h) \;=\; \sum_m \log\!\Big[(1 - \rho_{um})\, e^{A_{uhm}} + \rho_{um}\, e^{O_{um}}\Big].
-$$
+**How the evidence works.** The motif groups act as a panel of nearly binary markers, weighed by the likelihood:
 
-A group with no sites in the unit contributes exactly zero, so missing data are neutral.
-
-The posterior over hosts, with a temperature $T \ge 1$ (§7.4), is
-
-$$
-\Pr(h \mid u) \;=\; \frac{\Pr(h)\, \exp(S_{uh} / T)}{\sum_{h'} \Pr(h')\, \exp(S_{uh'} / T)} ,
-$$
-
-and the posterior probability that group $m$ is methylated by the plasmid's own MTase, given host $h$,
-is
-
-$$
-\Pr(w_{um} = 1 \mid u, h) = \frac{\rho_{um}\, e^{O_{um}}}{(1 - \rho_{um})\, e^{A_{uhm}} + \rho_{um}\, e^{O_{um}}} .
-$$
-
-**How the evidence works.** The motif groups act as a panel of binary-ish markers, and the
-likelihood weighs them automatically:
-
-- **Positive evidence.** A plasmid methylated at a motif that only host $h$ methylates is strong
-  evidence for $h$. The evidence grows with the number of sites and their coverage.
-- **Negative evidence.** A plasmid *unmethylated* at a motif that $h$ methylates is strong evidence
-  *against* $h$. Absence of a mark is as informative as its presence; distance-based methods often
-  ignore this.
-- **Shared motifs.** A motif methylated by many hosts (e.g. Dam GATC) separates those hosts little,
-  because all of them predict it; it still separates them from hosts that lack it. No ad hoc motif
-  weighting is needed.
-- **Own MTases are asymmetric.** The own-MTase term can explain *extra* methylation (cost:
-  $\log \rho_{um}$) but never *missing* methylation. So a plasmid's own MTase cannot mask the strong
-  negative evidence against a wrong host.
+- **Positive evidence.** A contig methylated at a motif that only bin $h$ methylates is strong evidence for $h$;
+  it grows with the number of sites and their calls.
+- **Negative evidence.** A contig *unmethylated* at a motif that $h$ methylates is strong evidence *against* $h$.
+  Absence of a mark is as informative as its presence.
+- **Shared motifs.** A motif methylated by many bins (Dam GATC) separates those bins little, because all of them
+  predict it; it still separates them from bins that lack it. No ad hoc motif weighting is needed.
 
 ---
 
 ## 6. Estimating the model's parameters
 
-All estimation uses the sample itself. There is no pre-trained component.
-
-### 6.1 Order of estimation
+All estimation uses the sample itself; nothing is pre-trained.
 
 | Step | Estimated | Data used | Method |
 |---|---|---|---|
-| 1 | $\mu_{0m}, \kappa_{0m}, \mu_{1m}, \kappa_{1m}$ | All sites in the sample | Penalised ML, two-level shrinkage (§6.2) |
-| 2 | $\pi_m$, host profiles $p_{hm}$, chunk weights $w_k$ | Host chunks | NPMLE by EM (§6.3) + robust EM (§6.4) |
-| 3 | $\tau_c$, temperature $T$ | Pseudo-plasmids | LOO marginal likelihood; log loss (§7) |
-| 4 | $\rho$ (motif / mod-type level) | MTase annotations on bins vs host profiles | Smoothed proportions (§6.5) |
-| 5 | $\delta$, $\tau_p$ | All plasmid candidates | Type-II maximum likelihood (§6.6) |
+| 1 | $\mu_{sm}, \kappa_{sm}$ | sites of binned contigs, the bins as labels | maximum *a posteriori*, two levels (§6.1) |
+| 2 | $\pi_m$, profiles $p_{hm}$, chunk weights $w_c$ | chunks | NPMLE by EM (§6.2), robust profiles (§6.3) |
+| 3 | $\tau_m$, temperature $T$ | calibration pieces | leave-out likelihood; log loss (§7) |
+| 4 | unknown share $\hat p$ | decidable unbinned contigs | EM at $T = 1$ (§7.7) |
+| 5 | contamination rate $\hat\varepsilon$ | testable binned contigs | EM, Beta(1, 19) prior (§8.3) |
 
-### 6.2 Caller model: empirical Bayes with two-level shrinkage
+### 6.1 Caller model with the bins as labels
 
-*Module: `detection.py`.*
+*Module: `detection.py` (`fit_detection_by_bin`).*
 
-For each group, the sites of the **whole sample**, with their unknown states marginalised, form a
-two-component mixture:
+A motif is methylated in some genomes and not in others, so the bins label the data. For each group and bin with at
+least 50 sites, the pooled read fraction $\sum k / \sum n$ labels the pair unmethylated when it is below 0.2 and
+methylated when it is above 0.5; other pairs are not used. Per modification type, the unmethylated component is the
+maximum-likelihood beta-binomial of the unmethylated pairs' sites; the methylated component is fitted on the
+methylated pairs' sites as a mixture $\omega f_1 + (1 - \omega) f_0$ with $f_0$ fixed, so a methylated bin may be
+partly methylated. Each group is then fitted the same way by maximum *a posteriori*, with a Gaussian prior (standard
+deviation 2) on $(\operatorname{logit} 2\mu_0, \log\kappa_0)$ and $(\operatorname{logit}(2\mu_1 - 1), \log\kappa_1)$
+centred on its modification type's fit. A group without unmethylated (methylated) pairs takes its type's component;
+a type without labelled pairs of one kind uses fixed values ($\mu_0 = 0.05, \kappa_0 = 10$; $\mu_1 = 0.85,
+\kappa_1 = 10$). Fits use L-BFGS-B from several starting points. Unbinned contigs do not enter the fit.
+`detection_model.tsv` reports the fit; its `pi1` is the share of labelled sites that come from methylated bins.
 
-$$
-\log p(\mathbf{k} \mid \boldsymbol{\theta}_m) = \sum_i \log\!\big[\psi_m f_{1m}(k_i \mid n_i) + (1 - \psi_m) f_{0m}(k_i \mid n_i)\big].
-$$
+(Earlier versions fitted the caller model as a two-component mixture on all sites of the sample. When few of many bins
+methylate a motif, that pooled fit collapses: the second component absorbs the upper tail of unmethylated sites
+instead of describing methylated ones. The labelled fit replaced it; dev log D19.)
 
-The parameters are transformed to an unconstrained vector:
+### 6.2 Community prior: nonparametric maximum likelihood
 
-$$
-\boldsymbol\theta = \big(\mathrm{logit}(2\mu_0),\ \log\kappa_0,\ \mathrm{logit}(2\mu_1 - 1),\ \log\kappa_1\big).
-$$
-
-They are estimated by maximising the penalised log-likelihood
-
-$$
-\log p(\mathbf{k} \mid \boldsymbol\theta, \psi) - \tfrac{1}{2}\,\big\lVert(\boldsymbol\theta - \boldsymbol\theta^{\star}) / \sigma\big\rVert^2
-$$
-
-with L-BFGS-B, starting from three values of $\psi$. The data are compressed to unique $(n, k)$
-pairs with multiplicities.
-
-**Shrinkage in two levels:**
-1. **Modification-type level** (6mA, 5mC, 4mC): all groups of the type are pooled. The prior centre
-   $\boldsymbol\theta^\star$ corresponds to $\mu_0 = 0.05$, $\mu_1 = 0.85$, $\kappa = 10$, with a
-   weak $\sigma = 3$.
-2. **Group level**: each group's prior is centred on its type-level fit, with $\sigma = 1$. A group
-   with little information (e.g. methylated nowhere, so $\psi \to 0$ and $\mu_1$ is unidentified)
-   borrows the missing component from its modification type.
-
-The mixture weight $\psi_m$ is a nuisance parameter: the fraction of all sites in the sample that
-are methylated.
-
-### 6.3 Population prior: nonparametric maximum likelihood (g-modelling)
-
-For each group $m$, $\pi_m$ is the nonparametric maximum-likelihood estimate (NPMLE; Kiefer &
-Wolfowitz 1956) of the distribution of host levels across the $B$ bins, computed on the grid by EM
-(300 iterations):
+For each group, $\hat\pi_m$ is the nonparametric maximum-likelihood estimate of the distribution of bin levels
+(Kiefer and Wolfowitz 1956; Efron's g-modelling, 2016), by EM on the grid:
 
 $$
-\pi_m^{(t+1)}(i) = \frac{1}{B}\sum_{b=1}^{B} \frac{\pi_m^{(t)}(i)\, e^{\ell_{bm}(i)}}{\sum_{i'} \pi_m^{(t)}(i')\, e^{\ell_{bm}(i')}} .
+\hat\pi^{(t+1)}_{mg} = \hat\pi^{(t)}_{mg}\, \frac{1}{H} \sum_h \frac{e^{\Lambda_{hmg}}}{\sum_{g'} \hat\pi^{(t)}_{mg'}\, e^{\Lambda_{hmg'}}},
 $$
 
-This is Efron's (2016) *g-modelling*: the prior is deconvolved from the bins' noisy likelihoods
-rather than being assumed to have a parametric shape.
-
-Two safeguards follow:
-- **Shrinkage** towards the mean prior of groups with the same modification type, $\bar\pi_{t(m)}$,
-  with $\lambda = 5$ pseudo-bins. This stabilises motifs seen in only a few bins.
-- **A uniform floor** $f = 0.02$, so no level is ever impossible. This keeps the "unknown" class and
-  the own-MTase density from assigning zero probability to unusual observations.
+at most 300 iterations or until no cell moves by more than $10^{-6}$; each fit starts from the previous fit's
+estimate (the uniform the first time; `--npmle-start warm`). It is shrunk towards the mean $\bar\pi_{\theta(m)}$ of
+the groups of its modification type with $\lambda_\pi = 5$ pseudo-bins and mixed with a uniform floor $f = 0.02$, so
+no level is impossible:
 
 $$
-\pi_m \;=\; (1 - f)\,\frac{B\,\hat\pi_m + \lambda\,\bar\pi_{t(m)}}{B + \lambda} \;+\; \frac{f}{G}.
+\pi_{mg} = (1 - f)\,\frac{H \hat\pi_{mg} + \lambda_\pi \bar\pi_{\theta(m) g}}{H + \lambda_\pi} + \frac{f}{G} .
 $$
 
-### 6.4 Robust host profiles
+### 6.3 Robust bin profiles
 
-MAG bins are often contaminated with contigs from other organisms. Each chunk $k$ of bin $b$ is
-modelled as coming either from the bin's host (prior $1 - \varepsilon$) or from a random member of
-the community (prior $\varepsilon = 0.05$). The posterior responsibility of the "foreign"
-explanation is
+Bins hold foreign sequence. Each chunk is taken to come from its bin with prior $1 - \varepsilon_0$ or from a random
+community genome with prior $\varepsilon_0$ = `--contam-eps` (0.05). Its responsibility of being foreign is
 
 $$
-r_k = \sigma\!\Big(\log\tfrac{\varepsilon}{1-\varepsilon} + s^{\text{out}}_k - s^{\text{in}}_k\Big),
-\qquad \sigma(z) = \frac{1}{1 + e^{-z}},
+r_c = \sigma\Big(\log\tfrac{\varepsilon_0}{1 - \varepsilon_0}
++ \sum_m \log \sum_g e^{L'_{cmg}} \pi_{mg}
+- \sum_m \log \sum_g e^{L'_{cmg}} p^{(-c)}_{b_c m g}\Big),
 $$
 
-where:
-- $s^{\text{in}}_k = \sum_m \log\sum_i \exp\big(\mathcal{L}'_{km}(i) + \log p^{(-k)}_{bm}(i)\big)$ is
-  scored against the bin's profile **with chunk $k$ left out**;
-- $s^{\text{out}}_k = \sum_m \log \sum_i \exp\big(\mathcal{L}'_{km}(i) + \log \pi_m(i)\big)$.
-
-The chunk weights become $w_k = 1 - r_k$. Profiles and the population prior are then refitted, and
-the cycle repeats four times. The leave-one-out step matters: without it, a contaminating chunk would
-partly explain itself.
-
-The output `host_chunk_outliers.tsv` lists $r_k$ for every chunk, which doubles as a
-bin-contamination check.
-
-### 6.5 Own-MTase prior ρ from annotations
-
-*Module: `mtase.py`.*
-
-Every (unit, group) pair gets an annotation level:
-
-| Level | Meaning | $\rho$ |
-|---|---|---|
-| 2 | An MTase on the unit has a predicted motif that is a member of the group (or its reverse complement) | $\rho_{\text{motif}}$ (default 0.8) |
-| 1 | An MTase of the group's modification type, without a usable motif | $\rho_{\text{type}}$ (default 0.3) |
-| 0 | No annotation | $\rho_{\text{base}}$ (default 0.02) |
-
-When the host contigs are annotated too, the reliability of the annotations is measured on the
-bins. For level $\ell \in \{1, 2\}$, with $\mathcal{P}_\ell$ the annotated (bin, group) pairs:
-
-$$
-\hat\rho_\ell = \frac{1 + \sum_{(b,m)\in\mathcal{P}_\ell} \Pr(\phi_{bm} > 0.5)}{2 + |\mathcal{P}_\ell|},
-$$
-
-i.e. the fraction of annotated MTases whose motif is actually methylated, with a Beta(1, 1) prior.
-It is used when $|\mathcal{P}_\ell| \ge 5$ and clipped to $[0.05, 0.99]$. This catches inactive
-MTases and wrong motif predictions automatically.
-
-$\rho_{\text{base}}$ is not estimated. The host-level rate of methylated-but-unannotated groups
-(annotation recall) is reported as a diagnostic, but it describes chromosomes and would overstate
-how often a plasmid carries an unannotated MTase.
-
-### 6.6 Plasmid parameters δ and τ_p: type-II maximum likelihood
-
-$\delta$ and $\tau_p$ are chosen to maximise the **marginal** likelihood of all plasmid candidates,
-summing over each one's unknown host:
-
-$$
-(\hat\delta, \hat\tau_p) = \arg\max_{\delta, \tau_p} \sum_{u \in \mathcal{U}_p} \log \sum_{h=0}^{H} \Pr(h)\, \exp\big(S_{uh}(\delta, \tau_p)\big),
-$$
-
-over the grid $\delta \in \{0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1\}$ and
-$\tau_p \in \{10, 30, 100, 300, 1000, \infty\}$.
-
-- $\mathcal{U}_p$ is the set of candidates with at least 20 sites; the fit requires at least five of
-  them, otherwise $\delta = 1$ and $\tau_p = \tau_c$.
-- **No host labels are needed:** the host is integrated out, so plasmids help estimate the
-  parameters whichever host they belong to.
+with $p^{(-c)}$ the profile without chunk $c$ (without it a contaminating chunk would partly explain itself). The
+weights $w_c = 1 - r_c$ and the profiles are refitted in turn (`--robust-fit alternating`), at most four rounds,
+stopping early when no weight moves by more than $10^{-3}$. Foreign chunks are down-weighted, not removed;
+`host_chunk_outliers.tsv` lists $r_c$. A bin whose weights still move after the last round is reported as
+`not_converged` (`bin_evidence.tsv`): it may hold two methylomes in comparable shares. The same weights give the
+**two-state screen** of `bin_evidence.tsv` (`two_state_share`).
 
 ---
 
-## 7. Self-calibration with pseudo-plasmids
+## 7. Calibration on pieces of the sample's own bins
 
 *Module: `calibrate.py`.*
 
-Real samples have no ground truth for plasmid hosts. EpiRefine creates its own: **pseudo-plasmids**
-are fragments cut from host contigs, so their source bin is known.
+Real samples have no ground truth. EpiRefine makes its own: **calibration pieces** are cut from binned contigs, so
+their bin is known.
 
-### 7.1 Construction
+### 7.1 Pieces
 
-- **Lengths:** $\{2, 5, 10, 20, 50, 100\}$ kb, matching the range of real plasmids.
-- **Tiling:** for each length, host contigs are tiled and up to 30 tiles per bin are sampled at
-  random.
-- **Leave-chunks-out scoring:** each fragment is scored like a plasmid, with every chunk it overlaps
-  removed from its own bin's profile, so the fragment never helps explain itself.
-- **Exclusion of contaminant fragments:** fragments that overlap chunks the robust model flags as
-  foreign ($w_k < 0.5$) are dropped. Their bin label is probably wrong, and keeping them would make
-  correct answers look like errors.
-- **Own-MTase prior:** fragments are scored with $\rho = \rho_{\text{base}}$ for every group.
+From binned contigs with $\text{cov}_u \ge$ `--min-contig-coverage`, pieces of six lengths (`--frag-lengths`: 2, 5,
+10, 20, 50 and 100 kb) are cut. Tiles of one length lie on a fixed grid along each contig and do not overlap. For
+each bin and length, up to $\max(1, \min(30, \operatorname{round}(6000 / (\ell H))))$ tiles are drawn without
+replacement ($\ell$ the number of lengths; `--frags-per-bin` 30, `--frag-budget` 6000; seeded by
+`--calibration-seed`, which defaults to `--seed`). Each piece is scored as if it were unbinned, with its own bin's
+profile rebuilt **without every chunk of its source contig**. Pieces whose bin would be empty without the source
+contig, and pieces that overlap a chunk with robust weight $w_c < 0.5$ (their label is probably wrong), are not used.
+If no binned contig is covered and long enough for the shortest piece, the run stops with the error "no calibration
+fragments".
 
 ### 7.2 Two tests
 
-| Test | Candidates | Correct answer | Measures |
+| Test | Candidates | Right answer | Checks |
 |---|---|---|---|
-| A | All bins + unknown | The source bin | Accuracy and calibration when the host is binned |
-| B | Source bin removed | "unknown" | Whether a missing host is recognised rather than replaced by a wrong bin |
+| A | all bins and the unknown genome | the piece's bin | accuracy and calibration when the genome has a bin |
+| B | the piece's bin removed | the unknown genome | that a missing genome is recognised rather than replaced by a wrong bin |
 
-In test B, a bin with the same methylome as the removed one (a **lookalike**) makes "unknown"
-unreachable for *any* method. Lookalikes are defined by
-$\max_m |\bar\phi_{bm} - \bar\phi_{b'm}| < 0.15$ and reported separately; metrics marked
-`B_distinct` exclude them.
+Test B uses only **distinct** pieces: their bin has no **look-alike** (no other bin within 0.15 of its mean level in
+every group, `lookalikes.tsv`) and the piece's expected log Bayes factor (§8.5, at $T = 1$) for its bin over the
+best-scoring other bin is at least 3. Where a bin cannot be told from a sibling, removing it does not make "unknown"
+the right answer for any method.
 
-### 7.3 Between-chunk concentration τ_c
+### 7.3 The variation parameter τ
 
-$\tau_c$ is chosen from $\{3, 10, 30, 100, 300, 1000, 10^4, \infty\}$ to maximise the leave-one-out
-marginal likelihood of the fragments under their own host:
-
-$$
-\hat\tau_c = \arg\max_\tau \sum_f S^{(-f)}_{f, b_f}(\tau).
-$$
+For each $\tau \in \{3, 10, 30, 100, 300, 1000, 10^4, \infty\}$ the model (robust profiles and community prior) is
+fitted and the kept pieces are scored against their own bin. Each group takes the τ that maximises the sum of its
+leave-out group terms over the pieces that fit keeps. If the groups disagree, a model with per-group $\tau_m$ is
+fitted and replaces the best single τ when its summed own-bin log-likelihood is higher (`tau_fit.tsv`,
+`tau_groups.tsv`). `--tau` overrides; `--tau-select inf` fixes $\tau = \infty$.
 
 ### 7.4 Temperature
 
-$S_{uh}$ assumes conditional independence of sites and groups. That is rarely exact (sites on one
-read are correlated, and motifs can share MTases), so the raw posteriors may be miscalibrated. A
-single temperature $T$ rescales all log-likelihoods (Guo et al. 2017):
+$S_{uh}$ treats sites and groups as conditionally independent. That is not exact (sites on one read are correlated,
+methylation varies along a genome), so raw posteriors are overconfident. One temperature $T$ divides the scores
+$S_{uh}$ and $S^U_u$ in the posteriors and the decisions; priors are not divided (Guo *et al.* 2017). Let $p_0$ =
+0.1 (or `--p-unknown`) be a reference share of unknown genomes, with bin prior $(1 - p_0)/H$:
 
 $$
-\hat T = \arg\min_T \Big[\overline{\mathrm{LL}}_A(T) + \overline{\mathrm{LL}}_{B,\text{distinct}}(T)\Big],
+P^A_j(T) = \frac{\tfrac{1 - p_0}{H} e^{S_{j b_j}/T}}{\sum_{h} \tfrac{1 - p_0}{H} e^{S_{jh}/T} + p_0\, e^{S^U_j/T}},
+\qquad
+P^B_j(T) = \frac{p_0\, e^{S^U_j/T}}{\sum_{h \ne b_j} \tfrac{1 - p_0}{H} e^{S_{jh}/T} + p_0\, e^{S^U_j/T}},
 $$
 
-where $\overline{\mathrm{LL}}$ is the mean log loss, $-\log \Pr(\text{correct answer})$, over a log
-grid of 31 values in $[0.2, 20]$.
+$$
+\mathcal{L}(T) = \frac{1}{|\mathcal{A}|} \sum_{j \in \mathcal{A}} -\log P^A_j(T)
++ \frac{1}{|\mathcal{B}|} \sum_{j \in \mathcal{B}} -\log P^B_j(T),
+$$
 
-- **Why test B is included.** With test A only, evidence *against* "unknown" is never checked.
-  In simulation that led to sharpening and a confident error on a plasmid whose true host was
-  unbinned.
-- **Why the lookalike part of B is excluded.** It would push $T$ towards flattening everything.
-- **Clipping.** The temperature actually used is $\max(1, \hat T)$, so calibration may *flatten*
-  posteriors but never *sharpen* them. The fragments are chromosomal and lack plasmid-specific
-  uncertainty (copy-number effects, own MTases, unbinned lookalike hosts). They can reveal
-  overconfidence, but they cannot justify making plasmid posteriors more confident than the model
-  states. `--allow-sharpening` uses $\hat T$ directly.
+over the kept pieces $\mathcal{A}$ and the distinct pieces $\mathcal{B}$ (probabilities floored at $10^{-12}$; the
+test-A mean alone when $\mathcal{B}$ is empty). The two tests weigh the same whatever their sizes.
 
-### 7.5 Reported metrics
+- **Grid.** $\hat T$ minimises $\mathcal{L}$ over 31 values log-spaced from 0.2 to 20 (`calibrate.DEFAULT_TEMPS`,
+  rounded to 3 decimals). Neighbouring values differ by a factor $100^{1/30} \approx 1.166$.
+- **Never sharpen.** Only $T \ge 1$ is used (`--allow-sharpening` lifts this). The pieces are cut from binned
+  contigs, which are easier to place than real unbinned contigs: they can show overconfidence but cannot justify
+  more confidence. The smallest usable value is the first grid value above 1, **1.082**; the largest is the
+  **cap, 20**. `fitted_temperature` in `params.json` is the best grid value without this restriction.
+- **Why test B is included.** With test A only, evidence against "unknown" is never checked, which led to
+  overconfident placements of contigs whose genome had no bin.
+- `--temperature` overrides the fit (and bypasses the guard, §7.8).
 
-Per fragment length:
-- accuracy of the maximum a posteriori (MAP) host
-- mean confidence
-- expected calibration error,
-  $\mathrm{ECE} = \sum_{\text{bins}} \frac{n_b}{N}\,|\mathrm{acc}_b - \mathrm{conf}_b|$ over 10
-  confidence bins
-- log loss
-- 95% credible-set coverage and mean set size
-- test B rate of "unknown" and rate of confident (≥ 0.95) wrong calls
+**Limitation: the grid step.** The temperature moves in steps of about 17%, and the number of inclusions follows
+the step: on the ZymoFecal tuning sets (development), about one resample of the calibration bins in six landed one
+grid step away from the full fit, which moved inclusions by about 17%. A continuous search between grid points was
+tried (98% of resamples within 15% of the full fit, against 83%) but changed a written criterion on the simulated
+look-alikes, so 0.12 keeps the grid (dev log D75 and the 2026-11-13 ledger).
 
-A reliability table, the τ and T fits, and accuracy against assignability (§8.3) are also written.
-Together these give a **sample-specific detection limit**: how short a plasmid can be and still be
-assigned reliably *in this sample*, with its coverage, motif repertoire and caller behaviour.
+**One temperature for all lengths.** The temperature each piece length would want alone rises with length
+(`temperature_by_length.tsv`; on ZymoFecal, development, from about 3 at 2 kb to about 14 at 500 kb), so one
+temperature leaves very long contigs overconfident and short ones underconfident. A temperature that grows with
+the number of sites is an option (`--temperature-law sites`), not the default.
+
+### 7.5 Reported tables
+
+`calibration/` holds, per piece length and overall: accuracy, mean confidence, expected calibration error over 10
+confidence bins, log loss, 95% credible-set coverage and size, and the test-B rates of "unknown" and of confident
+(≥ 0.95) wrong calls, uncalibrated, at the fitted and at the calibrated temperature (`summary.tsv`); a reliability
+table (`reliability.tsv`); the τ and T fits; accuracy by expected evidence (`assignability.tsv`); the look-alikes;
+the pieces themselves; and two tables at the settings the decisions use: the share of true member pieces that
+would be flagged (`false_flag_rate.tsv`) and the reliability of the deployed posteriors (`reliability_deployed.tsv`).
+Every column is described in [outputs.md](../outputs.md#the-calibration-folder). Together they give a
+sample-specific picture of how short a contig can be and still be placed reliably in this sample.
 
 ### 7.6 Calibration designs (`--calibration`)
 
-The calibration of 0.10 (`--calibration legacy`, the default up to 0.11.0) is the one described above. Since 0.11.1 the default (`--calibration default`) is that calibration plus the feature `bin-parsimony`. A set of
-features, each selectable alone, changes one step each (`epirefine.calibrate.FEATURES`);
-`--calibration coherent` switches on the proposed set (temper-then-mix, prior-averaged, full-test-b,
-common-tau, em-priors); `coherent,-name` leaves one out.
+The calibration of 0.10 (`--calibration legacy`) is the one of §7.1-7.4 with the unknown model chosen per sample.
+The default since 0.11.1 (`--calibration default`) adds the feature `bin-parsimony` (below); since 0.12 the
+unknown model is no longer chosen (§7.7), and `bin-parsimony` only sets how the relatives statistic's standard
+error is computed. The other features are **not defaults**: they were tried during development and kept so the
+comparisons can be repeated (`epirefine.calibrate.FEATURES`). `--calibration coherent` switches on the set
+temper-then-mix, prior-averaged, full-test-b, common-tau, em-priors; `consistent` the set temper-then-mix,
+common-tau, em-priors; `coherent,-name` leaves one out. Several of them need the 0.11.1 path and switch the run to
+it (§7.7, last paragraph).
 
 | Feature | What changes |
 |---|---|
-| `temper-then-mix` | "Unknown" is a mixture of $H + 1$ explanations: a community draw (weight $\lambda$) and a relative of each bin (weight $(1-\lambda)/H$). Each is tempered on its own and the tempered terms are mixed, $Z_u = \log\big(\lambda e^{S_c/T} + \tfrac{1-\lambda}{H}\sum_h e^{R_h/T}\big)$, as the bins are. The legacy order (mix, then divide by $T$) also tempers the weights $1/H$ and gives "unknown" $\log(H)(1 - 1/T)$ of log odds over a bin that fits perfectly. No effect when $\lambda = 1$ or $T = 1$. |
-| `prior-averaged` | $(T, \eta, \lambda)$ minimise a proper score. A share $p$ of unbinned contigs has no bin (test B), $1 - p$ has one (test A), and the posterior is computed with that same prior: $J(\theta; p) = (1-p)\,\overline{\mathrm{LL}}_A + p\,\overline{\mathrm{LL}}_B$, averaged over $p = 0.1, 0.3, 0.5, 0.7, 0.9$. The legacy objective scores posteriors at prior 0.1 with the tests weighted 1 : 1, and then inflates $T$ to make up for the prior (1.62 on exact synthetic likelihoods whose true $T$ is 1). In test B the $H - 1$ remaining bins share $1 - p$. |
-| `prior-matched` | The same objective at one prior, the estimated $p_\text{unknown}$: fit, estimate $p_\text{unknown}$, refit, until the fit stops changing. Excludes `prior-averaged`. |
-| `full-test-b` | Test B counts every fragment, also those that cannot tell their bin from its nearest competitor (left out since D12). Contigs of a genome without a bin that resembles a bin are part of the population the posteriors are reported for. Meant for a proper objective. |
-| `unit-temperature` | Adds $T = 1$ to the grid, so "never sharpen" clips at 1 instead of at the grid's first value above 1 (1.082). |
-| `conservative-temperature` | Among $T \ge 1$, the largest $T$ whose objective is within 2 SE of the best (paired differences, bootstrap over source contigs). The fragments are easier to place than real unbinned contigs, so where they cannot tell two temperatures apart the flatter one is used. |
-| `sites-temperature` | $T$ may rise with a unit's number of sites: the best $T \ge 1$ per fragment length, made non-decreasing (pool adjacent violators), interpolated in log sites, constant outside the calibrated range; used only when it beats one temperature by more than 2 SE. |
-| `common-tau` | $\tau$ values (and the per-group choice) are compared on the fragments every $\tau$ fit keeps; each fit otherwise drops the fragments its own robust weights call foreign, which favours large $\tau$. |
-| `bin-parsimony` | The parsimony test of the unknown model (relatives, $\lambda < 1$, kept only when they beat community-only by 2 SE) takes its standard error from a bootstrap over bins instead of over single fragments. The evidence for relatives comes from sibling pairs of bins and a few bins hold most of it (ZymoFecal with the Nanomotif 1.3.0 motifs: 5 of 213 bins hold 44% of the test-B gain), so fragments are not independent: the gain 0.142 is 2.9 SE over fragments but 1.8 SE over bins, and the relatives model it used to select sent $p_\text{unknown}$ to 1 (no inclusions). On the simulated look-alikes, where every bin has an unbinned sibling, the gain stays at 5 SE over bins. Default since 0.11.1; since 0.12 the test only reports (§7.7). |
-| `tempered-bin-prior` | The uniform prior over the $H$ bins is tempered with the evidence: a bin's logit is $S_h/T + \log(1-p_\text{unknown}) - \log(H)/T$ instead of $\ldots - \log H$, in calibration and in the decisions. Without it the log odds of "unknown" against "some bin" gain $\log(H)(1 - 1/T)$ from the temperature alone and the EM estimate of $p_\text{unknown}$ rises with $T$ (ZymoFecal, community-only: 0.41 at $T = 1$, 0.69 at 5.02, 0.94 at 10; simulated look-alikes with relatives: 1.00 against a true share of 0.44-0.46). Option; result-changing (more inclusions). |
-| `deployed-unknown` | Checks the choice of the unknown model at the prior it is deployed with. The fit compares the model with relatives ($\lambda < 1$) and the community-only model ($\lambda = 1$, each at its best $T$) at the reference prior 0.1, but decisions use the $p_\text{unknown}$ that the EM finds on the unbinned contigs, and that estimate depends on the model: a relative of bin $h$ fits every contig that fits $h$, so where the relatives' likelihood ratio unknown : bins exceeds $1 - f$ ($f$ the share of unbinned contigs that fit no bin) the EM runs to $p_\text{unknown} = 1$ and nothing can be placed. With this feature, after the contigs are scored, $p_\text{unknown}$ is estimated under each of the two models, both are scored on the calibration fragments (tests A and B weighted 1 : 1) at their own estimate, and the relatives model is kept only if it is better by more than 2 SE (paired bootstrap over source contigs; D28's convention). Otherwise the community-only model and its temperature are used. No effect when the fit already chose $\lambda = 1$. Logged, and written to `params.json` (`unknown_model_deployed_check`). |
-| `em-priors` | $p_\text{unknown}$ gets a Beta(2, 2) prior (a flat prior runs to 0 or 1 with a handful of unbinned contigs); the contamination rate counts only contigs that pass the methylome-difference gate (the gate inside the E-step). |
-
-Written in every mode: `calibration/false_flag_rate.tsv`, the share of member fragments (scored without
-their contig) that the deployed rule would flag, per fragment length, with and without the fragments the
-robust profiles exclude; and `calibration/reliability_deployed.tsv`, the reliability of the fragments'
-posteriors at the priors and temperature actually used for decisions.
+| `temper-then-mix` | "Unknown" is a mixture of a community draw (weight $\lambda$) and a relative of each bin (weight $(1-\lambda)/H$); each is tempered on its own and the tempered terms are mixed, $Z_u = \log\big(\lambda e^{S_c/T} + \tfrac{1-\lambda}{H}\sum_h e^{R_h/T}\big)$, as the bins are. The default order (mix, then divide by $T$) also tempers the weights. No effect when $\lambda = 1$ or $T = 1$. |
+| `prior-averaged` | $(T, \eta, \lambda)$ minimise $J(\theta; p) = (1-p)\,\overline{\mathrm{LL}}_A + p\,\overline{\mathrm{LL}}_B$ averaged over $p = 0.1, 0.3, 0.5, 0.7, 0.9$, each posterior computed at that prior, instead of prior 0.1 with the tests weighted 1 : 1. |
+| `prior-matched` | The same objective at one prior, the estimated $p_\text{unknown}$, refitted until the fit stops changing. Excludes `prior-averaged`. |
+| `full-test-b` | Test B counts every piece, also those that cannot tell their bin from its nearest competitor. |
+| `unit-temperature` | Adds $T = 1$ to the grid, so "never sharpen" clips at 1 instead of 1.082. |
+| `conservative-temperature` | Among $T \ge 1$, the largest $T$ whose objective is within 2 SE of the best (bootstrap over source contigs). |
+| `sites-temperature` | $T$ may rise with a unit's number of sites (best $T \ge 1$ per piece length, made non-decreasing, interpolated in log sites); used only when it beats one temperature by more than 2 SE. |
+| `common-tau` | τ values (and the per-group choice) are compared on the pieces every τ fit keeps. |
+| `bin-parsimony` | The relatives test takes its standard error from a bootstrap over bins (400 replicates resampling whole source bins) instead of over single pieces: the evidence for relatives comes from sibling pairs of bins, a few of which hold most of it (ZymoFecal, Nanomotif 1.3.0 motifs, development: 5 of 213 bins held 44% of the test-B gain). Default since 0.11.1. |
+| `tempered-bin-prior` | The uniform prior over the $H$ bins is tempered with the evidence ($-\log(H)/T$ instead of $-\log H$), in calibration and decisions, so the unknown share no longer rises with $T$ at the deployed temperature. |
+| `deployed-unknown` | A relatives model is kept only if it still beats the community-only model by 2 SE when each is scored at the $p_\text{unknown}$ it would be deployed with. Writes `unknown_model_deployed_check`. |
+| `em-priors` | $p_\text{unknown}$ gets a Beta(2, 2) prior; the contamination rate counts only contigs that pass the methylome-difference gate. |
 
 ### 7.7 The unknown model since 0.12 (option E)
 
-*Code: `pipeline.resolve_unknown_model`, `pipeline.run` (the calibration block and the decision block),
-`calibrate.calibrate` (the relatives test), `calibrate.calibrate_decisions`, `calibrate._relatives_statistic`.*
+*Code: `pipeline.resolve_unknown_model`, `pipeline.run` (calibration and decision blocks), `calibrate.calibrate`,
+`calibrate.calibrate_decisions`, `calibrate._relatives_statistic`.*
 
-"Unknown" (§4.8) can be described two ways: a draw from the community ($\lambda = 1$), or a mixture of that draw
-and a relative of each bin ($\lambda < 1$, mixing weight $1-\lambda$ spread over the $H$ bins, relatives at
-distance $\eta$). Up to 0.11.1 the calibration chose between them per sample (the best row of the temperature
-fit, kept with relatives only when it beat the best community-only row by 2 SE, the SE resampled over bins since
-`bin-parsimony`). That choice is removed. Every run now:
+Up to 0.11.1 the calibration chose between two unknown models per sample: the community draw ($\lambda = 1$) and
+the mixture with relatives ($\lambda < 1$, $\eta \in \{0.02, 0.05\}$, $\lambda \in \{0.1, 0.5, 0.9\}$), keeping the
+relatives when the best relatives row of the temperature fit beat the best community-only row by 2 SE (over bins
+since `bin-parsimony`). That choice is removed. Every run now:
 
-1. fits the temperature grid as in §7.4 for both unknown models and, as before, computes the relatives test:
-   the gain in mean log loss of the best relatives row over the best community-only row, and its SE over bins
-   (computed also when community only fits best; the gain is then $\le 0$);
-2. uses the best community-only row (its $T$ and $\eta$, $\lambda = 1$), whatever the test says; the test is
-   written as `relatives_statistic` and one log line, with what the 2-SE rule would have chosen
-   (`unknown_model_forced` when that would have been the relatives);
-3. estimates $p_\text{unknown}$ by the EM over the decided unbinned contigs at $T = 1$ (`--unknown-share t1`):
-   bins weighted $(1-p)/H$ against the community draw, both untempered. At the deployed temperature the
-   untempered $1/H$ prior gives "unknown" $\log(H)(1 - 1/T)$ of extra log odds, so the estimate rose with $T$
-   (ZymoFecal, development: 0.41 at $T = 1$, 0.69 at 5.02);
-4. makes the decisions (§8.2, `refine.refine`) with that fixed $p_\text{unknown}$ at the calibrated $T$;
-5. computes the methylation evidence (§8.3) after the decisions, at the same $T$, and sets
-   `no_methylation_evidence` on contigs that are still `kept` or `unbinned` when evidence / $T$ is below
-   `--min-evidence`. This status is written last: flags, inclusions and the refined bins do not depend on it.
+1. fits the temperature grid (§7.4) for every unknown model (`temperature_fit.tsv`) and computes the **relatives
+   statistic**: the gain $\Delta$ in $\mathcal{L}$ of the best relatives row over the best community-only row, each at
+   its own temperature $\ge 1$ (negative when the community model fits better), its standard error over bins
+   (400 bootstrap replicates of whole source bins, fixed seed), and $\Delta/\text{SE}$. It is written to one log line
+   and to `params.json` `relatives_statistic`, with what the 2-SE rule of 0.11.1 would have chosen
+   (`switch_choice`); with one bin it is not computed. **It changes no score or call**;
+2. uses the best community-only row ($\lambda = 1$, its $T \ge 1$) whatever the statistic says. When the 2-SE rule
+   would have chosen the relatives, `params.json` records what it would have used (`unknown_model_forced`), and the
+   temperature in use is the community-only row's;
+3. estimates the **unknown share** $\hat p$, the share of decidable unbinned contigs that come from genomes without
+   a bin, by EM at $T = 1$ with the bins equally likely (`--unknown-share t1`):
+   $$
+   \hat p = \arg\max_p \sum_{u \in \mathcal{U}} \log\Big[(1 - p)\,\frac{1}{H}\sum_h e^{S_{uh}} + p\, e^{S^U_u}\Big],
+   $$
+   starting from 0.5, at most 500 iterations, tolerance $10^{-8}$, kept in $[10^{-6}, 1 - 10^{-6}]$ (`--p-unknown`
+   fixes it). $\hat p$ is then held fixed in the decisions (`p_unknown`, `p_unknown_t1` in `params.json`). At the
+   deployed temperature, the untempered $1/H$ prior gives "unknown" $\log(H)(1 - 1/T)$ of extra log odds, so an
+   estimate made there rose with $T$ (ZymoFecal, development: 0.41 at $T = 1$, 0.69 at 5.02);
+4. makes the decisions (§8) with that $\hat p$ at the calibrated $T$;
+5. runs the methylation-evidence check after the decisions, at the same $T$ (§8.5).
 
-**Why.** The choice flipped under resampling of the calibration: on the three ZymoFecal tuning sets of pieces the
-switch chose relatives in 20%, 13.5% and 2.5% of 200 bin resamples, and every replayable flip ended with no or
-almost no inclusion (the relatives model absorbs the unbinned contigs, $p_\text{unknown} \to 1$). With the switch
-removed and the share at $T = 1$, 200 of 200 resamples kept the model and stayed within 20% of the full-data
-inclusions on each set; the remaining spread is one step of the temperature grid (dev log D61-D63, development
-data).
+**Why.** The choice sat on a knife edge: on ZymoFecal (Nanomotif 1.3.0 motifs, development) the statistic was 0.4 to
+1.9 SE on five sets of calibration pieces, and on three tuning sets the switch chose relatives in 20%, 13.5% and
+2.5% of 200 resamples of the calibration bins; every replayable flip ended with no or almost no inclusion (the
+relatives model absorbs the unbinned contigs, $\hat p \to 1$). With the switch removed and the share at $T = 1$,
+200 of 200 resamples kept the outcome on each set (dev log D61-D63; development data).
 
 **What it costs.** The relatives model existed for genomes without a bin that copy a bin's methylation. Without
-it, contigs from such a genome are placed into the sister bin when their methylation matches (simulated
-look-alikes, development: 112 placements over three sets, all from exact or near copies of a bin's methylome).
-On such a sample the temperature also rises, because the pieces of a held-out bin are confidently scored to the
-sister bin in test B (look-alikes: $T$ 3.7-4.3 against 1.26 with relatives), and since the evidence check divides
-by $T$ more short contigs get no call (about 12-35% of the contigs there; the share is steep in $T$). The relatives
-statistic is the warning: near 0 or below, the pieces give no sign of unbinned relatives; above about 2 they do.
-`--relatives switch` (deprecated) restores the path of 0.11.1 for comparison, with $p_\text{unknown}$ at the
-deployed temperature unless `--unknown-share` is given.
+it, contigs of such a genome are placed into the sister bin when their methylation matches (simulated look-alikes,
+development: 112 placements over three sets, all exact or near copies of a bin's methylome: identical, differing
+only in a phase-variable or unmodelled motif, or in a modelled motif with at most 2 sites on the contig). On such a
+sample the temperature also rises, because test-B pieces of a removed bin are confidently scored to its sister
+(look-alikes: $T$ 3.7-4.3, against 1.26 under 0.11.1), and since the evidence check divides by $T$, more short
+contigs get no call (about 12-35% of the contigs there; §8.5, §10). The relatives statistic is the warning: near 0
+or below, the pieces give no sign of unbinned relatives; above about 2 they do (development: 0.4-1.9 on ZymoFecal,
+4.4-5.4 on the simulated look-alikes).
 
----
+**The 0.11.1 path.** `--relatives switch` (deprecated, hidden from `--help`) restores the switch of 0.11.1, with
+$\hat p$ estimated at the deployed temperature unless `--unknown-share` is given; it reproduces 0.11.1. A run that
+uses an option only that path supports (`--no-calibrate`, `--unlisted-genome`, `--regional-inclusion`, the
+calibration features `sites-temperature`, `prior-matched`, `prior-averaged`, `unit-temperature`,
+`deployed-unknown`) takes it when `--relatives` is not given, and says so in the log. `epirefine rerun` of a
+`params.json` written before 0.12 uses it too. `--relatives per-bin` and `--relatives slot` are experimental
+designs with a relatives weight per bin.
 
-### 7.8 The calibration guard (since 0.12)
+### 7.8 The calibration guard
 
 *Code: `calibrate.calibration_guard`, `pipeline.run` (after the calibration block).*
 
-On the default path (option E, no `--temperature`), the run checks whether the calibrated temperature is at the
-largest point of the grid (the cap, 20). If so, it makes no call: the contamination and inclusion thresholds are
-set beyond 1 for the run, so no contig is flagged, included or moved, and the posteriors are written at the cap
-for inspection only. One log line (`WARNING: calibration guard`) and `params.json` `calibration_guard` say so.
+On the default path (option E, no `--temperature`), the run checks whether the calibrated temperature is at the cap
+of the grid (20). If so, it makes **no call**: the contamination and inclusion thresholds are set beyond 1 for the
+run, so no contig is flagged, included or moved, and the posteriors are written at the cap for inspection only. One
+log line (`WARNING: calibration guard: ...`) and `params.json` `calibration_guard` (`fired`, `reason`,
+`temperature`, `cap`, `pieces`, `test_b_pieces`, `fallback`) say so; on every other calibrated run
+`calibration_guard.fired` is false.
 
 **Why the cap and not the number of pieces.** A temperature at the boundary of the search means no tempering the
-grid allows predicted the pieces better: the loss is flat in $T$ (pieces without usable sites) or still falling
-at 20 (pieces confidently wrong); either way the fit gives no temperature to decide with. On development data the
-temperature is at most 5.9 on every normal run (monoculture training set, ZymoOral, simulated look-alikes,
-ZymoFecal and 600 bin resamples of its calibration, fecal_inhouse) and either at most 1.7 or exactly 20 on the 653
-finished runs of stress set 2; nothing lies in between, so the check does not sit on a threshold. Counts of pieces do not
-separate: from a single calibration piece the fit usually lands at the never-sharpen floor (1.08) and the calls
-are right (stress set 2: tens of runs, flag precision 100%), so a guard on few pieces would remove correct calls.
-The three stress runs at the cap made no call under option E anyway (the contamination rate and $p_\text{unknown}$
-fall to 0 at $T = 20$ and every contig has evidence / $T$ below 3); the guard makes this explicit and guarantees
-it on data where some calls would survive $T = 20$. A fixed fallback temperature was rejected: $T = 1$ on one of
-those runs placed 25 contigs, one wrongly, where the calibration had found the scores untrustworthy.
+grid allows predicted the pieces better: the loss is flat in $T$ (pieces without usable sites) or still falling at
+20 (pieces confidently wrong); either way the fit gives no temperature to decide with. On development data the
+temperature is at most 5.9 on every normal run (monoculture training set, ZymoOral, simulated look-alikes, ZymoFecal
+and 600 bin resamples of its calibration, fecal_inhouse) and either at most 1.7 or exactly 20 on the 653 finished
+runs of stress set 2; nothing lies in between, so the check does not sit on a fitted threshold. Counts of pieces do
+not separate: from a single calibration piece the fit usually lands at the never-sharpen floor (1.082) and the calls
+are right (stress set 2, development: tens of runs, flag precision 100%), so a guard on few pieces would remove
+correct calls. The three stress runs at the cap made no call under option E anyway (the contamination rate and
+$\hat p$ fall to 0 at $T = 20$ and every contig has evidence / $T$ below 3); the guard makes this explicit and
+guarantees it on data where some calls would survive $T = 20$. A fixed fallback temperature was rejected: $T = 1$
+on one of those runs placed 25 contigs, one wrongly, where the calibration had found the scores untrustworthy.
 
-## 8. Uncertainty, assignability and diagnostics
+---
 
-### 8.1 Credible sets and Bayes factors
+## 8. Decisions, uncertainty and no calls
 
-- **95% credible set:** the smallest set of top-ranked candidates whose posterior sums to ≥ 0.95. It
-  makes ambiguity explicit; for example, two bins with identical methylomes both appear.
-- **Log Bayes factors:** $(S_{uh_1} - S_{uh_2})/T$ for the best host against the runner-up and
-  against unknown. On the Kass & Raftery (1995) scale, 3 corresponds to "strong" evidence (odds about
-  20:1).
+*Modules: `calibrate.calibrate_decisions`, `refine.py`, `assignability.py`, `redundancy.py`.*
 
-### 8.2 Status
+### 8.1 Posterior and credible set
 
-| Status | Rule |
-|---|---|
-| `assigned` | MAP is a bin, and the 95% credible set contains only that bin |
-| `ambiguous` | MAP is a bin, but the 95% set also contains other bins or unknown |
-| `host_not_binned` | MAP is unknown, and detectability $D_u \ge 3$ (§8.3): a binned host would have been recognised |
-| `uninformative` | MAP is unknown, and $D_u < 3$: the contig carries too little information |
-| `sole_contig_of_bin` | (`--score-all` only) the contig is its bin's only contig, so it cannot be scored independently |
+For every contig EpiRefine reports a posterior over the $H$ bins and the unknown genome,
 
-### 8.3 Assignability: the expected strength of evidence
+$$
+P(h \mid u) \propto \frac{1 - \hat p}{H}\, e^{S_{uh}/\hat T}, \qquad P(\text{unknown} \mid u) \propto \hat p\, e^{S^U_u/\hat T},
+$$
+
+with its most probable label (`map`, `p_map`), $P(\text{unknown} \mid u)$ (`p_unknown`) and the **95% credible set**,
+the smallest set of labels, by decreasing probability, holding at least 0.95 (`credible_set_95`). It makes ambiguity
+explicit: two bins with identical methylomes both appear. This posterior gives the own bin no special prior; the
+decisions below use their own priors.
+
+### 8.2 Decidable and testable contigs
+
+Calls are made only for **decidable** contigs: $\text{cov}_u \ge$ `--min-contig-coverage` (5, §3.4) and length at
+least `--min-contig-length` (1,000 bp). Others get no call (`low_coverage`, `too_short`) and do not enter $\hat p$ or
+$\hat\varepsilon$. A binned contig is **testable** when it is decidable, has at least one motif site and is not the
+sole contig of its bin.
+
+### 8.3 Flags
+
+For contig $u$ the alternatives are every bin except its own ($H_u = H - 1$ bins if binned, $H$ if unbinned) and the
+unknown genome:
+
+$$
+A_u = \log\Big[\sum_{h \ne b_u} \frac{1 - \hat p}{H_u}\, e^{S_{uh}/\hat T} + \hat p\, e^{S^U_u/\hat T}\Big],
+\qquad
+P_u(\text{foreign}) = \sigma\big(\operatorname{logit}\hat\varepsilon + A_u - S_{u b_u}/\hat T\big),
+$$
+
+where the contamination rate $\hat\varepsilon$ is the maximum *a posteriori* weight of the two-component mixture
+(Beta(1, 19) prior, the EM routine of §7.7) over the testable binned contigs. A testable contig is **flagged**
+(`contaminant`) when $P_u(\text{foreign}) \ge$ `--contamination-threshold` (0.5) and its methylome differs from the
+bin's by at least `--min-methylome-difference` (0.4): in at least one group with sites, the 95% interval of the
+contig's own level (from $L_{um\cdot}$ normalised over the grid) lies at least 0.4 from the bin's mean level
+$\bar\phi_{b_u m}$ (full profile, contig included; `--gate-leave-out none`). The gate keeps many small, consistent
+shifts (variation within one genome, which the likelihood alone reads as strong evidence) from adding up to a flag;
+a foreign genome usually differs by a whole motif (dev log D20). $\hat\varepsilon$ is estimated before the gate
+withdraws flags, so it is a discordance rate and can exceed the share flagged. With one bin no contig is tested for
+contamination and $\hat\varepsilon$ is not estimated.
+
+### 8.4 Inclusions and moves
+
+The best alternative $a_u$ is the most probable of the alternatives above, with probability $q_u$ given that the
+contig does not belong to its input bin (`best_alternative`, `p_best_alternative`). An unbinned contig is
+**included** into $a_u$, and a flagged contig is **moved** to it, when $a_u$ is a bin and $q_u \ge$
+`--include-threshold` (0.9); the threshold is `--include-threshold-unmethylated` (0.95) when the target bin shows no
+methylation (`no_methylation_detected`), because such a bin matches every contig without methylation at the listed
+motifs, including contigs of genomes whose motifs are not in the list. A flagged contig that is not moved leaves
+its bin and joins none. A bin of a single contig accepts inclusions (plasmids, phages).
+
+### 8.5 The evidence check and what a no call means
 
 *Module: `assignability.py`.*
 
-A low posterior can mean two different things: **conflicting evidence** or **no evidence**.
-Assignability separates them by asking how strong the evidence would be *on average* if a given host
-were true. It depends only on where the unit's sites are and how deeply they are covered, not on the
-observed methylation.
-
-EpiRefine uses the **Asimov dataset** (Cowan et al. 2011): the observed counts are replaced by their
-expectation under the hypothesised truth, and the resulting log Bayes factor approximates the
-expected log Bayes factor, i.e. a Kullback–Leibler divergence between the two hypotheses' predictive
-distributions.
-
-**Linearity makes this cheap.** For one site with $n$ reads, if the true level is $\phi^\ast$, the
-read count has distribution
-$\phi^\ast f_1(k \mid n) + (1 - \phi^\ast) f_0(k \mid n)$. The expected per-site log-likelihood at
-grid point $x_g$ is therefore linear in $\phi^\ast$:
+A low probability can mean conflicting evidence or no evidence. The **expected evidence** separates them: the log
+Bayes factor a contig's sites would give, on average, for its bin $\hat b_u$ (its input bin; for an unbinned contig
+$\arg\max_h S_{uh}$) over a community draw, if its true levels were the bin's mean levels $\bar\phi_{\hat b_u m}$. It
+uses the Asimov dataset (Cowan *et al.* 2011): the observed counts are replaced by their expectation under the
+hypothesis. The expected per-site log-likelihood is linear in the true level,
 
 $$
-\mathbb{E}_{\phi^\ast}\!\big[\log\big(x_g f_1(k) + (1 - x_g) f_0(k)\big)\big]
-= \phi^\ast E_1(n, g) + (1 - \phi^\ast) E_0(n, g),
+E^{(s)}_m(n; g) = \sum_{k=0}^{n} \tilde f_{sm}(k \mid n)\, \ell_m(n, k; x_g)
 $$
 
-with
+($\tilde f$ the beta-binomial pmf with its binomial coefficient, $n$ capped at 500), so the expected unit table is
+$\bar L_{umg} = v_m \sum_i \big[\bar\phi_{\hat b_u m} E^{(1)}_m(n_i; g) + (1 - \bar\phi_{\hat b_u m}) E^{(0)}_m(n_i; g)\big]$
+over the sites of groups kept by the noise filter, and after the variation kernel
 
 $$
-E_s(n, g) = \sum_{k=0}^{n} f_s(k \mid n)\, \log\big(x_g f_1(k \mid n) + (1 - x_g) f_0(k \mid n)\big).
+E_u = \frac{1}{\hat T}\Big(\sum_m \log\sum_g e^{\bar L'_{umg}}\, p_{\hat b_u m g} - \sum_m \log\sum_g e^{\bar L'_{umg}}\, \pi_{mg}\Big)
 $$
 
-Summing over the unit's sites gives two tables, $H^{(1)}_{um}(g)$ and $H^{(0)}_{um}(g)$, which are
-computed once ($n$ capped at 500). For **any** hypothesised host $t$, the Asimov log-likelihood is
+(`expected_evidence`). It uses only site positions and read counts, not the observed modified counts, so it cannot
+be self-serving.
 
-$$
-\mathcal{L}^\ast_{um}(g \mid t) = \phi^\ast_{tm}\, H^{(1)}_{um}(g) + (1 - \phi^\ast_{tm})\, H^{(0)}_{um}(g),
-\qquad \phi^\ast_{tm} = \delta\,\bar\phi_{tm},
-$$
+**The rule.** A contig whose call would be `kept` (binned) or `unbinned`, and whose $E_u$ is below `--min-evidence`
+(3) or undefined (no sites), gets **no call**: status `no_methylation_evidence`. Its staying in its bin, or staying
+unbinned, is not supported by methylation, and the status says so instead of reporting a decision.
 
-and it is scored exactly like real data, giving $S^\ast_{uh \mid t}$. The own-MTase term is left
-out: assignability measures how separable the hosts are.
+**What a no call means, and what it does not.** The status is written last, after the flags, moves and inclusions
+are fixed, and it only relabels `kept` and `unbinned` contigs. **A no call never changes a bin**: a binned contig
+with `no_methylation_evidence` stays in its bin in `new_contig_bin.tsv`, an unbinned one stays unbinned, and no flag,
+inclusion, move, estimate ($\hat p$, $\hat\varepsilon$) or refined bin depends on it. Because $E_u$ is divided by
+$\hat T$, the share of no calls rises with the temperature: on the simulated look-alikes (development), where option
+E raises $T$ to 3.7-4.3, 12-35% of the contigs get no call (§7.7, §10). Since 0.12 the check uses the temperature of
+the decisions, the community-only fit's (dev log D66).
 
-**Three quantities are reported:**
-- **Margin over the nearest bin**, for the MAP host $t$:
-  $\big(S^\ast_{ut \mid t} - \max_{h \ne t,\, h \ge 1} S^\ast_{uh \mid t}\big)/T$, together with which bin is
-  nearest. About 0 means no data could tell the two apart.
-- **Margin over unknown:** $\big(S^\ast_{ut \mid t} - S^\ast_{u0 \mid t}\big)/T$.
-- **Detectability:**
-  $$
-  D_u = \max_{h \ge 1} \frac{S^\ast_{uh \mid h} - S^\ast_{u0 \mid h}}{T},
-  $$
-  the strongest evidence against "unknown" that any binned host would produce if it were the true
-  host. A unit called unknown with high $D_u$ was informative enough that its host, if binned, would
-  have been found. That justifies `host_not_binned` rather than `uninformative`.
+`calibration/assignability.tsv` checks, on the pieces, how well the expected evidence predicts accuracy, and
+`fragments.tsv` gives it per piece (`expected_log_bf_vs_nearest`, against the nearest other bin;
+`expected_log_bf_vs_unknown`, against a community draw).
 
-On pseudo-plasmids, the margin predicts accuracy well: below 0.5 gives about 50% accuracy (the
-lookalike pairs), above 10 gives 99–100%. The `calibration/assignability.tsv` table checks this for
-every run.
+### 8.6 Long contigs: the regional model
 
-### 8.4 Goodness of fit per motif
+A long contig can be partly foreign (a chimeric assembly), and a flag would then remove good sequence. For each
+binned decidable contig with at least two chunks with sites, flagged or not, the chunk evidence
+$d_c = \operatorname{logit}(1 - w_c) - \operatorname{logit}\varepsilon_0$ is taken from the robust fit
+(`--regional-leave-out chunk`). Three explanations are compared: member (log-likelihood 0), foreign ($\sum_c d_c$),
+and mixed, a two-state chain along the chunks with switch probability 0.05 per chunk that excludes the two pure
+paths; their prior weights are estimated by EM over all such contigs. A flag is withdrawn when
+$P(\text{mixed}) > P(\text{foreign})$ (`--regional-withdraw vs_foreign`): the contig stays in its bin with status
+`mixed` (also when it would have been moved), and its likely foreign chunks are reported (`foreign_segments`,
+`segment_bins`). Nothing is split. Off with `--no-regional-model` or `--contam-eps 0`.
 
-For the explanation the unit was given (its MAP host $\hat h$, or unknown), each group gets a misfit
-log Bayes factor:
+### 8.7 Redundancy check
 
-$$
-\mathrm{misfit}_{um} = A_{u0m} - A_{u\hat h m},
-$$
+Methylation cannot see whether a bin already holds a contig's sequence (a strain variant or haplotig). An inclusion
+or move must add sequence: EpiRefine compares a FracMinHash sketch of the contig (canonical 21-mers, scale 1/50)
+with the union of the sketches of the target bin's unflagged input contigs (`--redundancy-order independent`). If
+at least `--max-redundancy` (0.3) of the contig's sketch is in the bin, the inclusion or move is dropped
+(`redundancy_with_bin`): an unbinned contig becomes `redundant`, a flagged contig stays flagged and joins no bin.
 
-i.e. how much better "some host from this community" explains the group than the assigned host does.
-Groups with misfit > 3 that are not attributed to an own MTase ($\Pr(w_{um} = 1) \le 0.5$) are listed
-as `misfit_motifs`. Causes include:
-- an unannotated own MTase below the base rate
-- a chimeric contig
-- a plasmid present in several hosts
-- an unbinned host that shares most, but not all, of a bin's motifs
+### 8.8 Status
 
-`motif_fit.tsv` reports, per group:
-- the observed level: posterior mean and 95% interval of $\phi_{um}$ under a uniform-over-cells
-  prior;
-- the level expected under the assigned host: $p_{\hat h m}$ pushed through $T^{(\delta,\tau_p)}$;
-- the misfit;
-- $\Pr(w_{um} = 1)$.
+The status column is assigned in this order, later rules overriding earlier ones: `kept` / `unbinned`;
+`contaminant`; `sole_contig_of_bin`; `redundant`; `included` / `moved`; `no_methylation_evidence` (only on `kept` /
+`unbinned`, §8.5); `low_coverage`; `too_short`; `mixed`. When the guard fires (§7.8) no contig is `contaminant`,
+`moved` or `included`. The table of statuses is in [outputs.md](../outputs.md#statuses).
 
 ---
 
@@ -829,229 +720,164 @@ as `misfit_motifs`. Causes include:
 
 ### 9.1 A likelihood model rather than a distance or a classifier
 
-Earlier methylation-based plasmid–host linking (e.g. Beaulaurier et al. 2018 with PacBio;
-Tourancheau et al. 2021 and Nanomotif's contig inclusion with nanopore) compares per-contig motif
-methylation summaries by distance or with classifiers. A likelihood model does several things those
-cannot easily do:
+Methylation-based binning and host linking (Beaulaurier *et al.* 2018; Tourancheau *et al.* 2021; Nanomotif's
+contamination and inclusion steps) compare per-contig motif methylation summaries by distance or with classifiers.
+A likelihood model does what those cannot easily do:
 
 | Need | How the likelihood handles it |
 |---|---|
-| Short plasmids with few sites | Each site contributes in proportion to its reads; a 3-site motif is automatically weaker than a 300-site one. Summaries such as "fraction methylated" hide this. |
-| Coverage differences | Read counts enter directly; a site at 2× is weak evidence, a site at 200× strong evidence. |
-| Negative evidence | Unmethylated sites of a host's motif count against that host, at their full information value. |
-| Shared motifs | Motifs common to many hosts are automatically down-weighted where they don't discriminate. |
-| An open set of hosts | "Unknown" is a proper hypothesis with its own likelihood, not a distance threshold. |
-| Combining evidence | Further evidence (coverage, co-abundance, taxonomy; v3) enters as extra likelihood or prior terms on the same scale. |
-| Uncertainty | Posteriors, credible sets and Bayes factors come out of the model rather than being bolted on. |
+| Short contigs with few sites | Each site contributes in proportion to its calls; a 3-site motif is automatically weaker than a 300-site one. A summary such as "fraction methylated" hides this. |
+| Coverage differences | Calls enter directly; a site at 2 calls is weak evidence, one at 200 strong. |
+| Negative evidence | Unmethylated sites of a bin's motif count against that bin at their full information value. |
+| Shared motifs | Motifs common to many bins are down-weighted where they do not discriminate. |
+| An open set of genomes | "Unknown" is a hypothesis with its own likelihood, not a distance threshold. |
+| Uncertainty | Posteriors, credible sets and Bayes factors come out of the model. |
 
-### 9.2 Separating measurement from biology (two-level site model)
+### 9.2 Separating measurement from biology
 
-The modification caller's behaviour varies strongly by motif context. On ZymoOral, the false-positive
-level $\mu_0$ ranged from 0.002 to 0.03 and the detection ceiling $\mu_1$ from 0.81 to 0.98 across
-well-identified groups. A single threshold on "fraction of reads modified" mixes this measurement
-behaviour with biology.
-
-The mixture model keeps the caller's error profile ($\mu, \kappa$) separate from the quantity of
-interest, $\phi$, the fraction of sites methylated. That quantity is comparable across motifs,
-modification types, contigs and coverage levels.
-
-The **beta-binomial** is used because read-level calls are overdispersed relative to a binomial:
-- sequence context around each site varies;
-- some sites are partly methylated in the population;
-- reads are not independent samples of one probability.
-
-A binomial model would make every high-coverage site overconfident.
+The caller's behaviour varies strongly by motif context (on ZymoOral, development, $\mu_0$ ranged from 0.002 to 0.03
+and $\mu_1$ from 0.81 to 0.98 across well-identified groups). A threshold on "fraction of reads modified" mixes
+this with biology. The two-level site model keeps the caller's error profile ($\mu$, $\kappa$) apart from $\phi$,
+the fraction of sites methylated, which is comparable across motifs, modification types and coverage. The
+beta-binomial is used because calls are overdispersed relative to a binomial (context varies, some sites are
+partly methylated, reads are not independent draws); a binomial would make every high-coverage site overconfident.
 
 ### 9.3 Empirical Bayes from the sample itself
 
-Caller behaviour depends on chemistry, basecaller and modification model version, and pore and flow
-cell, and the community composition is unique to each sample. Pre-trained parameters would be
-stale. Every metagenome, however, contains abundant internal training data:
-- motifs that most bins *don't* methylate give millions of unmethylated sites (the false-positive
-  level);
-- motifs some bins *do* methylate give methylated sites (the ceiling).
-
-Estimating from the pooled sample, and shrinking motif-specific estimates towards the modification
-type, uses this data efficiently. Groups with little information borrow strength without forcing
-every motif to behave the same.
+Caller behaviour depends on chemistry, basecaller and model version, and every community is different, so
+pre-trained parameters would be stale. Each metagenome holds its own training data: motifs that most bins do not
+methylate give many unmethylated sites, motifs that some bins methylate give methylated ones, and the bins label
+which is which. Shrinking motif-specific estimates towards the modification type lets groups with little
+information borrow strength.
 
 ### 9.4 A discrete grid instead of conjugate formulas
 
-The model is not conjugate: there is a mixture over site states, a bimodal population prior, a
-Beta transition, and a mixture with the own-MTase density. A 64-point grid in logit space makes every
-integral an exact finite sum and every density a vector:
-- marginalising the unit level is a matrix product;
-- scoring a unit against all hosts is one matrix product per group.
-
-The logit spacing puts resolution where nearly all hosts sit, near 0 and 1, and cell masses from CDF
-differences keep densities exact despite uneven spacing. No MCMC is needed, and results are
+The model is not conjugate (a mixture over site states, a bimodal community prior, a Beta transition). A 64-point
+grid in logit space makes every integral an exact finite sum and every density a vector: marginalising the unit
+level is a matrix product, scoring a unit against all bins one product per group. No MCMC is needed and results are
 deterministic.
 
 ### 9.5 A nonparametric community prior
 
-Host methylation levels are strongly **bimodal**: a host either has an active MTase for a motif
-($\phi \approx 1$) or not ($\phi \approx 0$), with a few intermediate cases. A unimodal Beta prior
-would be badly wrong, and a hand-chosen two-component prior would need tuning. The NPMLE takes the
-shape from the data. It is the natural estimator when the prior is a distribution over a small number
-of discrete-like types, and with $B$ bins it typically concentrates its mass at the levels actually
-present. Shrinkage and a floor make it stable with few bins and never dogmatic.
-
-This prior has **three roles**:
-1. It regularises host profiles from small or incomplete bins.
-2. Its "present" part is the own-MTase density $q_m$.
-3. It defines the "unknown host" class (§9.6).
+Bin methylation levels are strongly bimodal (an active MTase for a motif or none). A unimodal prior would be badly
+wrong and a hand-made two-component one would need tuning; the NPMLE takes the shape from the data, and shrinkage
+and a floor make it stable with few bins and never dogmatic. It regularises profiles of small bins and defines the
+unknown genome (§9.6).
 
 ### 9.6 "Unknown" as the prior predictive
 
-The usual open-set approach rejects the best match when a distance exceeds a threshold. That
-threshold has no probabilistic meaning and must be tuned per dataset. EpiRefine instead asks how
-probable the data would be *for a host drawn at random from this community*. Consequences:
-- The unknown class wins exactly when no binned host explains the data better than a typical
-  community member would.
-- It inherits the community's motif frequencies: methylation at a motif common in the community is
-  less surprising than methylation at a rare one.
-- It sits on the same scale as the bin likelihoods, so its posterior is calibrated together with
-  theirs.
+An open-set rule that rejects the best match beyond a distance threshold has no probabilistic meaning and must be
+tuned per dataset. EpiRefine asks how probable the data would be for a genome drawn at random from this community:
+"unknown" wins exactly when no bin explains the data better than a typical community member would; it inherits the
+community's motif frequencies; and it sits on the same scale as the bin likelihoods, so it is calibrated with them.
+The price is that a genome without a bin but with a bin's methylation looks like that bin (§10).
 
 ### 9.7 Chunks, τ and leave-one-out
 
-Treating each 50 kb chunk as a unit does three things:
-1. **Variation along genomes.** It lets methylation vary within a genome (genomic islands,
-   prophages, local under-methylation) through $\tau$ rather than forcing it to be constant.
-2. **Balance.** It stops a single 5 Mb contig from dominating a bin's profile.
-3. **Clean held-out tests.** It makes leave-one-out scoring possible even when a bin is one
-   complete chromosome; only the chunks a fragment overlaps are removed.
-
-$\tau$ is then chosen by held-out likelihood, the standard way to set a variance component without
+Treating each 50 kb chunk as a unit lets methylation vary along a genome through τ, stops one long contig from
+dominating its bin's profile, and makes leave-one-out scoring possible even when a bin is one complete chromosome.
+τ is chosen by held-out likelihood on the calibration pieces, the standard way to set a variance component without
 overfitting.
 
 ### 9.8 Robust profiles
 
-Contamination is common in MAG bins. A contaminating contig makes its bin's profile look as if it
-had a second methylome, which damages every plasmid assignment involving that bin. The mixture
-"chunk from the bin's host vs. from a random community member" is a soft, likelihood-based form of
-outlier trimming:
-- clearly foreign chunks are down-weighted to near zero;
-- ordinary chunks keep a weight of about 1 (exactly $1 - \varepsilon = 0.95$ for a chunk with no informative sites, where both explanations fit equally);
-- the leave-one-out step prevents a contaminant from validating itself.
+A contaminating contig makes its bin's profile look as if it had a second methylome, which damages every decision
+about that bin. The mixture "chunk from the bin vs. from a random community member" is a soft, likelihood-based
+outlier trimming: clearly foreign chunks are down-weighted to near zero, ordinary chunks keep a weight near 1, and
+the leave-one-out step prevents a contaminant from validating itself.
 
-### 9.9 Own MTases as model choice per motif
+### 9.9 Self-calibration
 
-Plasmids frequently carry restriction–modification systems and orphan MTases. A methylated motif
-that the host lacks is then expected rather than a contradiction. Treating each group as a choice
-between two explanations, with a prior odds from annotation evidence, is the minimal Bayesian
-answer:
-- annotated motifs are explained cheaply;
-- unannotated extra methylation costs about $\log(1/0.02) \approx 3.9$ nats per group (strong but
-  surmountable);
-- missing methylation is never excused.
+In a real metagenome nobody knows the true bins, so a method's stated confidence is usually unverifiable. Pieces of
+the sample's own bins give a sample-specific check with known answers, at the sample's own coverage, motifs and
+caller. Test B adds the open-set check. The one-sided temperature (flatten only) reflects the known blind spot of
+pieces cut from binned contigs.
 
-Estimating $\rho$ on the bins turns annotation quality from an assumption into a measured quantity.
+### 9.10 Removing the unknown-model choice (option E)
 
-### 9.10 Plasmid-specific δ and τ_p by marginal likelihood
+A default must not sit on a knife edge. The per-sample choice of the unknown model flipped under resampling of the
+calibration and, when it flipped, removed nearly all inclusions (§7.7). One model on every run, with its share
+estimated where it does not move with the temperature, is stable; its cost (look-alike genomes, §10) is stated and
+flagged by the relatives statistic rather than handled by a choice that is not stable.
 
-Plasmids differ systematically from chromosomes. Copy number can exceed the MTase's capacity, and
-replication and partitioning differ. Fixing these effects would bias every plasmid assignment, and
-estimating them from "confidently assigned" plasmids would be circular. Integrating over each
-plasmid's host and maximising the marginal likelihood uses **all** candidates without labels, and
-it is consistent: if the model is right, the estimate converges to the true values. In simulation
-it recovered δ ≈ 0.85–0.90 against a true 0.885.
+### 9.11 Expected evidence
 
-### 9.11 Self-calibration
-
-In real metagenomes nobody knows the true hosts, so a method's stated confidence is usually
-unverifiable. Pseudo-plasmids give a sample-specific check that costs nothing extra:
-- the same contigs, coverage, motif repertoire and caller as the plasmids;
-- known answers.
-
-Test B adds the open-set check that is often missing. The deliberately one-sided temperature
-(flatten only) reflects the known blind spot of chromosomal fragments.
-
-### 9.12 Assignability
-
-Users need to tell "the host is not binned" from "this contig has too little information". Without
-that distinction, every unassigned plasmid looks the same. The expected Bayes factor is the
-information-theoretic answer:
-- it is computed before looking at methylation, so it can't be self-serving;
-- it is on the same scale as the observed evidence;
-- the Asimov linearity trick makes it cheap enough to compute for every contig and every host.
+Users need to tell "this contig is unbinned because its genome has no bin" from "this contig has too little
+information". The expected Bayes factor is computed before looking at methylation, is on the same scale as the
+observed evidence, and the linearity in the true level makes it cheap for every contig.
 
 ---
 
 ## 10. Assumptions and limitations
 
-**Model assumptions:**
-1. **Conditional independence** of sites and motif groups given the host. Violations (correlated
-   sites on one read; motifs of one MTase in different groups) make raw posteriors overconfident.
-   The temperature corrects this on average, not per contig.
-2. **One host per contig.** A broad-host-range plasmid present in two hosts gives a mixed signal. It
-   shows up as `ambiguous` or with misfit motifs, but host fractions are not estimated. (Planned for
-   v4: read-level mixture deconvolution.)
-3. **One δ and τ_p for all plasmids and all groups.** Plasmid-specific or modification-type-specific
-   under-methylation is absorbed by $\tau_p$.
-4. **Contaminants look like random community members.** A bin that is a near 50/50 merge of two
-   genomes is not resolved by the robust step.
-5. **A uniform host prior across bins.** Abundance, coverage ratio, co-abundance and taxonomic host
-   range are not yet used (v3).
+**Model assumptions.**
 
-**Observed limitation: degenerate methylated component in the caller model.** On ZymoOral, 17 of 33
-groups had $\hat\mu_1$ at the lower bound (0.5) with $\hat\kappa_1 \in [0.3, 4]$, a near-uniform or
-U-shaped "methylated" component. These are typically groups methylated in at most one bin. There, the
-second mixture component absorbs the heavy upper tail of *unmethylated* sites, where real-data
-overdispersion exceeds what one beta-binomial captures, instead of describing methylated sites.
-Assignments were still all correct, because host-level φ contrasts remain large. But per-site
-evidence is distorted for these groups, and $\phi$ estimates near 0 are pulled up slightly.
+1. **Conditional independence** of sites and motif groups given the bin. Violations (correlated sites on a read; one
+   MTase's sites spread over several groups) make raw posteriors overconfident. The temperature corrects this on
+   average, not per contig, and one temperature for all lengths leaves long contigs overconfident (§7.4). The group
+   weights and the single-group assignment of shared bases reduce double counting.
+2. **One genome per contig.** A contig present in two genomes (a broad-host-range plasmid) gives a mixed signal; it
+   shows up with several labels in the credible set or as a flag.
+3. **Contaminants look like random community members.** A bin that is a near 50/50 merge of two genomes, or whose
+   two genomes differ in a single sparse motif, is not resolved by the robust step; `bin_evidence.tsv` marks it
+   (`two_methylation_states`, `large_flagged_share`).
+4. **A uniform prior over bins.** Abundance, coverage ratio and taxonomy are not used.
 
-Planned fixes, in order of preference:
-- a third "outlier" component for unmethylated sites;
-- semi-supervised fitting, where $f_0$ and $f_1$ are fitted on sites from bins whose host-level
-  $\phi$ is clearly low or high (iterated with the host profiles);
-- a lower bound on $\kappa_1$ (e.g. ≥ 5) with $\mu_1$ shrunk harder to the modification-type value.
+**Unbinned genomes with a bin's methylation (since 0.12, §7.7).** Contigs from a genome without a bin whose
+methylation equals, or nearly equals, a bin's are placed into that bin; methylation alone cannot separate the two
+genomes. On such samples the temperature rises, so more short contigs get no call (`no_methylation_evidence`). The
+relatives statistic in `params.json` flags such samples.
 
-**Unbinned genomes with a bin's methylation (since 0.12, §7.7):** contigs from a genome without a bin whose
-methylation equals, or nearly equals, a bin's are placed into that bin, and on such samples the temperature rises,
-so more short contigs get no call (`no_methylation_evidence`; never a change of bin). The relatives statistic in
-`params.json` flags such samples; methylation alone cannot separate the two genomes.
+**What a no call means.** `no_methylation_evidence` is a label on contigs that would be `kept` or `unbinned`; it
+never changes a bin (§8.5). Its share depends on the temperature: on the simulated look-alikes (development) it ranged
+from about 12% to 35% of the contigs depending on where the temperature landed (set s1: 245, 396 and 619 of 1,849
+contigs at $T$ 3.7, 4.3 and 5.0).
 
-**Calibration blind spots:**
-- Pseudo-plasmids are chromosomal, so plasmid-specific effects are calibrated only through $\delta$
-  and $\tau_p$.
-- With `--score-all`, contigs that are their bin's only contig can't be tested
-  (`sole_contig_of_bin`).
+**The temperature grid step (§7.4).** One grid step (about 17%) can move the number of inclusions by about the same
+share; on the ZymoFecal tuning sets (development) about one resample of the calibration bins in six did.
 
-**Inputs:**
-- Motif discovery must find the relevant motifs. EpiRefine uses the union across bins, so a motif needs
-  to be found in at least one bin.
-- MTase annotation is optional, but without it own-MTase plasmids rely on the base rate.
+**A calibration at the cap gives no calls (§7.8).** When the temperature ends at 20, the run makes no call;
+`--temperature` overrides with an uncalibrated temperature.
+
+**Calibration blind spots.** The pieces are cut from binned contigs, so they are easier to place than real unbinned
+contigs, and they share the bin's own sequence context. Mobile elements methylated unlike their host (phages with
+their own MTases, high-copy plasmids partly unmethylated) are not represented by the pieces; such elements are left
+unbinned when unbinned and can be flagged when binned.
+
+**Inputs.** The motif discovery must find the relevant motifs: a motif needs to be found in at least one bin. A genome
+whose motifs are all missing from the list looks unmethylated and matches bins without methylation (hence the
+stricter inclusion threshold for them). The motif table can change the results a lot.
+
+**Caller model.** Groups methylated in at most one bin have few labelled methylated sites; their methylated
+component then rests on the modification type's fit.
 
 ---
 
-## 11. Validation so far
+## 11. Validation
 
-| Setting | Result |
-|---|---|
-| Unit tests (17) | Motif strands, complements and nesting; pileup formats; mixture recovery; marginalisation; δ transition; cross-group record exclusion; robust contaminant detection; own-MTase rescue; assignability ≈ 0 for lookalikes and growing with sites; annotation levels and ρ; report |
-| Simulation (9 hosts, 31 plasmids, 2 seeds) | True host in the 95% set for 31/31 plasmids in both seeds; 0 confident errors; 4/4 own-MTase plasmids correct with the right motif flagged; all contaminating chunks flagged; δ recovered (0.90 / 0.85 vs 0.885) |
-| ZymoOral mock (real nanopore, Nanomotif 1.1.3, 12 bins) | 17/17 unbinned contigs (3.4–568 kb) and 34/34 binned contigs (leave-one-out) assigned to the correct bin, 0 confident errors; pseudo-plasmids 99.75% accurate (98.9% at 2 kb), ECE 0.007, 95% set coverage 99.95%; one unreferenced 4.3 kb geNomad plasmid assigned to *Haemophilus* with an exact 4-motif methylome match (see [conversation.md §9](conversation.md#9-first-real-data-zymooral)) |
+The benchmarks and their results are kept outside these notes:
 
-**Not yet validated on real data:**
-- real plasmids with known hosts (ZymoHMW, ZymoGut)
-- plasmids with their own MTases
-- multi-host plasmids
+- `benchmarks/` and `benchmarks/results.tsv` in this repository: the monoculture benchmark (training communities:
+  development data; test and validation communities: spent, they were looked at during development), with one
+  summary row per version;
+- the `CHANGELOG.md` entry of each version: the measured effect of every change on the development data, and its
+  known limitations;
+- the separate benchmark-workflow repository: the mock communities, simulated sets, stress sets and the fecal
+  samples with Hi-C (development data);
+- the manuscript (in preparation), which is to report the evaluation on held-out data, run once on a frozen
+  version.
+
+The test suite (`tests/`) checks the model's parts on a synthetic community (`tests/synth.py`) with planted
+contaminants, missing members, a genome without a bin, a duplicate and low-coverage and short contigs, including a
+golden snapshot of every decision (`tests/test_golden.py`).
 
 ---
 
 ## 12. Computation
 
-| Step | Cost | ZymoOral (63 contigs, 3.9 GB pileup) |
-|---|---|---|
-| Motif search | Regex over assembly × motifs | 40 s |
-| Pileup streaming + join | Linear in pileup size; only motif sites kept | 30 s |
-| Caller model | L-BFGS-B on unique $(n, k)$ per group | 20 s |
-| Unit likelihoods | $O(\text{unique}(u, m, n, k) \cdot G)$ | seconds |
-| Calibration | 8 values of τ × (robust EM + fragment scoring) | 95 s |
-| Scoring, δ/τ_p fit, assignability | Matrix products $O(U \cdot H \cdot M \cdot G)$ | 10 s |
-| **Total** | | **≈ 200 s, 3.5 GB peak RAM** |
+The pipeline streams the pileup once into a site cache and never holds all motif records, or a
+[units × bins × groups] tensor, in memory. Memory, speed and the batching of each step are described in
+[scalability.md](scalability.md); measured times per version are in the [FAQ](../faq.md#how-long-does-it-take-and-how-much-memory).
 
 ---
 
@@ -1059,22 +885,29 @@ so more short contigs get no call (`no_methylation_evidence`; never a change of 
 
 | Symbol | Option | Default | Set by |
 |---|---|---|---|
-| $G$ | `--grid-size` | 64 | Fixed |
-| $C$ | `--chunk-size` | 50 kb | Fixed |
-| $p_0$ | `--p-unknown` | 0.1 | Fixed (prior) |
-| $\mu, \kappa$ (caller) | — | — | Empirical Bayes (§6.2); prior centre μ0 = 0.05, μ1 = 0.85, κ = 10; σ = 3 (type), 1 (group) |
-| $\lambda$, $f$ | — | 5, 0.02 | Fixed (prior shrinkage, floor) |
-| $\varepsilon$ | `--contam-eps` | 0.05 | Fixed (0 disables robust profiles) |
-| $\tau_c$ | `--tau` | calibrated | LOO likelihood over {3, 10, 30, 100, 300, 1000, 10⁴, ∞} |
-| $T$ | `--temperature`, `--allow-sharpening` | calibrated, ≥ 1 | Log loss, tests A + B-distinct |
-| $\delta$, $\tau_p$ | `--delta`, `--tau-p` | fitted | Type-II ML (§6.6) |
-| $\rho_{\text{motif}}, \rho_{\text{type}}$ | — | 0.8, 0.3 | Estimated on bins if ≥ 5 annotated pairs |
-| $\rho_{\text{base}}$ | `--rho-base` | 0.02 | Fixed |
-| Motif merge threshold | `--min-containment` | 0.5 | Fixed |
-| Fragment lengths / per bin | `--frag-lengths`, `--frags-per-bin` | 2–100 kb / 30 | Fixed |
-| Lookalike threshold | — | 0.15 | Fixed |
-| Status / misfit thresholds | — | log BF 3 | Fixed |
-| Assignability $n$ cap | — | 500 | Fixed |
+| $n_{\min}$ | `--min-cov` | 1 | fixed |
+| motif merge | `--min-jaccard`, `--group-sample-mb` | 0.9, 50 Mb | fixed |
+| $G$ | `--grid-size` | 64 | fixed |
+| $C$ | `--chunk-size` | 50 kb | fixed |
+| $\mu, \kappa$ (caller) | — | — | maximum *a posteriori* with the bins as labels (§6.1); prior SD 2 |
+| $\lambda_\pi$, $f$ | — | 5, 0.02 | fixed (prior shrinkage, floor) |
+| $\varepsilon_0$ | `--contam-eps` | 0.05 | fixed (0 turns the robust profiles and the regional model off) |
+| $\tau_m$ | `--tau`, `--variation` | calibrated per group; Beta kernel | leave-out likelihood over {3, 10, 30, 100, 300, 1000, 10⁴, ∞} |
+| $T$ | `--temperature`, `--allow-sharpening` | calibrated, 1.082 to 20 | log loss of tests A + B on a 31-point grid (§7.4) |
+| $p_0$ (calibration) | `--p-unknown` | 0.1 | fixed reference prior in the temperature fit |
+| $\hat p$ (decisions) | `--p-unknown`, `--unknown-share` | estimated at $T = 1$ | EM over the decidable unbinned contigs (§7.7) |
+| unknown model | `--relatives` | community only | fixed since 0.12 (§7.7) |
+| $\hat\varepsilon$ | — | estimated | EM, Beta(1, 19) prior (§8.3) |
+| pieces | `--frag-lengths`, `--frags-per-bin`, `--frag-budget`, `--calibration-seed` | 2-100 kb, 30, 6000, `--seed` | fixed |
+| look-alike | — | 0.15 | fixed |
+| test B | — | expected log BF ≥ 3 | fixed |
+| flag | `--contamination-threshold`, `--min-methylome-difference` | 0.5, 0.4 | chosen on development data |
+| inclusion | `--include-threshold`, `--include-threshold-unmethylated` | 0.9, 0.95 | chosen on development data |
+| redundancy | `--max-redundancy` | 0.3 | chosen on development data |
+| no call | `--min-evidence`, `--min-contig-coverage`, `--min-contig-length` | 3, 5, 1,000 bp | chosen on development data |
+| regional switch | — | 0.05 per chunk | fixed |
+| evidence $n$ cap | — | 500 | fixed |
+| guard | — | temperature at the grid cap (20) | fixed (§7.8) |
 
 ---
 
@@ -1082,45 +915,41 @@ so more short contigs get no call (`no_methylation_evidence`; never a change of 
 
 | Symbol | Meaning |
 |---|---|
-| $i$ | Motif site (one methylation event; may combine both strands) |
-| $n_i, k_i$ | Reads with a valid call / called modified at site $i$ |
-| $s_i$ | Site methylated (1) or not (0) |
-| $m$ | Motif group (feature) |
-| $u$ | Unit: plasmid candidate, host chunk or pseudo-plasmid fragment |
-| $h, b$ | Host bin; $h = 0$ is "unknown host"; $H$ bins in total |
-| $\mu_{sm}, \kappa_{sm}$ | Caller mean and concentration for state $s$ in group $m$ |
-| $f_{sm}(k \mid n)$ | Beta-binomial pmf for state $s$ |
-| $\phi_{um}, \phi_{hm}$ | Fraction of sites methylated in a unit / host |
-| $x_g$ | Grid points; $T_{ij}$ transition matrix |
-| $\tau_c, \tau_p$ | Between-unit concentration for chunks / plasmids |
-| $\delta$ | Plasmid methylation scaling |
-| $\pi_m$ | Community prior over host levels |
-| $p_{hm}$ | Host profile (posterior over $\phi_{hm}$) |
-| $q_m$ | Own-MTase level density |
-| $w_{um}, \rho_{um}$ | Own-MTase indicator and its prior probability |
-| $w_k, r_k$ | Chunk weight and its foreign-responsibility |
-| $\mathcal{L}, \mathcal{L}'$ | Unit log-likelihood on the grid, before / after integrating out the unit's own level |
-| $A_{uhm}, O_{um}$ | Per-group log-likelihood under host $h$ / own MTase |
-| $S_{uh}$ | $\log p(\text{data}_u \mid h)$ |
-| $T$ | Temperature |
-| $D_u$ | Detectability |
+| $i$ | motif site (one methylation event; may combine both strands) |
+| $n_i, k_i$ | valid calls / calls modified at site $i$ |
+| $s_i$ | site methylated (1) or not (0) |
+| $m$, $v_m$ | motif group, its weight |
+| $u$ | unit: contig, chunk or calibration piece |
+| $h, b_u$ | bin; the input bin of contig $u$; $H$ bins in total |
+| $\mu_{sm}, \kappa_{sm}$ | caller mean and concentration for state $s$ in group $m$ |
+| $f_{sm}(k \mid n)$ | beta-binomial likelihood for state $s$ |
+| $\phi_{um}, \phi_{hm}$ | fraction of sites methylated in a unit / bin |
+| $x_g$, $G$ | grid points, their number |
+| $L, L'$ | unit log-likelihood on the grid, before / after the variation kernel |
+| $\tau_m$, $K^{(\tau)}$ | variation parameter, its kernel |
+| $\Lambda_{hm}$, $p_{hm}$ | bin log-likelihood, bin profile |
+| $\pi_m$ | community prior over bin levels |
+| $w_c, r_c$ | chunk weight and its foreign responsibility |
+| $S_{uh}$, $S^U_u$ | score of $u$ under bin $h$ / under the unknown genome |
+| $T$ | temperature |
+| $\hat p$, $\hat\varepsilon$ | unknown share, contamination rate |
+| $E_u$ | expected evidence |
+| $\eta, \lambda$ | relatives model: swap share per group, community weight (statistic only) |
 
 ---
 
 ## 15. References
 
-- Beaulaurier J. *et al.* (2018). Metagenomic binning and association of plasmids with bacterial host
-  genomes using DNA methylation. *Nature Biotechnology* 36, 61–69.
-- Cowan G., Cranmer K., Gross E., Vitells O. (2011). Asymptotic formulae for likelihood-based tests of
-  new physics. *European Physical Journal C* 71, 1554.
+- Beaulaurier J. *et al.* (2018). Metagenomic binning and association of plasmids with bacterial host genomes using
+  DNA methylation. *Nature Biotechnology* 36, 61–69.
+- Cowan G., Cranmer K., Gross E., Vitells O. (2011). Asymptotic formulae for likelihood-based tests of new physics.
+  *European Physical Journal C* 71, 1554.
 - Efron B. (2016). Empirical Bayes deconvolution estimates. *Biometrika* 103, 1–20.
-- Guo C., Pleiss G., Sun Y., Weinberger K. Q. (2017). On calibration of modern neural networks.
-  *ICML 2017*.
-- Heidelbach S. *et al.* Nanomotif: identification and exploitation of DNA methylation motifs in
-  metagenomes using Oxford Nanopore sequencing.
-- Kass R. E., Raftery A. E. (1995). Bayes factors. *Journal of the American Statistical Association*
-  90, 773–795.
-- Kiefer J., Wolfowitz J. (1956). Consistency of the maximum likelihood estimator in the presence of
-  infinitely many incidental parameters. *Annals of Mathematical Statistics* 27, 887–906.
-- Tourancheau A. *et al.* (2021). Discovering multiple types of DNA methylation from bacteria and
-  microbiome using nanopore sequencing. *Nature Methods* 18, 491–498.
+- Guo C., Pleiss G., Sun Y., Weinberger K. Q. (2017). On calibration of modern neural networks. *ICML 2017*.
+- Heidelbach S. *et al.* Nanomotif: identification and exploitation of DNA methylation motifs in metagenomes using
+  Oxford Nanopore sequencing.
+- Kass R. E., Raftery A. E. (1995). Bayes factors. *Journal of the American Statistical Association* 90, 773–795.
+- Kiefer J., Wolfowitz J. (1956). Consistency of the maximum likelihood estimator in the presence of infinitely many
+  incidental parameters. *Annals of Mathematical Statistics* 27, 887–906.
+- Tourancheau A. *et al.* (2021). Discovering multiple types of DNA methylation from bacteria and microbiome using
+  nanopore sequencing. *Nature Methods* 18, 491–498.
