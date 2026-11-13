@@ -19,10 +19,9 @@ name: release
 on:
   push:
     tags: ["v*"]
-    # main: every platform builds and tests before a tag is pushed (build and test only; uploads stay tag-gated).
-    # feat/kernels-in-wheel is here only so that its pushes build the ARM and macOS wheels (D74): drop it from this
-    # list before the branch is merged into release/0.12.
-    branches: ["main", "feat/kernels-in-wheel", "release/*"]
+    # main and release branches: every platform builds and tests before a tag is pushed (build and test only;
+    # uploads stay tag-gated).
+    branches: ["main", "release/*"]
   workflow_dispatch:
 
 # read-only token by default; the jobs that publish declare their own (id-token, contents: write)
