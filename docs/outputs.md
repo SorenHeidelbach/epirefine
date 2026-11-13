@@ -122,7 +122,8 @@ outputs can read EpiRefine's.
   flags in this sample deserve a second look; no threshold for it has been validated), and `reliability_deployed.tsv`, predicted against observed
   probabilities at the estimated priors and the temperature in use.
 - **`params.json`**: what the run was made with and what it fitted. Written when the run starts (`finished` is
-  `false`) and completed at the end, so an interrupted run still shows its settings.
+  `false`) and completed at the end, so an interrupted run still shows its settings. A run that stops with an error
+  adds `finished: false`, `error` (its type and message) and the kernel counts so far (`kernels.ran`).
   - Provenance: `version`, `command_line`, `start_time` (UTC), `python`, `inputs` (path, size in bytes and
     modification time of the assembly, pileup, contig-bin table and motif table), `out`, `cache_dir`, `workers`,
     `seed`, `calibration_seed` (the seed the calibration pieces were drawn with: `--calibration-seed`, or `seed`

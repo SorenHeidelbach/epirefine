@@ -434,6 +434,22 @@ def rerun_arguments(params: dict, out, workers=None, cache_dir=None, log=log) ->
     return kw
 
 
+def record_failure(path, error: BaseException) -> None:
+    """A run that stopped: add to the params.json it wrote at its start what is known at the stop: which code each
+    kernel's calls took so far (`kernels.ran`, the workers' that returned included), `finished: false` and the error
+    (type and message). Never raises: the run's own error is the one to report."""
+    try:
+        from . import _rs
+        params = json.loads(Path(path).read_text())
+        if isinstance(params.get("kernels"), dict):
+            params["kernels"] = {**params["kernels"], "ran": _rs.ran(), "missing_features": _rs.missing_features()}
+        params.update(finished=False, error=f"{type(error).__name__}: {error}", elapsed_s=round(elapsed(), 1),
+                      peak_rss_gb=round(peak_rss_gb(), 3))
+        write_params(path, params)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def finish(params: dict) -> dict:
     """Closing entries of params.json; under `kernels`, which code each kernel's calls took in this run, the
     workers' included (`ran`: {kernel: {compiled, numpy}}), and the features a call asked for that the build lacks."""

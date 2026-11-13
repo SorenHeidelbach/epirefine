@@ -295,14 +295,27 @@ def _bin_prior_scope(f):
 
 def _kernels_scope(f):
     """Runs f and ends the run's kernels decision afterwards (epirefine._rs.end_run), also when the run fails, so
-    that a later run or call in this process decides afresh."""
+    that a later run or call in this process decides afresh. A run that fails after writing its params.json gets
+    there the kernel counts so far, `finished: false` and the error (runinfo.record_failure)."""
     import functools
+    import inspect
+    import time
+    sig = inspect.signature(f)
 
     @functools.wraps(f)
     def wrapped(*args, **kwargs):
         from . import _rs
+        t0 = time.time()
         try:
             return f(*args, **kwargs)
+        except BaseException as e:
+            try:
+                params = Path(sig.bind(*args, **kwargs).arguments["out"]) / "params.json"
+                if params.is_file() and params.stat().st_mtime >= t0:  # written by this run, not an older one
+                    runinfo.record_failure(params, e)
+            except Exception:  # noqa: BLE001  (the run's own error is the one to report)
+                pass
+            raise
         finally:
             _rs.end_run()
     return wrapped

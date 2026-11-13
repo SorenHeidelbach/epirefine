@@ -154,3 +154,38 @@ def test_replaced_module_file_stops_the_run(monkeypatch):
     with pytest.raises(RuntimeError, match="was replaced after this process loaded it"):
         R.start_run()
     assert R._RUN is None and R.ENV_RUN not in os.environ
+
+
+def test_failed_run_records_its_counts_and_clears_the_decision(community, tmp_path, monkeypatch):
+    """A run that stops after its pileup pass (here: the unit tables raise) leaves in params.json the counts so far,
+    finished false and the error; and the decision of the run is gone afterwards, in this same test (the autouse
+    reset would hide a missing clear)."""
+    import epirefine.pipeline as P
+
+    def boom(*a, **k):
+        raise RuntimeError("unit tables failed")
+    monkeypatch.setattr(P, "unit_tables", boom)
+    out = tmp_path / "out"
+    with pytest.raises(RuntimeError, match="unit tables failed"):
+        run_pipeline(**community.args(out))
+    assert R._RUN is None and R.ENV_RUN not in os.environ
+    p = json.loads((out / "params.json").read_text())
+    assert p["finished"] is False and p["error"] == "RuntimeError: unit tables failed"
+    ran = p["kernels"]["ran"]
+    assert sum(ran["pileup_reader"].values()) >= 1  # the pileup pass ran in workers before the stop
+    if p["kernels"]["used"]:
+        assert ran["pileup_reader"]["compiled"] >= 1
+
+
+def test_run_failing_before_its_record_clears_the_decision(community, tmp_path, monkeypatch):
+    """A run that stops right after begin (the decision is made, params.json not yet written) also leaves no
+    decision behind, and writes no params.json."""
+    from epirefine import runinfo
+
+    def bad(args):
+        raise ValueError("bad input")
+    monkeypatch.setattr(runinfo, "check_inputs", bad)
+    with pytest.raises(ValueError, match="bad input"):
+        run_pipeline(**community.args(tmp_path / "out"))
+    assert R._RUN is None and R.ENV_RUN not in os.environ
+    assert not (tmp_path / "out" / "params.json").exists()
