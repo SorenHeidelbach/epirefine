@@ -11,3 +11,9 @@ sim/
 *.log
 cache/
 .snakemake/
+
+# compiled kernels: the cargo build and the extension an editable install puts next to the sources
+rust/target/
+src/epirefine/_kernels/_core*.so
+src/epirefine/_kernels/_core*.pyd
+dist/

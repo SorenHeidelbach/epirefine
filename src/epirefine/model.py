@@ -31,6 +31,7 @@ from scipy.special import expit
 
 from .detection import DetectionParams, bb_logpmf
 from .grid import Grid
+from ._rs import kernels as _rs_kernels
 
 
 def logsumexp(a: np.ndarray, axis: int = -1, keepdims: bool = False, work: np.ndarray | None = None) -> np.ndarray:
@@ -67,18 +68,12 @@ def logsumexp(a: np.ndarray, axis: int = -1, keepdims: bool = False, work: np.nd
 
 
 def _rs(feature: str = "model_kernels"):
-    """The optional compiled model kernels (package epirefine-rs), or None when they are not installed, are
-    switched off (EPIREFINE_RS=0) or do not provide the interface this code was written for. The numpy code
-    below is the reference; the kernels do the same float64 arithmetic in one pass per unit, and their results
-    differ from it in the last bits of exp, log and sums (relative 1e-15), except cell_sums, which adds in
-    numpy's order and returns numpy's bits."""
-    if os.environ.get("EPIREFINE_RS", "1").strip().lower() in ("0", "false", "no", "off"):
-        return None
-    try:
-        import epirefine_rs
-    except ImportError:
-        return None
-    return epirefine_rs if epirefine_rs.supports("api>=1") and epirefine_rs.supports(feature) else None
+    """The compiled model kernels (epirefine._kernels, through epirefine._rs), or None when the numpy code below
+    runs: switched off (EPIREFINE_RS=0), no compiled extension in this install, or a build without `feature`. The
+    numpy code is the reference; the kernels do the same float64 arithmetic in one pass per unit, and their results
+    differ from it in the last bits of exp, log and sums (relative 1e-15), except cell_sums, which adds in numpy's
+    order and returns numpy's bits."""
+    return _rs_kernels(feature)
 
 
 def _cores() -> int:
@@ -161,7 +156,7 @@ def _cell_sums(table: np.ndarray, r: np.ndarray, w: np.ndarray, starts: np.ndarr
     """[cells, G] float64: per cell (its rows start at starts[c]) the sum of w[i] * table[r[i]], as
     np.add.reduceat(table[r] * w[:, None], starts, axis=0) adds it (the first row plus numpy's pairwise sum of
     the others), in blocks of whole cells of about chunk_rows rows, so that the [rows, G] products are never
-    held for more than a block. The kernel of epirefine-rs does the same additions in one pass (same bits)."""
+    held for more than a block. The compiled kernel (cell_sums) does the same additions in one pass (same bits)."""
     rs = _rs("cell_sums")
     if rs is not None:
         return rs.cell_sums(table, r, w, starts, threads=1 if len(r) < 100_000 else _n_threads())
@@ -652,7 +647,7 @@ def _summed_scores_rows(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None 
         log((1 - eta) P + eta e^Au) = log(q + c d) + log(1 - eta) + am + bm,
         q = sum_g e^(a - am) e^(b - bm), c = eta e^(Au - am) / (1 - eta), d = e^-bm,
     instead of numpy's logaddexp (scalar code, 20 ns a cell); c <= eta / (1 - eta) since Au <= am, and
-    d <= G for normalised profiles. Agrees with group_scores(...).sum(-1) and with the kernel of epirefine-rs to
+    d <= G for normalised profiles. Agrees with group_scores(...).sum(-1) and with the compiled kernel to
     about 1e-15 relative (another order of the products inside a group, another logarithm)."""
     U, M, G = Lp.shape
     H = log_prof.shape[0]
@@ -721,7 +716,7 @@ def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None
     The order of the sums is part of the definition: for every unit its groups are added one after another in
     ascending order, and a unit's sums do not depend on the units scored with it beyond its ROWS_STEP-aligned
     slice, nor on the number of threads. Two implementations keep that order: the numpy row form
-    (_summed_scores_rows) and the kernel of epirefine-rs (score_sums), which takes tables from 1e5 to ROWS_MIN
+    (_summed_scores_rows) and the compiled kernel (score_sums), which takes tables from 1e5 to ROWS_MIN
     unit x bin x group cells when it is installed. They agree to about 1e-15 relative (another order of the 64
     products inside a group's dot product, and libm's logarithm against numpy's).
 
@@ -1151,7 +1146,7 @@ class FittedModel:
     def _score_in_batches(self, L_units, lp_rows: np.ndarray, form: str = "groups") -> Scores:
         """score() without the marginal tables of all units at once: they are a second copy of L_units (6.3 GB
         for the 34,878 contigs of ZymoFecal, and the peak of the run), of which only the rows lp_rows are kept.
-        Used with the row form of summed_scores and with the scoring kernel of epirefine-rs, whose sums for a unit do
+        Used with the row form of summed_scores and with the compiled scoring kernel, whose sums for a unit do
         not depend on the units scored with it (beyond its ROWS_STEP-aligned slice)."""
         U, M, G = L_units.shape
         eta = self.eta if self.eta else 0.05

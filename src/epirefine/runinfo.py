@@ -71,6 +71,10 @@ def begin(args: dict, log=log) -> None:
     log("inputs: " + ", ".join(f"{k.removesuffix('_path')}={args[k]}" for k in INPUT_NAMES) + f"; out={args['out']}; "
         f"workers={n_workers(args['workers'])}; seed={args['seed']}"
         + (f"; calibration seed={args['calibration_seed']}" if args.get("calibration_seed") is not None else ""))
+    from . import _rs  # which code runs: the compiled kernels, or numpy and why (one warning when not asked for)
+    log(_rs.summary())
+    if (warn := _rs.notice()) is not None:
+        log(warn)
     check_settings(args)
     if args["contam_eps"] == 0:
         log("--contam-eps 0: no robust bin profiles and no regional model (long contigs are judged as a whole)")
@@ -287,39 +291,27 @@ def tool_commit(root=None) -> dict:
     return {"commit": None, "source": None}
 
 
-def _version(module: str):
-    try:
-        from importlib.metadata import version
-        return version(module)
-    except Exception:  # not installed, or no metadata
-        return None
-
-
 def kernels() -> dict:
-    """Whether the compiled kernels (epirefine_rs) are installed and used, and which build: version, API level,
-    features, the SHA-256 of the compiled module (identifies the build even when the version does not change) and
-    where it was installed from. `used` follows EPIREFINE_RS and the kernels' interface, as the model code does."""
-    from .model import _rs
-    rec = {"installed": False, "used": False, "EPIREFINE_RS": os.environ.get("EPIREFINE_RS")}
-    try:
-        import epirefine_rs as rs
-    except ImportError:
+    """Whether the compiled kernels (epirefine._kernels, built into the platform wheels) are available and used, and
+    if not, why; and which build: the commit it was built from, the CPU path of the model kernels (avx2_fma or
+    generic), the API level, the features and the SHA-256 of the compiled module (identifies the build exactly).
+    `used` follows EPIREFINE_RS and the kernels' interface, as the model code does (epirefine._rs)."""
+    from . import _rs
+    rs, _ = _rs.load()
+    used = _rs.kernels() is not None
+    rec = {"available": rs is not None, "used": used, "reason": None if used else _rs.reason(),
+           "EPIREFINE_RS": os.environ.get("EPIREFINE_RS"), "EPIREFINE_RS_NO_SIMD": os.environ.get("EPIREFINE_RS_NO_SIMD")}
+    if rs is None:
         return rec
-    rec.update(installed=True, used=_rs() is not None, version=getattr(rs, "__version__", None),
-               commit=getattr(rs, "__commit__", None), api=getattr(rs, "API", None))
+    rec.update(commit=getattr(rs, "__commit__", None), api=getattr(rs, "API", None))
     try:
-        rec["features"] = sorted(rs.features() if callable(rs.features) else rs.features)
+        rec["cpu_path"] = rs.cpu_path()
+        rec["features"] = sorted(rs.features())
     except Exception:
-        rec["features"] = None
+        rec["cpu_path"], rec["features"] = None, None
     so = sorted(Path(rs.__file__).parent.glob("_core*"))
     if so:
         rec["module_sha256"] = hashlib.sha256(so[0].read_bytes()).hexdigest()
-    try:
-        from importlib.metadata import distribution
-        url = json.loads(distribution("epirefine_rs").read_text("direct_url.json") or "{}").get("url")
-        rec["installed_from"] = url
-    except Exception:
-        pass
     return rec
 
 
@@ -335,7 +327,7 @@ def environment(args: dict) -> dict:
     return {
         "commit": tool_commit(),
         "libraries": {"python": sys.version.split()[0], "numpy": numpy.__version__, "scipy": scipy.__version__,
-                      "polars": polars.__version__, "epirefine_rs": _version("epirefine_rs")},
+                      "polars": polars.__version__},
         "kernels": kernels(),
         "threads": {"workers": n_workers(args["workers"]), "cores": _cores(), "model_threads": _n_threads(),
                     "polars_threads": polars.thread_pool_size(),

@@ -324,7 +324,7 @@ def test_site_terms_blocks_are_bit_identical():
 
 @pytest.mark.parametrize("cores", [1, 4, 12])
 def test_summed_scores_do_not_depend_on_the_thread_count(monkeypatch, cores):
-    """The numpy sums (the kernel of epirefine-rs: tests/test_rs_model.py) are the same bits for any number of
+    """The numpy sums (the compiled kernel: tests/test_rs_model.py) are the same bits for any number of
     threads, and equal the sum over groups in ascending order of the per-group terms to rounding. Up to 0.11 they
     were summed in one block of groups per thread, so the last bits followed the core count (review 08, F4)."""
     from epirefine import model as md

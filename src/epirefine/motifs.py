@@ -19,12 +19,13 @@ number of shapes rather than the number of motifs.
 from __future__ import annotations
 
 import itertools
-import os
 import re
 from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
+
+from ._rs import kernels as _rs_kernels
 
 IUPAC = {
     "A": "A", "C": "C", "G": "G", "T": "T", "R": "[AG]", "Y": "[CT]", "S": "[CG]", "W": "[AT]",
@@ -81,7 +82,7 @@ class MotifMatcher:
     def __init__(self, motifs: list[Motif], pairing: str = "sequence"):
         self.motifs = motifs
         self.pairing = pairing
-        self._compiled = False  # the scanner of epirefine-rs for these motifs, or None (set on first use)
+        self._compiled = False  # the compiled scanner for these motifs, or None (set on first use)
         canon = canonical_index(motifs, pairing)
         self.canon = np.array(canon, np.int32)
         self.flip = np.array([canon[i] != i for i in range(len(motifs))])
@@ -173,18 +174,14 @@ class MotifMatcher:
         return {"pos": pos, "strand": orient, "motif": mi, "occ_motif": self.canon[mi], "occ": occ}
 
     def _scanner(self):
-        """The compiled motif scan of the optional package epirefine-rs for these motifs (the same records in
-        the same order as find, tested there and in tests/test_rs_model.py), or None: package not installed,
-        switched off with EPIREFINE_RS=0, or a pairing of complements it does not implement."""
+        """The compiled motif scan (epirefine._kernels) for these motifs (the same records in the same order as
+        find, tested in tests/test_kernels_motif_scan.py and tests/test_rs_model.py), or None: no compiled extension
+        in this install, switched off with EPIREFINE_RS=0, or a pairing of complements it does not implement."""
         if self._compiled is False:
             self._compiled = None
-            if self.pairing == "sequence" and os.environ.get("EPIREFINE_RS", "1").strip().lower() not in ("0", "false", "no", "off"):
-                try:
-                    import epirefine_rs
-                    if epirefine_rs.supports("api>=1") and epirefine_rs.supports("motif_scan"):
-                        self._compiled = epirefine_rs.MotifScanner([(m.seq, m.mod_pos, m.mod_type) for m in self.motifs])
-                except ImportError:
-                    pass
+            rs = _rs_kernels("motif_scan") if self.pairing == "sequence" else None
+            if rs is not None:
+                self._compiled = rs.MotifScanner([(m.seq, m.mod_pos, m.mod_type) for m in self.motifs])
         return self._compiled
 
     def _find_pieces(self, codes: np.ndarray, starts: np.ndarray, min_piece: int = 262_144) -> dict[str, np.ndarray]:

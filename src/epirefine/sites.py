@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
+from ._rs import kernels as _rs_kernels
 from .model import _cores
 from .motifs import Motif, MotifMatcher, _CODE, canonical_index, group_sizes
 
@@ -507,24 +508,18 @@ def same_pairs(motifs, pairing: str) -> bool:
 
 
 def _rs(cfg: dict | None = None):
-    """The optional compiled kernels (package epirefine-rs), or None when they are not installed, are switched
-    off (EPIREFINE_RS=0), do not provide the interface this code was written for, or (cfg given) do not
-    implement the site definition of the run: the kernel builds the sites of 0.10 (complement pairs by
-    sequence, strands summed, shared positions by the motifs' record counts), so --shared-sites motif,
-    --strand-sites auto or split, and a --complement-pairs rule that pairs this motif list differently are read
-    by the Python pass, which is the reference."""
-    if os.environ.get("EPIREFINE_RS", "1").strip().lower() in ("0", "false", "no", "off"):
-        return None
+    """The compiled pileup reader (epirefine._kernels, through epirefine._rs), or None when the Python pass runs:
+    switched off (EPIREFINE_RS=0), no compiled extension in this install, or (cfg given) a site definition the
+    reader does not implement: it builds the sites of 0.10 (complement pairs by sequence, strands summed, shared
+    positions by the motifs' record counts), so --shared-sites motif, --strand-sites auto or split, and a
+    --complement-pairs rule that pairs this motif list differently are read by the Python pass, which is the
+    reference."""
     if cfg is not None:
         if cfg.get("group_rank") is not None or cfg.get("strand_sites", "sum") != "sum":
             return None
         if not same_pairs(cfg["motifs"], cfg.get("pairing", "sequence")):
             return None
-    try:
-        import epirefine_rs
-    except ImportError:
-        return None
-    return epirefine_rs if epirefine_rs.supports("api>=1") and epirefine_rs.supports("pileup_reader") else None
+    return _rs_kernels("pileup_reader")
 
 
 def _run_range_rs(rs, cfg: dict, path: str, start: int, end: int, out_prefix: str, flush_rows: int):
@@ -609,7 +604,7 @@ def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: l
            "pairing": pairing, "strand_sites": strand_sites}
     rs = _rs(cfg)
     log(f"  pileup pass: {len(ranges)} byte ranges on {min(workers, len(ranges))} workers"
-        + (f" (epirefine-rs {rs.__version__} reader)" if rs is not None else ""))
+        + (" (compiled reader)" if rs is not None else ""))
     env_before = os.environ.get("POLARS_MAX_THREADS")
     os.environ["POLARS_MAX_THREADS"] = "1"
     try:
