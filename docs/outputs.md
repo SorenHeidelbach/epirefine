@@ -115,7 +115,10 @@ outputs can read EpiRefine's.
   and credible-set coverage per piece length before and after calibration (`summary.tsv`, `reliability.tsv`), the
   fitted temperature, overall and by length (`temperature_fit.tsv`, `temperature_by_length.tsv`), the variation
   parameter (`tau_fit.tsv`, `tau_groups.tsv`), the pieces themselves (`fragments.tsv`), how well each bin can be told
-  apart (`assignability.tsv`) and bins whose methylation looks alike (`lookalikes.tsv`). Two tables describe the
+  apart (`assignability.tsv`) and bins whose methylation looks alike (`lookalikes.tsv`). `summary.tsv`,
+  `reliability.tsv`, `temperature_by_length.tsv`, `assignability.tsv` and the extra columns of `fragments.tsv` are
+  made with the unknown model and temperature the decisions use (since 0.12 the community-only fit, also when the
+  0.11 switch would have chosen relatives: `unknown_model_forced`). Two tables describe the
   probabilities as they are used for the decisions: `false_flag_rate.tsv`, per piece length the share of pieces
   of true members (scored without their own contig) that would be flagged at the run's settings, for all pieces
   and for those kept by the calibration (`false_flag_rate`, `false_flags`; on the development benchmarks

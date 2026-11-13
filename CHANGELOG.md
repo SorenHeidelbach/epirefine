@@ -65,7 +65,10 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
   error, their ratio `statistic`, and what the 0.11 switch would have chosen). Large positive values mean some
   calibration pieces are explained better by an unbinned relative of a bin than by a random community genome
   (development data: 4.4-5.4 on the simulated look-alikes, 0.4-1.9 on ZymoFecal). When the switch would have
-  chosen the relatives, `params.json` also holds `unknown_model_forced`.
+  chosen the relatives, `params.json` also holds `unknown_model_forced`; the calibration tables (`summary.tsv`,
+  `reliability.tsv`, `temperature_by_length.tsv`, `assignability.tsv`, `fragments.tsv`) and the log line `unknown
+  model: ... -> used T` then describe the community-only fit the decisions use, and `fitted_temperature` is that
+  fit's best temperature before the never-sharpen rule.
 - `--relatives switch` (hidden, deprecated, for comparison only) restores the switch of 0.11.1 and, unless
   `--unknown-share` is given, its share estimate at the deployed temperature: it reproduces 0.11.1. A run with
   `--no-calibrate` uses it when `--relatives` is not given, and says so in the log. `params.json` records the

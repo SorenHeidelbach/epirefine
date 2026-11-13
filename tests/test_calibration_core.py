@@ -153,10 +153,8 @@ def test_community_only_removes_the_switch():
         calibrate_decisions(ff, c, rules, opts, fit=dict(fit0), log=lambda *a: None)
 
 
-def test_community_only_runs_end_to_end(community, base_run, tmp_path, monkeypatch):
-    """On the test community the switch chooses community only: forcing it changes no decision. With a calibration
-    made to report relatives, the pipeline replaces them by the community-only row and decides as before."""
-    import epirefine.pipeline as P
+def test_community_only_runs_end_to_end(community, base_run, tmp_path):
+    """On the test community the switch chooses community only: forcing it changes no decision."""
     out2 = copy_cache(base_run, tmp_path / "out2")
     ref = run_pipeline(**community.args(out2), cache_dir=str(out2 / "cache"), unknown_share="t1")
     assert _params(ref)["unknown_lam"] == 1.0
@@ -167,22 +165,17 @@ def test_community_only_runs_end_to_end(community, base_run, tmp_path, monkeypat
     assert par["relatives"] == "community-only" and par["unknown_lam"] == 1.0 and "unknown_model_forced" not in par
     assert run.table("contig_decisions.tsv").equals(ref.table("contig_decisions.tsv"))
 
-    real = P.calibrate
 
-    def relatives_chosen(*a, **k):   # as if the switch had picked relatives at another temperature
-        cal = real(*a, **k)
-        T = cal["temperature"] * 3
-        cal["fit"] = dict(cal["fit"], eta=0.05, lam=0.1, temperature=T)
-        cal.update(eta=0.05, lam=0.1, temperature=T)
-        return cal
-    monkeypatch.setattr(P, "calibrate", relatives_chosen)
-    out3 = copy_cache(base_run, tmp_path / "out3")
-    forced = run_pipeline(**community.args(out3), cache_dir=str(out3 / "cache"), relatives="community-only",
+def test_community_only_forces_where_the_switch_picks_relatives(sisters, sisters_run, tmp_path):
+    """On the sister community the switch chooses relatives: the explicit community-only options force community
+    only (lam 1, recorded in unknown_model_forced) and decide exactly as the default."""
+    out = copy_cache(sisters_run, tmp_path / "out")
+    forced = run_pipeline(**sisters.args(out), cache_dir=str(out / "cache"), relatives="community-only",
                           unknown_share="t1")
-    par3 = _params(forced)
-    assert par3["unknown_model_forced"]["switch_lam"] == 0.1 and par3["unknown_lam"] == 1.0
+    par = _params(forced)
+    assert par["unknown_model_forced"]["switch_lam"] < 1 and par["unknown_lam"] == 1.0
     assert "unknown model forced to community only" in forced.log
-    assert forced.table("contig_decisions.tsv").equals(ref.table("contig_decisions.tsv"))
+    assert forced.table("contig_decisions.tsv").equals(sisters_run.table("contig_decisions.tsv"))
 
 
 def test_core_options_are_recorded_and_rerun(community, base_run, tmp_path):

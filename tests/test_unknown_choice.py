@@ -57,6 +57,9 @@ def forced_relatives(monkeypatch):
         out = orig(*a, **k)
         assert out["lam"] == 1.0  # the small community does not need relatives
         out["community"] = {"temperature": out["temperature"], "eta": out["eta"], "lam": 1.0}
+        out["switch"] = {"eta": 0.05, "lam": 0.1, "temperature": 20.0}
+        if k.get("community_only"):   # option E: calibrate() itself replaces the switch's choice by community only
+            return out
         out.update(eta=0.05, lam=0.1, temperature=20.0)
         out["fit"] = dict(out["fit"], eta=0.05, lam=0.1, temperature=20.0)
         return out

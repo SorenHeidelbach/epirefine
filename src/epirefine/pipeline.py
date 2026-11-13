@@ -541,7 +541,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         cal = calibrate(L_chunks, chunk_bin, H, group_modtype, grid, frags, tabs["L_frag"], chunks_of,
                         p_cal, H_frag=tabs["H_frag"], allow_sharpening=allow_sharpening,
                         leave_out=contig_chunks(frags["contig"].to_numpy(), chunk_contig),
-                        taus=cal_taus, n_sites_frag=tabs["frag_sites"], log=_log, **model_kw)
+                        taus=cal_taus, n_sites_frag=tabs["frag_sites"], community_only=relatives == "community-only",
+                        log=_log, **model_kw)
         ffit, fit = cal["fragment_fit"], cal["fit"]
         names = dict(enumerate(bins))
         cal["lookalikes"] = cal["lookalikes"].select(
@@ -564,20 +565,16 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                  f"+- {rs['se']:.4f}{' over bins' if rs['se_over_bins'] else ''}; the 2-SE switch of 0.11 would choose "
                  f"{rs['switch_choice']}; " + ("used by --relatives switch)" if relatives == "switch" else
                                                "report only, the switch is removed)"))
+        sw = cal["switch"]
+        if relatives == "community-only" and sw["lam"] < 1:
+            # the switch removed (WP3, U13 option E): calibrate() replaced the relatives the switch chose by the
+            # community-only row the 2-SE rule falls back to, before its diagnostic tables were made; the relatives
+            # test above stays in the log and in params.json as a report
+            params["unknown_model_forced"] = {"switch_eta": sw["eta"], "switch_lam": sw["lam"],
+                                              "switch_temperature": sw["temperature"],
+                                              "community_temperature": cal["temperature"]}
         if relatives == "community-only" and fit["lam"] < 1:
-            # the switch removed (WP3, U13 option E): the community-only row the 2-SE rule falls back to; the
-            # relatives test above stays in the log and in params.json as a report
-            com = cal["community"]
-            if com is None:
-                raise ValueError("--relatives community-only: the calibration has no community-only fit")
-            params["unknown_model_forced"] = {"switch_eta": cal["eta"], "switch_lam": cal["lam"],
-                                              "switch_temperature": cal["temperature"],
-                                              "community_temperature": com["temperature"]}
-            _log(f"unknown model forced to community only (--relatives community-only): the switch chose relatives "
-                 f"(eta={cal['eta']:g}, lam={cal['lam']:g}, T={cal['temperature']:g}); community only at "
-                 f"T={com['temperature']:g}")
-            fit = dict(fit, temperature=com["temperature"], eta=com["eta"], lam=1.0, curve=None)
-            cal.update(temperature=com["temperature"], eta=com["eta"], lam=1.0)
+            raise ValueError("--relatives community-only: the calibration returned an unknown model with relatives")
         if temperature is not None:  # a temperature given by the user overrides the fit, and any curve
             fit = dict(fit, temperature=float(temperature), curve=None)
         temperature = cal["temperature"] if temperature is None else temperature

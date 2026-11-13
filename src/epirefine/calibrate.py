@@ -434,13 +434,22 @@ class FragmentFit:
 def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFrame, L_frag,
               chunks_of, p_unknown, H_frag=None, taus=DEFAULT_TAUS, temps=DEFAULT_TEMPS,
               lookalike_dist=0.15, decidable_bf=3.0, etas=DEFAULT_ETAS, lams=DEFAULT_LAMS,
-              allow_sharpening=False, n_sites_frag=None, leave_out=None, log=print, **model_kw):
+              allow_sharpening=False, n_sites_frag=None, leave_out=None, community_only=False, log=print,
+              **model_kw):
     """chunks_of[i]: host chunks fragment i overlaps (to check its label); leave_out[i]: chunks removed
     from its bin's profile when scoring it (default chunks_of; the pipeline passes the whole source
     contig). The calibration of 0.10 with the relatives test's SE over bins (since 0.11.1). The result's
     "fragment_fit" refits the temperature and the unknown model for another prior and reports on the deployed
     posteriors. Fragments from chunks the robust model calls foreign to their bin are left out of every tau fit
-    (keeping them collapsed inclusion through the temperature: dev log D59)."""
+    (keeping them collapsed inclusion through the temperature: dev log D59).
+
+    community_only (option E, the default of pipeline.run since 0.12): when the 2-SE switch chooses an unknown
+    model with relatives, it is replaced here by the best community-only row (the row the switch falls back to),
+    before the diagnostic tables (summary, reliability, temperature by length, assignability, the fragments'
+    extra columns) and the log line are made, so that they describe the model the decisions use. The result's
+    "switch" holds what the switch chose (eta, lam, temperature); "fitted_temperature" is then the community-only
+    model's best temperature before the never-sharpen rule. False (the deprecated --relatives switch and direct
+    callers): the switch's choice is used, as in 0.11.1."""
     fbin = frags["bin_idx"].to_numpy()
     H = n_bins
     leave_out = chunks_of if leave_out is None else leave_out
@@ -647,6 +656,19 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
                 f"{'relatives' if keep_flexible else 'community only (not significant)'}")
             if not keep_flexible:
                 fit = alt
+    switch = {"eta": float(fit["eta"]), "lam": float(fit["lam"]), "temperature": float(fit["temperature"])}
+    # the best community-only unknown model (lam = 1) at temperatures that may be used: the row the 2-SE rule
+    # falls back to, and the model option E uses on every run
+    simple_rows = [r for r in temp_rows if r["lam"] >= 1 and (allow_sharpening or r["temperature"] >= 1.0)]
+    community = min(simple_rows, key=lambda r: r["log_loss"]) if simple_rows else None
+    if community_only and fit["lam"] < 1:
+        if community is None:
+            raise ValueError("--relatives community-only: the calibration has no community-only fit")
+        fit = community
+        fitted_temperature = min((r for r in temp_rows if r["lam"] >= 1), key=lambda r: r["log_loss"])["temperature"]
+        log(f"  unknown model forced to community only (--relatives community-only): the switch chose relatives "
+            f"(eta={switch['eta']:g}, lam={switch['lam']:g}, T={switch['temperature']:g}); community only at "
+            f"T={community['temperature']:g}")
     temperature, eta, lam = fit["temperature"], fit["eta"], fit["lam"]
     Su, Su_b = Su_by[(eta, lam)]
     # diagnostic: the temperature each fragment length would want. A temperature that rises with
@@ -668,10 +690,6 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
                           "median_sites": float(np.median(n_sites_frag[kidx][sel])) if n_sites_frag is not None else float("nan")})
     first_fit = {"temperature": float(temperature), "eta": float(eta), "lam": float(lam), "curve": None,
                  "fitted_temperature": float(fitted_temperature), "priors": (p_unknown,)}
-    # the best community-only unknown model (lam = 1) at temperatures that may be used: the fallback when an unknown
-    # model with relatives is replaced (option E, pipeline.run)
-    simple_rows = [r for r in temp_rows if r["lam"] >= 1 and (allow_sharpening or r["temperature"] >= 1.0)]
-    community = min(simple_rows, key=lambda r: r["log_loss"]) if simple_rows else None
     log(f"  unknown model: eta={eta:g}, lam={lam:g}; temperature fitted {fitted_temperature:g} -> used {temperature:g}")
     log("  temperature by fragment length: " + ", ".join(f"{r['length'] // 1000} kb {r['temperature']:g}" for r in by_length))
 
@@ -736,7 +754,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             "reliability": reliability, "assignability": pl.DataFrame(assign_rows),
             "fragments": frags.with_columns(pl.Series("foreign_excluded", ~keep), **{
                 k: pl.Series(_expand(v, kidx, len(keep))) for k, v in frag_extra.items()}), "model": best_model,
-            "fragment_fit": ff, "fit": first_fit, "report": report, "relatives_test": relatives_test,
+            "fragment_fit": ff, "fit": first_fit, "report": report, "relatives_test": relatives_test, "switch": switch,
             "community": None if community is None else {"temperature": float(community["temperature"]),
                                                           "eta": float(community["eta"]), "lam": 1.0}}
 
