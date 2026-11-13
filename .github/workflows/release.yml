@@ -7,6 +7,7 @@
 # Every wheel is installed and tested before anything is uploaded: Python 3.10 and 3.13 with current dependencies,
 # once with the lowest versions pyproject.toml allows, the kernels required to be used (params.json and the CPU path
 # checked), and on x86_64 also with the generic CPU path forced. The pure wheel is tested once (numpy and warning).
+# The sdist is checked for its file list, built from source with Rust (kernels required to load) and tested.
 #
 # Uploads happen ONLY for a v* tag equal to the version in pyproject.toml: TestPyPI, then PyPI, by trusted publishing
 # (environments testpypi and pypi; no tokens), then a GitHub release with every file. A push of a branch, or a
@@ -201,10 +202,53 @@ jobs:
           python -c "from epirefine import _rs; r = _rs.reason(); print(r); assert r.startswith('no compiled extension')"
           python -m pytest -q -n auto tests
 
+  test-sdist:
+    name: Build from the sdist (Rust) and test
+    needs: pure-and-sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: pure-and-sdist
+          path: dist
+      - name: The sdist holds what a build needs, and no binary, CI or dev file
+        run: |
+          python - dist/*.tar.gz <<'PY'
+          import sys, tarfile
+          names = {n.split("/", 1)[1] for n in tarfile.open(sys.argv[1]).getnames() if "/" in n}
+          need = {"pyproject.toml", "LICENSE", "README.md", "rust/Cargo.toml", "rust/Cargo.lock", "rust/build.rs",
+                  "rust/src/lib.rs", "rust/src/model.rs", "rust/THIRD_PARTY_LICENSES.txt",
+                  "src/epirefine/_kernels/__init__.py", "src/epirefine/_rs.py", "tests/test_kernels_fallback.py"}
+          bad = sorted(n for n in names if n.endswith((".so", ".pyd", ".dylib"))
+                       or n.startswith((".github/", "dev/", "rust/target/")) or "__pycache__" in n)
+          print(len(names), "files; missing:", sorted(need - names), "unwanted:", bad)
+          sys.exit(1 if need - names or bad else 0)
+          PY
+      - name: Build and install from the sdist (no binary of epirefine), outside the checkout
+        run: |
+          python -m pip install uv
+          uv venv -p python "$RUNNER_TEMP/venv-sdist"
+          cd "$RUNNER_TEMP"
+          VIRTUAL_ENV="$RUNNER_TEMP/venv-sdist" uv pip install --no-binary epirefine "$GITHUB_WORKSPACE"/dist/*.tar.gz "pytest>=8" "pytest-xdist>=3"
+          mkdir sdist && tar xzf "$GITHUB_WORKSPACE"/dist/*.tar.gz -C sdist --strip-components 1
+      - name: The kernels load; kernel tests from the sdist's own tests
+        env:
+          EPIREFINE_EXPECT_KERNELS: "1"
+        run: |
+          cd "$RUNNER_TEMP"
+          venv-sdist/bin/python -c "from epirefine import _rs; print(_rs.summary()); assert _rs.kernels('model_kernels') is not None"
+          venv-sdist/bin/epirefine --version
+          venv-sdist/bin/python -m pytest -q -n auto sdist/tests/test_kernels_fallback.py sdist/tests/test_kernels_model_kernels.py sdist/tests/test_kernels_cpu_path.py sdist/tests/test_rs_model.py
+
   testpypi:
     name: Publish to TestPyPI
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [version, pure-and-sdist, test-wheels, test-musl, test-pure]
+    needs: [version, pure-and-sdist, test-wheels, test-musl, test-pure, test-sdist]
     runs-on: ubuntu-latest
     environment:
       name: testpypi

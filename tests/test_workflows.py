@@ -32,3 +32,13 @@ def test_uploads_only_from_a_pushed_version_tag():
     for job, text in j.items():
         if "id-token: write" in text or "contents: write" in text or "gh-action-pypi-publish" in text:
             assert job in ("testpypi", "pypi", "github-release"), job
+
+
+def test_every_upload_waits_for_every_test():
+    """TestPyPI (and through it PyPI and the GitHub release) needs every build and test job, the sdist built from
+    source among them (B6 review P2)."""
+    j = jobs("release.yml")
+    needs = re.search(r"^    needs: \[(.+)\]$", j["testpypi"], re.M).group(1).replace(" ", "").split(",")
+    tests = {k for k in j if k.startswith("test-") or k in ("licences",)}
+    assert "test-sdist" in tests and tests <= set(needs) and "version" in needs
+    assert "--no-binary epirefine" in j["test-sdist"] and "_rs.kernels('model_kernels') is not None" in j["test-sdist"]
