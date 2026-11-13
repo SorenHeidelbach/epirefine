@@ -169,6 +169,7 @@ def check_cache(cache_dir, assembly, pileup, motifs_path, seed=1, group_sample_b
 
 
 _HELD_LOCKS: list = []  # site-cache locks of the run in progress; released when run() returns or fails
+_OPEN_TABLES: list = []  # tables on disk (sites.RowFile) of the run in progress; closed (removed) when it returns or fails
 
 
 def _releases_cache_locks(f):
@@ -179,6 +180,8 @@ def _releases_cache_locks(f):
         try:
             return f(*args, **kwargs)
         finally:
+            while _OPEN_TABLES:  # (a library caller that keeps the traceback would otherwise keep the file)
+                _OPEN_TABLES.pop().close()
             while _HELD_LOCKS:
                 _HELD_LOCKS.pop().release()
     return wrapped
@@ -521,6 +524,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     del L_all
     chunk_bin, chunk_contig, chunk_no = chunk_bin_all[keep], chunk_contig[keep], chunk_no[keep]
     L_t, n_sites, n_sites_group = tabs["L_t"], tabs["n_sites_t"], tabs["n_sites_group_t"]
+    if isinstance(L_t, RowFile):
+        _OPEN_TABLES.append(L_t)
     _log(f"{len(keep)} host chunks of {chunk_size} bp; tables {L_chunks.nbytes / 1e9:.1f} GB (chunks), "
          f"{L_t.nbytes / 1e9:.1f} GB (contigs)")
 

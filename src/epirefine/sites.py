@@ -752,6 +752,12 @@ def drop_pages(fd: int, sync: bool = True, offset: int = 0, length: int = 0) -> 
     os.posix_fadvise(fd, offset, length, os.POSIX_FADV_DONTNEED)
 
 
+class TableFileError(RuntimeError):
+    """The temporary file of a table could not be written back to disk. Its contents can no longer be trusted
+    (after a failed write-back the system may drop the unwritten pages, and a hole reads as zeros), so the run
+    stops instead of reading it back."""
+
+
 class RowFile:
     """A float32 table [U, M, G] in an unlinked temporary file: written as unit-table parts arrive and read back in
     row slices.
@@ -771,6 +777,11 @@ class RowFile:
       close(): the table is read twice (scores, then per-group summaries).
 
     Rows never written read as zeros, as in the np.zeros table they replace.
+
+    Errors: a failed pwrite (write_rows raises OSError) leaves the file as it was before that block, so recover()
+    can read the rows written so far into memory. A failed write-back (fdatasync, in the background or in
+    finish(); usual for quota and space errors on network file systems, and for I/O errors) raises
+    TableFileError and the file is never read again.
     """
 
     def __init__(self, directory, shape, dtype=np.float32):
@@ -779,12 +790,12 @@ class RowFile:
         self.shape, self.dtype = tuple(int(x) for x in shape), np.dtype(dtype)
         self.ndim = len(self.shape)
         self._row = int(np.prod(self.shape[1:], dtype=np.int64)) * self.dtype.itemsize
+        self.directory = directory
         self._fh = tempfile.TemporaryFile(dir=directory)
         self._fd = self._fh.fileno()
         self._where = np.full(self.shape[0], -1, np.int64)  # row -> its slot in the file (-1: never written)
         self._end = 0           # bytes appended
         self._flushed = 0       # bytes written back and dropped (by the flusher)
-        self._lock = threading.Lock()
         self._flusher = None    # the running background writeback, if any
         self._stop = threading.Event()
         self._readers: list = []
@@ -801,21 +812,29 @@ class RowFile:
             n = os.pwrite(self._fd, buf, off)
             buf, off = buf[n:], off + n
 
+    def _fatal(self, e: OSError) -> TableFileError:
+        return TableFileError(f"the contig tables' temporary file in {self.directory} could not be written to disk "
+                              f"({e}); it needs about {self.nbytes / 1e9:.1f} GB of free space there. The run stops: "
+                              f"the rows already written cannot be read back safely")
+
     def _writeback(self, upto: int) -> None:
         """Background: write back and drop the pages of [flushed, upto)."""
         try:
             drop_pages(self._fd, True, self._flushed, upto - self._flushed)
             self._flushed = upto
-        except OSError as e:  # the main thread raises it at its next write
+        except OSError as e:  # the main thread raises it (as TableFileError) at its next write or in finish()
             self._error = e
 
     _error = None
 
     def write_rows(self, ids: np.ndarray, rows: np.ndarray) -> None:
-        """rows[i] is row ids[i]; appended to the file as one block."""
+        """rows[i] is row ids[i]; appended to the file as one block. OSError: this block was not written (the
+        file holds the earlier ones; recover()). TableFileError: an earlier write-back failed."""
         import threading
         if self._error is not None:
-            raise self._error
+            raise self._fatal(self._error)
+        if rows.shape != (len(ids),) + self.shape[1:]:
+            raise ValueError(f"rows of shape {rows.shape} for {len(ids)} rows of a table of shape {self.shape}")
         rows = np.ascontiguousarray(rows, dtype=self.dtype)
         start = self._end
         self._pwrite(memoryview(rows.reshape(-1).view(np.uint8)), start)
@@ -826,13 +845,32 @@ class RowFile:
             self._flusher.start()
 
     def finish(self) -> "RowFile":
+        """All rows written: write the rest back and drop it from the page cache. TableFileError if any write-back
+        failed."""
         if self._flusher is not None:
             self._flusher.join()
         if self._error is not None:
-            raise self._error
-        drop_pages(self._fd, True, self._flushed, 0)
+            raise self._fatal(self._error)
+        try:
+            drop_pages(self._fd, True, self._flushed, 0)
+        except OSError as e:
+            raise self._fatal(e) from e
         self._flushed = self._end
         return self
+
+    def recover(self) -> np.ndarray:
+        """After a failed pwrite: the table written so far, as an array. Only after the whole file has been
+        written back without error (a write-back that the system started by itself and that failed is reported
+        here); otherwise TableFileError, as for a failed read."""
+        if self._flusher is not None:
+            self._flusher.join()
+        if self._error is not None:
+            raise self._fatal(self._error)
+        try:
+            (os.fdatasync if hasattr(os, "fdatasync") else os.fsync)(self._fd)
+            return self[:]
+        except OSError as e:
+            raise self._fatal(e) from e
 
     def prefetch(self) -> None:
         """Read the file back into the page cache in the background (sequential blocks, PREFETCH_THREADS readers)."""
@@ -876,10 +914,13 @@ class RowFile:
         return out
 
     def __array__(self, dtype=None, copy=None):
+        if copy is False:  # numpy 2: a copy is always made here
+            raise ValueError("a RowFile is read into a new array; it cannot be returned without a copy")
         a = self[:]
         return a if dtype is None else a.astype(dtype)
 
     def close(self) -> None:
+        """Stop the background threads and close (and so remove) the file; may be called again."""
         self._stop.set()
         for t in self._readers:
             t.join()
@@ -900,7 +941,9 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
     target_weight: float32 group weights [M] multiplied into the target rows as they arrive (the same float32
     product as multiplying the finished table). targets_dir: when given and L_t has at least
     TARGETS_DISK_MIN_BYTES, L_t is a RowFile in that directory (written as the parts arrive, its pages dropped
-    from memory) instead of an array; if the file cannot be written, the table goes back to memory.
+    from memory) instead of an array. If the file cannot be made, or a write to it fails, the table goes back to
+    memory; if writing it back to disk fails (or reading it back after a failed write), the run stops with
+    TableFileError.
     """
     G = grid_size
     cfg = {"grid_size": G, "n_groups": n_groups, "min_cov": min_cov, "chunk_size": chunk_size, "drop_groups": list(drop_groups),
@@ -935,49 +978,52 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
             # behind a slow one waited unpickled in this process. Parts hold whole contigs, so each
             # chunk, target and fragment is written by exactly one part and the order does not matter.
             pending, i = {ex.submit(_unit_part, p, cfg) for p in parts}, 0
-            while pending:
-                done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                while done:
-                    r = done.pop().result()
-                    if "chunks" in r:
-                        c = r["chunks"]
-                        res["L_chunks"][c["ids"]] = c["L"]; res["chunk_sites"][c["ids"]] = c["n_sites"]
-                    if "targets" in r:
-                        t = r["targets"]
-                        L = t["L"] if wf is None else t["L"] * wf
-                        if disk is not None:
-                            try:
-                                disk.write_rows(t["ids"], L)
-                            except OSError as e:
-                                log(f"WARNING: contig tables moved back to memory: writing their file failed ({e})")
-                                res["L_t"] = disk[:]
-                                disk.close()
-                                disk = None
-                        if disk is None:
-                            res["L_t"][t["ids"]] = L
-                        del L
-                        res["n_sites_t"][t["ids"]] = t["n_sites"]
-                        u, g, n = t["n_sites_group"]
-                        res["n_sites_group_t"][u, g] = n
-                    if "frags" in r:
-                        f = r["frags"]
-                        res["L_frag"][f["ids"]] += f["L"]; res["frag_sites"][f["ids"]] += f["n_sites"]
-                        res["H_frag"][0][f["ids"]] += f["H"][0]; res["H_frag"][1][f["ids"]] += f["H"][1]
-                    i += 1
-                    if i % max(1, len(parts) // 5) == 0:
-                        log(f"  unit tables: {i}/{len(parts)} parts")
-                    del r
+            try:
+                while pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    while done:
+                        r = done.pop().result()
+                        if "chunks" in r:
+                            c = r["chunks"]
+                            res["L_chunks"][c["ids"]] = c["L"]; res["chunk_sites"][c["ids"]] = c["n_sites"]
+                        if "targets" in r:
+                            t = r["targets"]
+                            L = t["L"] if wf is None else t["L"] * wf
+                            if disk is not None:
+                                try:
+                                    disk.write_rows(t["ids"], L)
+                                except OSError as e:  # this block was not written: the earlier ones go to memory
+                                    res["L_t"] = disk.recover()
+                                    disk.close()
+                                    disk = None
+                                    log(f"WARNING: contig tables moved back to memory: writing their file failed ({e})")
+                            if disk is None:
+                                res["L_t"][t["ids"]] = L
+                            del L
+                            res["n_sites_t"][t["ids"]] = t["n_sites"]
+                            u, g, n = t["n_sites_group"]
+                            res["n_sites_group_t"][u, g] = n
+                        if "frags" in r:
+                            f = r["frags"]
+                            res["L_frag"][f["ids"]] += f["L"]; res["frag_sites"][f["ids"]] += f["n_sites"]
+                            res["H_frag"][0][f["ids"]] += f["H"][0]; res["H_frag"][1][f["ids"]] += f["H"][1]
+                        i += 1
+                        if i % max(1, len(parts) // 5) == 0:
+                            log(f"  unit tables: {i}/{len(parts)} parts")
+                        del r
+            except BaseException:  # the run stops: parts not yet started are not computed first
+                ex.shutdown(wait=False, cancel_futures=True)
+                raise
+        if disk is not None:
+            res["L_t"] = disk.finish()
+    except BaseException:
+        if disk is not None:
+            disk.close()
+        raise
     finally:
         for k, v in env.items():
             if v is None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-    if disk is not None:
-        try:
-            res["L_t"] = disk.finish()
-        except OSError as e:
-            log(f"WARNING: contig tables moved back to memory: writing their file failed ({e})")
-            res["L_t"] = disk[:]
-            disk.close()
     return res
