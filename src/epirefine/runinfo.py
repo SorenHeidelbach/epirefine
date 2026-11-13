@@ -28,17 +28,58 @@ except ImportError:  # pragma: no cover
 _T0 = [time.time()]
 
 
+# largest peak resident memory of a worker process seen in this run, in kB (note_worker_peaks)
+_WORKER_PEAK_KB = [0]
+
+
 def start_clock():
     """Elapsed times in the log count from here (the start of a run), not from the import."""
     _T0[0] = time.time()
+    _WORKER_PEAK_KB[0] = 0
 
 
 def elapsed() -> float:
     return time.time() - _T0[0]
 
 
+def _vm_hwm_kb(pid) -> int | None:
+    """VmHWM (peak resident set) of a process from /proc, in kB; None where there is no /proc."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def note_worker_peaks() -> None:
+    """Record the peak resident memory of the live worker processes of this process.
+
+    Called at the end of each process pool, while its workers are still alive and idle. Each worker's own
+    high-water mark (VmHWM) is read; getrusage(RUSAGE_CHILDREN) cannot be used, because a spawned child's
+    ru_maxrss starts at the parent's high-water mark (the kernel carries it through fork and exec), so it
+    reported the main process's peak at the moment the pool started, not the worker's.
+    """
+    import multiprocessing
+
+    for p in multiprocessing.active_children():
+        kb = _vm_hwm_kb(p.pid)
+        if kb is not None:
+            _WORKER_PEAK_KB[0] = max(_WORKER_PEAK_KB[0], kb)
+
+
 def peak_rss_gb(children: bool = False) -> float:
-    """Peak resident memory of this process (or of its largest finished worker process), in GB."""
+    """Peak resident memory of this process, or (children=True) of its largest worker process, in GB.
+
+    The worker value is the largest VmHWM recorded by note_worker_peaks (0 when no pool ran). Where /proc does
+    not exist (macOS) it falls back to getrusage(RUSAGE_CHILDREN), which can include the main process's peak.
+    """
+    if children and _WORKER_PEAK_KB[0]:
+        return _WORKER_PEAK_KB[0] / 1e6
+    if children and _vm_hwm_kb("self") is not None:
+        return 0.0
     if resource is None:
         return float("nan")
     r = resource.getrusage(resource.RUSAGE_CHILDREN if children else resource.RUSAGE_SELF).ru_maxrss

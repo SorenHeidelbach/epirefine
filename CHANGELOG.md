@@ -20,6 +20,11 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   batch test compares the log terms with an absolute tolerance of 1e-12 (two batch shapes differ by up to 4.4e-16
   in 7 of 73,728 cells; runs use one fixed batch size). Test and tooling changes only: the small suites are
   byte-identical (345 of 345 tables, development data).
+- **Worker peak memory.** `peak_rss_worker_gb` in `params.json` (and the last log line) reported the main
+  process's peak at the moment the first worker pool started (a spawned worker inherits that high-water mark):
+  13.4 GB on ZymoFecal at 12 workers (development) was never a worker's size. Each worker pool now reads its live
+  workers' own peak (VmHWM) before it closes, and the largest is reported. Only run fields of `params.json`
+  change; decisions and every output table are untouched.
 
 ### Added
 - `--calibration-seed` (default: the value of `--seed`): draws the calibration pieces and nothing else. The
