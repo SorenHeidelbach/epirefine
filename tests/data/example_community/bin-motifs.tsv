@@ -1,0 +1,17 @@
+bin	mod_type	motif	mod_position	n_mod_bin	n_nomod_bin	motif_type	motif_complement	mod_position_complement	n_mod_complement	n_nomod_complement
+binA	a	GATC	1	950	50	palindrome	NA	NA	NA	NA
+binA	a	TCGA	3	950	50	palindrome	NA	NA	NA	NA
+binA	m	CCWGG	1	950	50	palindrome	NA	NA	NA	NA
+binA	m	GCGC	1	950	50	palindrome	NA	NA	NA	NA
+binB	a	CATG	1	950	50	palindrome	NA	NA	NA	NA
+binB	a	GANTC	1	950	50	palindrome	NA	NA	NA	NA
+binB	m	CCGG	1	950	50	palindrome	NA	NA	NA	NA
+binB	a	AACNNNNNNGTGC	1	950	50	bipartite	GCACNNNNNNGTT	2	940	60
+binC	a	GTAC	2	950	50	palindrome	NA	NA	NA	NA
+binC	a	CTGCAG	4	950	50	palindrome	NA	NA	NA	NA
+binC	m	CCWGG	1	950	50	palindrome	NA	NA	NA	NA
+binC	m	ACGT	1	950	50	palindrome	NA	NA	NA	NA
+binC	a	CAGNNNNNNCTTG	1	950	50	bipartite	CAAGNNNNNNCTG	2	940	60
+binE	a	GATC	1	950	50	palindrome	NA	NA	NA	NA
+binE	a	GTAC	2	950	50	palindrome	NA	NA	NA	NA
+binE	a	GANTC	1	950	50	palindrome	NA	NA	NA	NA

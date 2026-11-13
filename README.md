@@ -117,7 +117,7 @@ More in the [FAQ](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/fa
 ## Citing
 
 A manuscript is in preparation. Until then, please cite this repository and the version you used
-(`epirefine --version`). EpiRefine builds on [Nanomotif](https://github.com/MicrobialDarkMatter/nanomotif) for
+(`epirefine --version`); `CITATION.cff` holds the citation data (GitHub's "Cite this repository"). EpiRefine builds on [Nanomotif](https://github.com/MicrobialDarkMatter/nanomotif) for
 motif discovery and on [modkit](https://github.com/nanoporetech/modkit) for the pileup.
 
 ## Contributing
