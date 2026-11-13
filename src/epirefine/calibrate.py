@@ -40,54 +40,69 @@ DEFAULT_SIGMAS = (0.0, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5)  # logit-normal kern
 DEFAULT_ETAS = (0.02, 0.05)  # test: cap the per-group swap of a relative (eta 0.35 collapsed inclusion)
 DEFAULT_LAMS = (0.1, 0.5, 0.9, 1.0)  # 1.0 = community-only unknown (the earlier model)
 DEFAULT_TEMPS = tuple(np.round(np.exp(np.linspace(np.log(0.2), np.log(20), 31)), 3))
-PRIOR_GRID = (0.1, 0.3, 0.5, 0.7, 0.9)  # p_unknown values the prior-averaged objective is averaged over
 
-# Calibration design, as a set of features (dev log proposal 2026-11-10, calibration coherence). The empty
-# set is the calibration of 0.10 ("legacy"); every feature can be switched on alone, so each can be
-# benchmarked against the others.
-FEATURES = {
-    "unit-temperature": "the temperature grid holds exactly 1, so 'never sharpen' means T >= 1 and not T >= 1.082",
-    "temper-then-mix": "every explanation of 'unknown' (community draw, relative of each bin) is tempered, then "
-                       "mixed with its prior weight, as the bins are",
-    "prior-averaged": "(T, eta, lam) minimise the log loss averaged over priors p_unknown = 0.1 ... 0.9, each with "
-                      "tests A and B weighted (1 - p, p): the likelihood is calibrated, whatever the prior",
-    "prior-matched": "(T, eta, lam) are refitted at the estimated p_unknown, tests A and B weighted (1 - p, p), "
-                     "until p_unknown and the fit agree",
-    "sites-temperature": "the temperature may rise with a contig's number of sites (monotone, fitted per fragment "
-                         "length, kept only when it beats one temperature by 2 SE)",
-    "conservative-temperature": "among temperatures >= 1, the largest one that is not worse than the best by more "
-                                "than 2 SE (bootstrap over source contigs): where the fragments cannot tell two "
-                                "temperatures apart, the flatter one is used",
-    "full-test-b": "the host-absent test counts every fragment, also those that cannot tell their bin from its "
-                   "nearest competitor: unbinned contigs of a genome that resembles a bin are part of the "
-                   "population the posteriors are reported for (needs a proper objective to make sense)",
-    "common-tau": "tau values are compared on the fragments every tau fit keeps",
-    "em-priors": "p_unknown has a Beta(2, 2) prior; the contamination rate counts only contigs that pass the "
-                 "methylome-difference gate",
-    "bin-parsimony": "the unknown model with relatives (lam < 1) must beat the community-only model by 2 SE with the "
-                     "standard error taken over bins (the fragments of a bin share its sibling bins), not over "
-                     "single fragments",
-    "tempered-bin-prior": "the uniform prior over bins is tempered with the evidence (each bin costs log(H) / T "
-                          "instead of log(H)), in calibration and in the decisions, so the estimated p_unknown "
-                          "no longer rises with the temperature",
-    "deployed-unknown": "an unknown model with relatives (lam < 1) is kept only if it still beats the community-only "
-                        "model by 2 SE when each is scored on the fragments at the p_unknown it would be deployed "
-                        "with (EM on the unbinned contigs), not at the reference prior of the fit",
-}
-# The proposed set (rounds of the proposal in the dev log, 2026-11-10). Not in it, on the evidence of the
-# development sets: unit-temperature (contig posteriors at exactly T = 1 are over-confident: 83% right at
-# P 0.9-0.95 on the training communities), sites-temperature (worse than one temperature where its guard lets it
-# act), prior-matched (same fits as prior-averaged, with a feedback loop between p_unknown and the fit),
-# conservative-temperature (useful without full-test-b; with it the rule only costs inclusions).
-COHERENT = ("temper-then-mix", "prior-averaged", "full-test-b", "common-tau", "em-priors")
-# A named set ('consistent'; not the default): the features of the proposal that change almost no decision on
-# the development sets and
-# correct confirmed defects of the 0.10 calibration (the order of tempering and mixing, tau compared over
-# different fragment sets, a flat prior on p_unknown, a contamination rate estimated before the gate).
-CONSISTENT = ("temper-then-mix", "common-tau", "em-priors")
-# The default since 0.11.1: the calibration of 0.10 with the parsimony test of the unknown model resampled over
-# bins (dev log proposal 2026-11-12). 'legacy' is the calibration of 0.10 and 0.11.0 exactly.
+# The rule of the relatives test (D28, D51; since 0.11.1): an unknown model with relatives (lam < 1) must beat the
+# community-only model by 2 SE with the standard error taken over bins (the fragments of a bin share its sibling
+# bins), not over single fragments. Since option E (0.12) the test decides only under --relatives switch (the 0.11.1
+# path); otherwise it is reported (relatives_statistic). The calibration feature list of 0.11 (--calibration:
+# temper-then-mix, prior-averaged, prior-matched, conservative-, unit- and sites-temperature, full-test-b,
+# common-tau, em-priors, tempered-bin-prior, deployed-unknown and the sets legacy, consistent, coherent) was
+# removed in 0.12 (U12, D63): none became a default. FragmentFit keeps a `features` field so that stored
+# calibration dumps still load; "bin-parsimony" is the only feature it reads.
 DEFAULT = ("bin-parsimony",)
+
+
+def _relatives_statistic(gain: float, se: float, relatives_row: dict, community_row: dict, best_is_relatives: bool,
+                         over_bins: bool) -> dict:
+    """The relatives test of 0.11 as a number (params.json relatives_statistic). gain: mean log-loss gain per
+    calibration piece of the best unknown model with relatives (lam < 1) over the best community-only one (lam = 1),
+    each at its own grid temperature; se: its standard error (resampled over bins with the feature bin-parsimony,
+    the default). statistic = gain / se. The 2-SE switch of 0.11 chose relatives when the best row had relatives and
+    statistic > 2; since option E (0.12) the switch is removed and the number is a report only. Large positive
+    values say that some calibration pieces are explained better by an unbinned relative of a bin than by a random
+    community genome: the sample may hold an unbinned genome with (nearly) the same methylation as a bin, whose
+    contigs EpiRefine then places in that bin (development data: 4.4-5.4 on the simulated look-alikes, 0.4-1.9 on
+    ZymoFecal)."""
+    z = float(gain / se) if se > 0 else None   # None: no spread to divide by (a single bin or piece)
+    return {"gain": float(gain), "se": float(se), "statistic": z, "se_over_bins": bool(over_bins),
+            "relatives_eta": float(relatives_row["eta"]), "relatives_lam": float(relatives_row["lam"]),
+            "relatives_temperature": float(relatives_row["temperature"]),
+            "community_temperature": float(community_row["temperature"]),
+            "switch_choice": "relatives" if best_is_relatives and gain > 2 * se else "community only"}
+
+
+def calibration_guard_law(law, n_pieces: int, n_test_b: int) -> dict:
+    """The guard of calibration_guard for --temperature-law sites, whose decisions do not use the grid temperature:
+    it fires when the law's temperature at the reference site count (exp(a), T at 1,000 sites) is at the upper
+    bound of the law's own search (LAW_T_MAX, 100): no tempering the search allows predicted the pieces better.
+    The record has the keys of calibration_guard; temperature is the law's T at 1,000 sites."""
+    cap = float(LAW_T_MAX)
+    T = float(np.exp(law.a))
+    fired = law.a >= np.log(cap) - 1e-3
+    return {"fired": bool(fired), "reason": f"temperature law at its cap ({cap:g} at {N_REF_SITES:g} sites)" if fired
+            else None, "temperature": T, "cap": cap, "pieces": int(n_pieces), "test_b_pieces": int(n_test_b),
+            "fallback": "no calls" if fired else None}
+
+
+def calibration_guard(temperature, temps, n_pieces: int, n_test_b: int) -> dict:
+    """The guard for calibrations that carry no usable temperature (0.12; dev log proposal 2026-11-13 calib_guard).
+
+    It fires when the calibrated temperature is at the largest temperature of the grid (the cap, 20): no tempering
+    the grid allows predicted the calibration pieces better, so the fit says nothing about how far the contig
+    scores can be trusted. On development data the temperature is at most 5.9 on every normal run (monocultures,
+    ZymoOral, simulated look-alikes, ZymoFecal and its bin resamples, fecal_inhouse) and either at most 1.7 or
+    exactly 20 on the 653 stress-set-2 runs that finish; it never lies in between, and the runs at 20 are those where one
+    calibration piece holds almost no sites or is confidently wrong, or where half of the methylation is knocked
+    out. The numbers of pieces are reported but do not trigger the guard: from a single piece the calibration
+    usually lands at the never-sharpen floor and the calls are right (stress set 2: 52 runs with calls from at most
+    two pieces, 100% flag precision).
+    The fallback is no calls (the pipeline sets the decision thresholds beyond 1)."""
+    cap = float(max(temps))
+    T = float(np.max(np.atleast_1d(temperature)))
+    fired = T >= cap
+    return {"fired": bool(fired), "reason": f"temperature at the grid cap ({cap:g})" if fired else None,
+            "temperature": T, "cap": cap, "pieces": int(n_pieces), "test_b_pieces": int(n_test_b),
+            "fallback": "no calls" if fired else None}
 
 
 def clustered_se(dA, dB, cluster_a, cluster_b, n_boot: int = 400, seed: int = 0) -> float:
@@ -104,36 +119,6 @@ def clustered_se(dA, dB, cluster_a, cluster_b, n_boot: int = 400, seed: int = 0)
     a = sA[draws].sum(1) / np.maximum(nA[draws].sum(1), 1)
     b = sB[draws].sum(1) / np.maximum(nB[draws].sum(1), 1) if len(dB) else 0.0
     return float(np.std(a + b))
-
-
-def parse_features(spec) -> frozenset:
-    """'default' (DEFAULT, since 0.11.1), 'legacy' (the calibration of 0.10 and 0.11.0: no feature), 'consistent'
-    (CONSISTENT), 'coherent' (COHERENT), or a comma-separated list of FEATURES, optionally after one of these names
-    ('-name' removes a feature)."""
-    if spec is None:
-        return frozenset()
-    if not isinstance(spec, str):
-        spec = ",".join(spec)
-    out: set[str] = set()
-    for tok in (t.strip() for t in spec.split(",")):
-        if tok in ("", "legacy"):
-            continue
-        if tok == "default":
-            out |= set(DEFAULT)
-            continue
-        if tok == "coherent":
-            out |= set(COHERENT)
-        elif tok == "consistent":
-            out |= set(CONSISTENT)
-        elif tok.startswith("-") and tok[1:] in FEATURES:
-            out.discard(tok[1:])
-        elif tok in FEATURES:
-            out.add(tok)
-        else:
-            raise ValueError(f"unknown calibration feature {tok!r}; choose from default, legacy, consistent, coherent, {', '.join(FEATURES)}")
-    if {"prior-averaged", "prior-matched"} <= out:
-        raise ValueError("prior-averaged and prior-matched exclude each other")
-    return frozenset(out)
 
 
 def fragments_per_bin(budget: int, n_lengths: int, n_bins: int, cap: int) -> int:
@@ -222,40 +207,6 @@ def _reliability(P: np.ndarray, truth: np.ndarray, test: str) -> list[dict]:
     return rows
 
 
-def loglik_on_common(own_ll: list[np.ndarray], keeps: list[np.ndarray]) -> tuple[np.ndarray, list[float]]:
-    """Total own-bin log-likelihood per candidate, over the fragments every candidate kept: totals over
-    each candidate's own kept set would reward the candidate that drops the hardest fragments."""
-    common = np.logical_and.reduce(keeps)
-    return common, [float(v[common].sum()) for v in own_ll]
-
-
-def isotonic_increasing(y: np.ndarray, w: np.ndarray) -> np.ndarray:
-    """Weighted least-squares non-decreasing fit (pool adjacent violators)."""
-    vals, wts, cnt = [], [], []
-    for yi, wi in zip(map(float, y), map(float, w)):
-        vals.append(yi); wts.append(wi); cnt.append(1)
-        while len(vals) > 1 and vals[-2] > vals[-1]:
-            v = (vals[-2] * wts[-2] + vals[-1] * wts[-1]) / (wts[-2] + wts[-1])
-            wts[-2] += wts[-1]; cnt[-2] += cnt[-1]; vals[-2] = v
-            vals.pop(); wts.pop(); cnt.pop()
-    return np.repeat(vals, cnt)
-
-
-@dataclass
-class TemperatureCurve:
-    """Temperature as a non-decreasing function of a unit's number of sites: log T is interpolated linearly
-    in log(sites) between the calibration lengths and held constant outside them (no fragment is longer
-    than the longest calibration length, so nothing is known beyond it)."""
-    log_sites: np.ndarray
-    log_T: np.ndarray
-
-    def __call__(self, n_sites) -> np.ndarray:
-        return np.exp(np.interp(np.log(np.maximum(np.asarray(n_sites, float), 1.0)), self.log_sites, self.log_T))
-
-    def table(self) -> list[dict]:
-        return [{"sites": float(np.exp(a)), "temperature": float(np.exp(b))} for a, b in zip(self.log_sites, self.log_T)]
-
-
 @dataclass
 class FragmentFit:
     """Scores of the calibration fragments, enough to (re)fit the temperature and the unknown model for any
@@ -274,6 +225,8 @@ class FragmentFit:
     n_sites: np.ndarray      # [n] motif sites in the fragment
     difference: np.ndarray   # [n] methylome difference to the own bin (the gate statistic of contig decisions)
     contig: np.ndarray | None = None  # [n] source contig (fragments of one contig are not independent)
+    # "bin-parsimony" (set by calibrate(), as on every run since 0.11.1): the relatives test's SE over bins; without
+    # it over single fragments (the field's default, kept as it was for stored dumps and direct callers)
     features: frozenset = frozenset()
     temps: tuple = DEFAULT_TEMPS
     etas: tuple = DEFAULT_ETAS
@@ -284,10 +237,6 @@ class FragmentFit:
     @property
     def H(self) -> int:
         return self.S.shape[1]
-
-    @property
-    def coherent(self) -> bool:
-        return "temper-then-mix" in self.features
 
     def _bins(self, T: float):
         """Per kept fragment at temperature T: own-bin logit, log sum over all bins, log sum over the others."""
@@ -304,12 +253,12 @@ class FragmentFit:
         rows = np.arange(len(self.fbin)) if rows is None else rows
         R = self.R.get(eta)
         return unknown_logit(None if R is None else R[rows], self.Su_comm[rows], eta, lam, T,
-                             exclude=self.fbin[rows] if exclude_own else None, temper_then_mix=self.coherent)
+                             exclude=self.fbin[rows] if exclude_own else None, temper_then_mix=False)
 
     def losses(self, T: float, eta, lam, p: float):
         """Log loss per kept fragment in test A (host present: P of the source bin) and, for the decidable
-        ones, in test B (host absent: P of 'unknown'). With a proper objective the H - 1 remaining bins
-        share 1 - p in test B; with the objective of 0.10 each keeps (1 - p) / H, as there."""
+        ones, in test B (host absent: P of 'unknown'). The objective of 0.10: in test B each of the H - 1
+        remaining bins keeps (1 - p) / H, as there."""
         k = np.flatnonzero(self.kept)
         key = ("u", T, eta, lam)
         if key not in self._cache:
@@ -319,7 +268,7 @@ class FragmentFit:
         lpb, lpu = np.log1p(-p) - log_bins(self.H, T), np.log(p)
         la = -(lpb + own - np.logaddexp(lpb + all_, lpu + zu_a))
         d = self.distinct[k]
-        lpb1 = np.log1p(-p) - log_bins(max(self.H - 1, 1) if self.proper else self.H, T)
+        lpb1 = np.log1p(-p) - log_bins(self.H, T)
         lb = -(lpu + zu_b[d] - np.logaddexp(lpb1 + others[d], lpu + zu_b[d]))
         cap = -np.log(1e-12)
         return np.minimum(la, cap), np.minimum(lb, cap)
@@ -337,32 +286,19 @@ class FragmentFit:
         la, lb = self.objective_terms(T, eta, lam, priors)
         return float(la.mean() + (lb.mean() if len(lb) else 0.0))
 
-    @property
-    def proper(self) -> bool:
-        """The objective is a proper score (prior = share of test B), not the objective of 0.10."""
-        return bool(self.features & {"prior-averaged", "prior-matched"})
-
     def priors_for(self, p_unknown: float) -> tuple:
-        """The objective as (prior p_unknown, weight of test A, weight of test B) triples."""
-        if "prior-averaged" in self.features:
-            return tuple((p, (1 - p) / len(PRIOR_GRID), p / len(PRIOR_GRID)) for p in PRIOR_GRID)
+        """The objective as (prior p_unknown, weight of test A, weight of test B) triples: the objective of 0.10,
+        the prior as given, the tests weighted 1 : 1."""
         p = float(np.clip(p_unknown, 1e-3, 1 - 1e-3))
-        if "prior-matched" in self.features:
-            return ((p, 1 - p, p),)
-        return ((p, 1.0, 1.0),)   # the objective of 0.10: the prior as given, the tests weighted 1 : 1
+        return ((p, 1.0, 1.0),)
 
     def fit(self, p_unknown: float, log=print) -> dict:
-        """(temperature, eta, lam) minimising the proper log score of the fragments' posteriors.
-
-        A share p of unbinned contigs comes from genomes without a bin (test B), 1 - p from binned genomes
-        (test A), and the posterior is computed with that same prior p: the expected log score is then
-        minimised by the true posterior, so the temperature measures how far the likelihood is off and
-        does not also absorb a wrong prior. prior-matched uses p = p_unknown; prior-averaged averages the
-        objective over PRIOR_GRID (a likelihood that is calibrated is calibrated under every prior).
-        Without either, the objective is the one of 0.10 (prior p_unknown as passed, tests weighted 1 : 1).
-        """
+        """(temperature, eta, lam) minimising the log loss of the fragments' posteriors with the objective of
+        0.10 (prior p_unknown as passed, tests A and B weighted 1 : 1), on the temperature grid, with the
+        relatives test (2 SE) between the best unknown model with relatives and the best community-only one; the
+        same fit as the calibration of a run (calibrate()), refitted on these pieces."""
         priors = self.priors_for(p_unknown)
-        temps = sorted(set(self.temps) | ({1.0} if "unit-temperature" in self.features else set()))
+        temps = sorted(set(self.temps))
         ok_T = [T for T in temps if self.allow_sharpening or T >= 1.0]
         models = [(eta, lam) for eta in self.etas for lam in self.lams if lam >= 1 or (self.H > 1 and eta in self.R)]
         rows = [{"eta": eta, "lam": lam, "temperature": T, "log_loss": self.objective(T, eta, lam, priors)}
@@ -370,81 +306,45 @@ class FragmentFit:
         fitted = min(rows, key=lambda r: r["log_loss"])
         fit = min((r for r in rows if r["temperature"] in ok_T), key=lambda r: r["log_loss"])
         simple = [r for r in rows if r["lam"] >= 1 and r["temperature"] in ok_T]
+        flexible = [r for r in rows if r["lam"] < 1 and r["temperature"] in ok_T]
+        relatives_test = None
         if fit["lam"] < 1 and simple:  # parsimony (D28): relatives only when they beat community-only by 2 SE
             alt = min(simple, key=lambda r: r["log_loss"])
             gain, se = self._paired_gain((fit["temperature"], fit["eta"], fit["lam"]),
                                          (alt["temperature"], alt["eta"], alt["lam"]), priors,
                                          by_bin="bin-parsimony" in self.features)
+            relatives_test = _relatives_statistic(gain, se, fit, alt, True, "bin-parsimony" in self.features)
             keep_flexible = gain > 2 * se
             log(f"  unknown model: relatives (eta={fit['eta']:g}, lam={fit['lam']:g}) vs community only: log-loss gain "
                 f"{gain:.4f} +- {se:.4f} -> {'relatives' if keep_flexible else 'community only (not significant)'}")
             if not keep_flexible:
                 fit = alt
-        if "conservative-temperature" in self.features:
-            # The fragments are cut from binned contigs and are easier to place than real unbinned contigs
-            # (D7): they can show overconfidence but cannot justify confidence. So where they cannot tell
-            # two temperatures apart, the flatter one is taken: the largest T whose objective is within 2 SE
-            # of the best (paired differences, bootstrap over source contigs; 2 SE as in the parsimony rule).
-            best = (fit["temperature"], fit["eta"], fit["lam"])
-            chosen = fit
-            for T in (t for t in ok_T if t > fit["temperature"]):
-                gain, se = self._paired_gain((T, fit["eta"], fit["lam"]), best, priors, by_contig=True)
-                if -gain > 2 * se:   # T is worse than the best by more than 2 SE
-                    break
-                chosen = next(r for r in rows if r["temperature"] == T and r["eta"] == fit["eta"] and r["lam"] == fit["lam"])
-            if chosen is not fit:
-                log(f"  temperature: best {fit['temperature']:g}; {chosen['temperature']:g} is within 2 SE of it "
-                    f"(log loss {chosen['log_loss']:.4f} vs {fit['log_loss']:.4f}) -> {chosen['temperature']:g}")
-            fit = chosen
+        elif simple and flexible:  # community only fits best: the statistic is still reported (gain <= 0)
+            rel = min(flexible, key=lambda r: r["log_loss"])
+            gain, se = self._paired_gain((rel["temperature"], rel["eta"], rel["lam"]),
+                                         (fit["temperature"], fit["eta"], fit["lam"]), priors,
+                                         by_bin="bin-parsimony" in self.features)
+            relatives_test = _relatives_statistic(gain, se, rel, fit, False, "bin-parsimony" in self.features)
         out = {"temperature": float(fit["temperature"]), "eta": float(fit["eta"]), "lam": float(fit["lam"]),
                "fitted_temperature": float(fitted["temperature"]), "temperature_fit": rows, "curve": None,
-               "priors": priors}
+               "priors": priors, "relatives_test": relatives_test}
         out["by_length"] = self.by_length(out, priors, temps)
-        if "sites-temperature" in self.features:
-            out["curve"] = self._curve(out, priors, ok_T, log)
         return out
 
-    def _paired_gain(self, a, b, priors, n_boot: int = 200, by_contig: bool = False, priors_b=None, by_bin: bool = False):
-        """Objective(b) - objective(a) with a paired-bootstrap standard error over fragments, or over
-        source contigs (by_contig: fragments of one contig share its departures from the bin, so resampling
-        them one by one understates the error). priors_b: b's objective at other priors than a's."""
+    def _paired_gain(self, a, b, priors, n_boot: int = 200, by_bin: bool = False):
+        """Objective(b) - objective(a) with a paired-bootstrap standard error over whole bins (by_bin, the rule
+        bin-parsimony) or over single fragments."""
         la1, lb1 = self.objective_terms(*a, priors)
-        la0, lb0 = self.objective_terms(*b, priors if priors_b is None else priors_b)
+        la0, lb0 = self.objective_terms(*b, priors)
         dA, dB = la0 - la1, lb0 - lb1
         gain = dA.mean() + (dB.mean() if len(dB) else 0.0)
-        rng = np.random.default_rng(0)
-        if by_bin:  # feature bin-parsimony: whole bins resampled
+        if by_bin:  # bin-parsimony: whole bins resampled
             k = np.flatnonzero(self.kept)
             return float(gain), clustered_se(dA, dB, self.fbin[k], self.fbin[k][self.distinct[k]] if len(dB) else self.fbin[:0])
-        if by_contig and self.contig is not None:
-            k = np.flatnonzero(self.kept)
-            _, inv = np.unique(self.contig[k], return_inverse=True)
-            n = inv.max() + 1
-            sA = np.bincount(inv, dA, n)
-            sB = np.bincount(inv[self.distinct[k]], dB, n) if len(dB) else np.zeros(n)
-            draws = rng.integers(0, n, (n_boot, n))
-            boots = sA[draws].sum(1) / len(dA) + (sB[draws].sum(1) / len(dB) if len(dB) else 0.0)
-            return float(gain), float(np.std(boots))
+        rng = np.random.default_rng(0)
         boots = [dA[rng.integers(0, len(dA), len(dA))].mean()
                  + (dB[rng.integers(0, len(dB), len(dB))].mean() if len(dB) else 0.0) for _ in range(n_boot)]
         return float(gain), float(np.std(boots))
-
-    def deployed_gain(self, flexible, p_flexible: float, simple, p_simple: float) -> tuple[float, float]:
-        """Log-loss gain of the unknown model with relatives over the community-only one, each scored on the
-        fragments at the p_unknown it would be deployed with (feature deployed-unknown).
-
-        flexible, simple: (temperature, eta, lam). p_flexible, p_simple: the EM estimates of p_unknown on the
-        real unbinned contigs under each. The fit compares the two at a reference prior (0.1), but a model is
-        deployed at the prior its own EM finds, and that prior depends on the model: a relative of bin h fits
-        every contig that fits h, so wherever the relatives' likelihood ratio unknown : bins exceeds 1 - f (f the
-        share of unbinned contigs that fit no bin) the EM runs to p_unknown = 1 and no contig can be placed
-        (dev log, proposal 2026-11-10, R1.1; ZymoFecal with Nanomotif 1.3.0 motifs, 2026-11-12). The fragments are
-        a fixed population, tests A (host present) and B (host absent) weighted 1 : 1 as in the fit of 0.10;
-        only the prior of each posterior changes. Standard error by paired bootstrap over source contigs.
-        Returns (gain, se); gain > 0: the relatives model is better at deployment."""
-        clip = lambda p: float(np.clip(p, 1e-6, 1 - 1e-6))
-        return self._paired_gain(flexible, simple, ((clip(p_flexible), 1.0, 1.0),), by_contig=True,
-                                 priors_b=((clip(p_simple), 1.0, 1.0),))
 
     def _class_objective(self, sel_k, T, eta, lam, priors):
         la, lb = self.objective_terms(T, eta, lam, priors)
@@ -463,46 +363,6 @@ class FragmentFit:
             rows.append({"length": int(Lf), "fragments": int(sel.sum()), "temperature": float(best),
                          "median_sites": float(np.median(self.n_sites[k][sel]))})
         return rows
-
-    def _curve(self, fit, priors, ok_T, log):
-        """Temperature by number of sites: the best T >= 1 per fragment length, made non-decreasing in the
-        length's median site count, used only when it beats the single temperature by more than 2 SE of the
-        paired difference (as for the unknown model, D28: no extra freedom without evidence for it)."""
-        k = np.flatnonzero(self.kept)
-        flen, eta, lam = self.length[k], fit["eta"], fit["lam"]
-        classes = sorted(set(flen.tolist()))
-        if len(classes) < 2:
-            return None
-        med = np.array([np.median(self.n_sites[k][flen == Lf]) for Lf in classes])
-        cnt = np.array([(flen == Lf).sum() for Lf in classes], float)
-        raw = np.array([min(ok_T, key=lambda T: self._class_objective(flen == Lf, T, eta, lam, priors)) for Lf in classes])
-        order = np.argsort(med, kind="stable")
-        iso = np.exp(isotonic_increasing(np.log(raw[order]), cnt[order]))
-        curve = TemperatureCurve(np.log(np.maximum(med[order], 1.0)), np.log(iso))
-        if np.allclose(iso, fit["temperature"]):
-            return None
-        # paired comparison on the fragments: each at its class temperature (snapped to the grid) vs the scalar
-        grid = np.array(ok_T)
-        la1 = np.empty(len(k)); la0, lb0 = self.objective_terms(fit["temperature"], eta, lam, priors)
-        d = self.distinct[k]
-        lb1 = np.empty(int(d.sum()))
-        pos_b = np.cumsum(d) - 1
-        for j, Lf in enumerate(np.array(classes)[order]):
-            Tj = float(grid[np.abs(np.log(grid) - np.log(iso[j])).argmin()])
-            a, b = self.objective_terms(Tj, eta, lam, priors)
-            sel = flen == Lf
-            la1[sel] = a[sel]
-            lb1[pos_b[sel & d]] = b[pos_b[sel & d]]
-        dA, dB = la0 - la1, lb0 - lb1
-        gain = dA.mean() + (dB.mean() if len(dB) else 0.0)
-        rng = np.random.default_rng(0)
-        boots = [dA[rng.integers(0, len(dA), len(dA))].mean()
-                 + (dB[rng.integers(0, len(dB), len(dB))].mean() if len(dB) else 0.0) for _ in range(200)]
-        se = float(np.std(boots))
-        use = gain > 2 * se
-        log("  temperature by sites: " + ", ".join(f"{int(np.exp(a))} sites {np.exp(b):.3g}" for a, b in zip(curve.log_sites, curve.log_T))
-            + f"; log-loss gain over one temperature {gain:.4f} +- {se:.4f} -> {'used' if use else 'not used (not significant)'}")
-        return curve if use else None
 
     # ---- posteriors of the fragments under given settings (reports)
     def posteriors(self, T, eta, lam, p: float, rows=None):
@@ -584,40 +444,25 @@ class FragmentFit:
         return rows
 
 
-def _by_bin(A_own: np.ndarray, keep: np.ndarray, fbin: np.ndarray, n_bins: int) -> np.ndarray:
-    """[H, M]: the kept fragments' per-group leave-out terms, summed per source bin."""
-    by_bin = np.zeros((n_bins, A_own.shape[1]))
-    np.add.at(by_bin, fbin[keep], A_own[keep])
-    return by_bin
-
-
-def _pick_tau(group_ll: np.ndarray, group_ll_bin, base: int, tau_support: str) -> np.ndarray:
-    """Index of the tau chosen for each motif group. group_ll[k, m]: leave-one-out log-likelihood of group m
-    under tau k; group_ll_bin[k][h, m]: the same per source bin (needed for leave_bin_out only).
-
-    "all": the tau with the highest total. "leave_bin_out": between-unit variation is a property of a motif
-    group, shared by all bins. A finite tau that wins only through the fragments of one bin describes that bin
-    (two methylomes in it: a contaminant's fragments scored against the host's profile), not the group, and it
-    switches the group off as evidence in every bin. So each candidate's gain over "no variation" is counted
-    without the bin that gains most."""
-    if tau_support == "all":
-        return group_ll.argmax(0)
-    if tau_support != "leave_bin_out":
-        raise ValueError(f"unknown tau_support {tau_support!r}")
-    gain = np.array(group_ll_bin) - group_ll_bin[base][None]       # [n_taus, H, M]
-    return (gain.sum(1) - gain.max(1)).argmax(0)
-
-
 def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFrame, L_frag,
               chunks_of, p_unknown, H_frag=None, taus=DEFAULT_TAUS, temps=DEFAULT_TEMPS,
               lookalike_dist=0.15, decidable_bf=3.0, etas=DEFAULT_ETAS, lams=DEFAULT_LAMS,
-              allow_sharpening=False, n_sites_frag=None, leave_out=None, log=print, features=frozenset(),
-              tau_support="all",              **model_kw):
+              allow_sharpening=False, n_sites_frag=None, leave_out=None, community_only=False, log=print,
+              **model_kw):
     """chunks_of[i]: host chunks fragment i overlaps (to check its label); leave_out[i]: chunks removed
     from its bin's profile when scoring it (default chunks_of; the pipeline passes the whole source
-    contig). features: see FEATURES (empty = the calibration of 0.10). The result's "fragment_fit" refits
-    the temperature and the unknown model for another prior and reports on the deployed posteriors."""
-    features = frozenset(features)
+    contig). The calibration of 0.10 with the relatives test's SE over bins (since 0.11.1). The result's
+    "fragment_fit" refits the temperature and the unknown model for another prior and reports on the deployed
+    posteriors. Fragments from chunks the robust model calls foreign to their bin are left out of every tau fit
+    (keeping them collapsed inclusion through the temperature: dev log D59).
+
+    community_only (option E, the default of pipeline.run since 0.12): when the 2-SE switch chooses an unknown
+    model with relatives, it is replaced here by the best community-only row (the row the switch falls back to),
+    before the diagnostic tables (summary, reliability, temperature by length, assignability, the fragments'
+    extra columns) and the log line are made, so that they describe the model the decisions use. The result's
+    "switch" holds what the switch chose (eta, lam, temperature); "fitted_temperature" is then the community-only
+    model's best temperature before the never-sharpen rule. False (the deprecated --relatives switch and direct
+    callers): the switch's choice is used, as in 0.11.1."""
     fbin = frags["bin_idx"].to_numpy()
     H = n_bins
     leave_out = chunks_of if leave_out is None else leave_out
@@ -667,84 +512,33 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
                            lp_out=spare.pop() if spare else None)
 
     base = next((k for k, t in enumerate(taus) if grid.is_point(t)), len(taus) - 1)
-    if "common-tau" not in features:
-        tau_rows, best, warm, group_ll, group_ll_bin = [], None, {}, [], []
-        for tau in taus:
-            model = fit(tau)
-            warm = {"init_w": model.w, "init_pi": model.raw_pi}  # not the model: at most two are held at once
-            sc, A_own, keep = own_and_scores(model)
-            ll = float(sc.S[keep, fbin[keep]].sum())
-            group_ll.append(A_own[keep].sum(0))
-            group_ll_bin.append(_by_bin(A_own, keep, fbin, H))
-            tau_rows.append({"tau": float(tau), "label": f"{tau:g}", "loo_loglik": ll, "n_fragments": int(keep.sum())})
-            log(f"  tau={tau:>8g}  LOO log-lik={ll:.1f}")
-            if best is None or ll > best[0]:
-                best = (ll, tau, sc, A_own, model, keep)
-            del model
-        # per-group tau: each group's own leave-one-out term is maximised separately (groups with
-        # intermediate, variable methylation need a finite tau; groups at 0 or 1 an infinite one)
-        group_ll = np.array(group_ll)  # [n_taus, M]
-        pick = _pick_tau(group_ll, group_ll_bin, base, tau_support)
-        tau_g = np.array([taus[k] for k in pick], dtype=float)
-        if len(np.unique(tau_g)) > 1:
-            model = fit(tau_g)
-            sc, A_own, keep_g = own_and_scores(model)
-            ll = float(sc.S[keep_g, fbin[keep_g]].sum())
-            tau_rows.append({"tau": float("nan"), "label": "per-group", "loo_loglik": ll, "n_fragments": int(keep_g.sum())})
-            log(f"  tau=per-group ({', '.join(f'{int((tau_g == t).sum())} groups at {t:g}' for t in np.unique(tau_g))})"
-                f"  LOO log-lik={ll:.1f}")
-            if ll > best[0]:
-                best = (ll, tau_g, sc, A_own, model, keep_g)
-            del model
-    else:
-        # every tau is scored on the same fragments: those no fit's robust weights call foreign. Each fit
-        # drops the fragments it finds hardest (a large tau calls more chunks foreign), so totals over each
-        # fit's own kept set favour large tau (ZymoFecal: tau = inf kept 2324 fragments, tau = 3 kept 2510,
-        # and the 186 extra fragments were worth about as much log-likelihood as the whole spread between
-        # taus; mono_train_1: 5,000 log units appear between tau = 100 and 300 from two fragments).
-        tau_rows, warm, own_ll, own_A, keeps = [], {}, [], [], []
-        held = None
-        for k, tau in enumerate(taus):
-            model = fit(tau)
-            warm = {"init_w": model.w, "init_pi": model.raw_pi}
-            sc, A_own, keep = own_and_scores(model)
-            own_ll.append(sc.S[np.arange(len(fbin)), fbin].copy())
-            own_A.append(A_own.astype(np.float32))
-            keeps.append(keep)
-            held = (k, sc, A_own, model)
-            del model, sc, A_own
-        common, lls = loglik_on_common(own_ll, keeps)
-        for tau, ll, keep in zip(taus, lls, keeps):
-            tau_rows.append({"tau": float(tau), "label": f"{tau:g}", "loo_loglik": ll, "n_fragments": int(common.sum()),
-                             "n_kept_by_this_fit": int(keep.sum())})
-            log(f"  tau={tau:>8g}  LOO log-lik={ll:.1f} ({int(common.sum())} common fragments; this fit keeps {int(keep.sum())})")
-        k_best = int(np.argmax(lls))
-        if held[0] == k_best:
-            _, sc, A_own, model = held
-        else:
-            model = fit(taus[k_best])
-            sc, A_own, _ = own_and_scores(model)
-        del held
-        best = (lls[k_best], taus[k_best], sc, A_own, model, common)
-        del sc, A_own, model
-        group_ll = np.array([A[common].sum(0, dtype=np.float64) for A in own_A])  # [n_taus, M]
-        group_ll_bin = [_by_bin(A, common, fbin, H) for A in own_A] if tau_support != "all" else None
-        del own_A
-        pick = _pick_tau(group_ll, group_ll_bin, base, tau_support)
-        tau_g = np.array([taus[k] for k in pick], dtype=float)
-        if len(np.unique(tau_g)) > 1:
-            model = fit(tau_g)
-            sc, A_own, keep_g = own_and_scores(model)
-            both = common & keep_g
-            ll = float(sc.S[both, fbin[both]].sum())
-            ll_single = float(own_ll[k_best][both].sum())
-            tau_rows.append({"tau": float("nan"), "label": "per-group", "loo_loglik": ll, "n_fragments": int(both.sum()),
-                             "n_kept_by_this_fit": int(keep_g.sum())})
-            log(f"  tau=per-group ({', '.join(f'{int((tau_g == t).sum())} groups at {t:g}' for t in np.unique(tau_g))})"
-                f"  LOO log-lik={ll:.1f} vs {ll_single:.1f} for tau={taus[k_best]:g} on the same {int(both.sum())} fragments")
-            if ll > ll_single:
-                best = (ll, tau_g, sc, A_own, model, both)
-            del model
+    tau_rows, best, warm, group_ll = [], None, {}, []
+    for tau in taus:
+        model = fit(tau)
+        warm = {"init_w": model.w, "init_pi": model.raw_pi}  # not the model: at most two are held at once
+        sc, A_own, keep = own_and_scores(model)
+        ll = float(sc.S[keep, fbin[keep]].sum())
+        group_ll.append(A_own[keep].sum(0))
+        tau_rows.append({"tau": float(tau), "label": f"{tau:g}", "loo_loglik": ll, "n_fragments": int(keep.sum())})
+        log(f"  tau={tau:>8g}  LOO log-lik={ll:.1f}")
+        if best is None or ll > best[0]:
+            best = (ll, tau, sc, A_own, model, keep)
+        del model
+    # per-group tau: each group's own leave-one-out term is maximised separately (groups with
+    # intermediate, variable methylation need a finite tau; groups at 0 or 1 an infinite one)
+    group_ll = np.array(group_ll)  # [n_taus, M]
+    pick = group_ll.argmax(0)
+    tau_g = np.array([taus[k] for k in pick], dtype=float)
+    if len(np.unique(tau_g)) > 1:
+        model = fit(tau_g)
+        sc, A_own, keep_g = own_and_scores(model)
+        ll = float(sc.S[keep_g, fbin[keep_g]].sum())
+        tau_rows.append({"tau": float("nan"), "label": "per-group", "loo_loglik": ll, "n_fragments": int(keep_g.sum())})
+        log(f"  tau=per-group ({', '.join(f'{int((tau_g == t).sum())} groups at {t:g}' for t in np.unique(tau_g))})"
+            f"  LOO log-lik={ll:.1f}")
+        if ll > best[0]:
+            best = (ll, tau_g, sc, A_own, model, keep_g)
+        del model
     spare.clear()  # no fit follows: the reused table is freed as before
     tau_groups = pl.DataFrame({"group": np.arange(len(tau_g)), "tau": tau_g,
                                "loo_loglik_gain_vs_no_variation": group_ll[pick, np.arange(len(pick))] - group_ll[base]})
@@ -803,14 +597,12 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
     has_sites = np.abs(L_frag[rest]).max(-1) > 0 if len(rest) else np.zeros((0, L_frag.shape[1]), bool)
     difference = np.where(has_sites, np.maximum(np.maximum(lo95 - pb, pb - hi95), 0.0), 0.0).max(1) if len(rest) else np.zeros(0)
     distinct_rest = np.zeros(len(rest), bool)
-    # full-test-b: D12 left the undecidable fragments out of test B because, under the objective of 0.10,
-    # they forced the temperature up (3.7); with a proper objective they cost what they should
-    distinct_rest[np.searchsorted(rest, kidx)] = True if "full-test-b" in features else distinct
+    distinct_rest[np.searchsorted(rest, kidx)] = distinct
     ff = FragmentFit(S=sc_best.S[rest], fbin=fbin_all[rest], Su_comm=sc_best.Su_comm[rest],
                      R={eta: relatives(eta, rest) for eta in etas} if H > 1 else {},
                      kept=keep[rest], distinct=distinct_rest, length=frags["length"].to_numpy()[rest],
                      n_sites=(n_sites_frag[rest] if n_sites_frag is not None else np.zeros(len(rest))),
-                     difference=difference, contig=frags["contig"].to_numpy()[rest], features=features, temps=tuple(temps), etas=tuple(etas), lams=tuple(lams),
+                     difference=difference, contig=frags["contig"].to_numpy()[rest], features=frozenset(DEFAULT), temps=tuple(temps), etas=tuple(etas), lams=tuple(lams),
                      allow_sharpening=allow_sharpening)
 
     def fragment_losses(T, Su_a, Su_b):
@@ -830,81 +622,87 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         return la.mean() + lb.mean(), la.mean(), lb.mean()
 
     flen = frags_k["length"].to_numpy()
-    if not features - {"common-tau", "em-priors", "deployed-unknown", "bin-parsimony", "tempered-bin-prior"}:  # no feature that touches the temperature / unknown-model fit
-        # the calibration of 0.10: prior p_unknown as passed (0.1), tests A and B weighted 1 : 1, the unknown's
-        # mixture summed before tempering
-        temp_rows, Su_by = [], {}
-        for eta in etas:
-            R = relatives(eta) if H > 1 else None
-            for lam in lams:
-                if R is None and lam < 1:
-                    continue
-                Su_a = unknown_score(R, Su_comm, eta, lam) if R is not None else Su_comm
-                Su_b = unknown_score(R, Su_comm, eta, lam, exclude=fbin) if R is not None else Su_comm
-                Su_by[(eta, lam)] = (Su_a, Su_b)
-                for T in temps:
-                    temp_rows.append(dict(zip(("eta", "lam", "temperature", "log_loss", "log_loss_A", "log_loss_B_distinct"),
-                                              (eta, lam, T, *logloss(T, Su_a, Su_b)))))
-        fit = min(temp_rows, key=lambda r: r["log_loss"])
-        fitted_temperature = fit["temperature"]
-        # Never sharpen: pseudo-contigs are cut from binned contigs, which are easier to place than real
-        # unbinned contigs; they can reveal overconfidence but not justify more confidence.
-        if not allow_sharpening:
-            fit = min((r for r in temp_rows if r["temperature"] >= 1.0), key=lambda r: r["log_loss"])
-        # Parsimony: the community-only unknown (lam = 1) is kept unless a model with relatives fits
-        # better by more than chance. The choice between them rests on ~1% of the log loss (ZymoFecal:
-        # 1.641 vs 1.661), trading worse test A for better test B, and flipped with unrelated changes;
-        # the flexible model then absorbed nearly all unbinned contigs (p_unknown 0.98-0.995; inclusions
-        # 1-16 of the 380 that Hi-C places, against 42 of 42 correct with lam = 1).
-        simple = [r for r in temp_rows if r["lam"] >= 1 and (allow_sharpening or r["temperature"] >= 1.0)]
-        if fit["lam"] < 1 and simple:
-            alt = min(simple, key=lambda r: r["log_loss"])
-            la1, lb1 = fragment_losses(fit["temperature"], *Su_by[(fit["eta"], fit["lam"])])
-            la0, lb0 = fragment_losses(alt["temperature"], *Su_by[(alt["eta"], alt["lam"])])
-            dA, dB = la0 - la1, lb0 - lb1   # > 0: the flexible model is better on that fragment
-            gain = dA.mean() + (dB.mean() if len(dB) else 0.0)
-            brng = np.random.default_rng(0)
-            boots = [dA[brng.integers(0, len(dA), len(dA))].mean()
-                     + (dB[brng.integers(0, len(dB), len(dB))].mean() if len(dB) else 0.0) for _ in range(200)]
-            se = float(np.std(boots))
-            if "bin-parsimony" in features:
-                se = clustered_se(dA, dB, fbin, fbin[distinct] if len(dB) else fbin[:0])
+    relatives_test = None   # the relatives statistic (_relatives_statistic); None: no model with relatives to test
+    # the calibration of 0.10: prior p_unknown as passed (0.1), tests A and B weighted 1 : 1, the unknown's
+    # mixture summed before tempering; the relatives test with its SE over bins (0.11.1)
+    temp_rows, Su_by = [], {}
+    for eta in etas:
+        R = relatives(eta) if H > 1 else None
+        for lam in lams:
+            if R is None and lam < 1:
+                continue
+            Su_a = unknown_score(R, Su_comm, eta, lam) if R is not None else Su_comm
+            Su_b = unknown_score(R, Su_comm, eta, lam, exclude=fbin) if R is not None else Su_comm
+            Su_by[(eta, lam)] = (Su_a, Su_b)
+            for T in temps:
+                temp_rows.append(dict(zip(("eta", "lam", "temperature", "log_loss", "log_loss_A", "log_loss_B_distinct"),
+                                          (eta, lam, T, *logloss(T, Su_a, Su_b)))))
+    fit = min(temp_rows, key=lambda r: r["log_loss"])
+    fitted_temperature = fit["temperature"]
+    # Never sharpen: pseudo-contigs are cut from binned contigs, which are easier to place than real
+    # unbinned contigs; they can reveal overconfidence but not justify more confidence.
+    if not allow_sharpening:
+        fit = min((r for r in temp_rows if r["temperature"] >= 1.0), key=lambda r: r["log_loss"])
+    # Parsimony: the community-only unknown (lam = 1) is kept unless a model with relatives fits
+    # better by more than chance. The choice between them rests on ~1% of the log loss (ZymoFecal:
+    # 1.641 vs 1.661), trading worse test A for better test B, and flipped with unrelated changes;
+    # the flexible model then absorbed nearly all unbinned contigs (p_unknown 0.98-0.995; inclusions
+    # 1-16 of the 380 that Hi-C places, against 42 of 42 correct with lam = 1).
+    simple = [r for r in temp_rows if r["lam"] >= 1 and (allow_sharpening or r["temperature"] >= 1.0)]
+    flexible = [r for r in temp_rows if r["lam"] < 1 and (allow_sharpening or r["temperature"] >= 1.0)]
+    if simple and flexible:
+        # the relatives test (the 2-SE switch of 0.11): best row with relatives against the best community-only
+        # row. Computed on every run, also when community only fits best (gain <= 0 then), so that the statistic
+        # can be reported as a number (relatives_statistic) whatever the unknown model used
+        alt = min(simple, key=lambda r: r["log_loss"])
+        rel = fit if fit["lam"] < 1 else min(flexible, key=lambda r: r["log_loss"])
+        la1, lb1 = fragment_losses(rel["temperature"], *Su_by[(rel["eta"], rel["lam"])])
+        la0, lb0 = fragment_losses(alt["temperature"], *Su_by[(alt["eta"], alt["lam"])])
+        dA, dB = la0 - la1, lb0 - lb1   # > 0: the flexible model is better on that fragment
+        gain = dA.mean() + (dB.mean() if len(dB) else 0.0)
+        se = clustered_se(dA, dB, fbin, fbin[distinct] if len(dB) else fbin[:0])   # over bins (bin-parsimony)
+        relatives_test = _relatives_statistic(gain, se, rel, alt, fit["lam"] < 1, True)
+        if fit["lam"] < 1:
             keep_flexible = gain > 2 * se
             log(f"  unknown model: relatives (eta={fit['eta']:g}, lam={fit['lam']:g}) vs community only: log-loss gain "
-                f"{gain:.4f} +- {se:.4f}{' (over bins)' if 'bin-parsimony' in features else ''} -> "
+                f"{gain:.4f} +- {se:.4f} (over bins) -> "
                 f"{'relatives' if keep_flexible else 'community only (not significant)'}")
             if not keep_flexible:
                 fit = alt
-        temperature, eta, lam = fit["temperature"], fit["eta"], fit["lam"]
-        Su, Su_b = Su_by[(eta, lam)]
-        # diagnostic: the temperature each fragment length would want. A temperature that rises with
-        # length points to correlated sites (evidence over-counted more, the more sites a unit has)
-        by_length = []
-        for Lf in sorted(set(flen.tolist())):
-            sel = flen == Lf
-
-            def ll_len(T):
-                Pa = posterior(S[sel], Su[sel], p_unknown, T)
-                la = -np.log(np.maximum(Pa[np.arange(sel.sum()), truth_a[sel]], 1e-12)).mean()
-                sd = sel & distinct
-                if not sd.any():
-                    return la
-                Pb = posterior(S[sd], Su_b[sd], p_unknown, T, host_mask=mask_b[sd])
-                return la - np.log(np.maximum(Pb[:, H], 1e-12)).mean()
-            best_T = min(temps, key=ll_len)
-            by_length.append({"length": int(Lf), "fragments": int(sel.sum()), "temperature": best_T,
-                              "median_sites": float(np.median(n_sites_frag[kidx][sel])) if n_sites_frag is not None else float("nan")})
-        first_fit = {"temperature": float(temperature), "eta": float(eta), "lam": float(lam), "curve": None,
-                     "fitted_temperature": float(fitted_temperature), "priors": (p_unknown,)}
-    else:
-        first_fit = ff.fit(p_unknown, log=log)
-        temperature, eta, lam = first_fit["temperature"], first_fit["eta"], first_fit["lam"]
-        fitted_temperature = first_fit["fitted_temperature"]
-        temp_rows, by_length = first_fit["temperature_fit"], first_fit["by_length"]
-    # the best community-only unknown model (lam = 1) at temperatures that may be used: the fallback when an unknown
-    # model with relatives fails at its deployed prior (feature deployed-unknown, checked in pipeline.run)
+    switch = {"eta": float(fit["eta"]), "lam": float(fit["lam"]), "temperature": float(fit["temperature"])}
+    # the best community-only unknown model (lam = 1) at temperatures that may be used: the row the 2-SE rule
+    # falls back to, and the model option E uses on every run
     simple_rows = [r for r in temp_rows if r["lam"] >= 1 and (allow_sharpening or r["temperature"] >= 1.0)]
     community = min(simple_rows, key=lambda r: r["log_loss"]) if simple_rows else None
+    if community_only and fit["lam"] < 1:
+        if community is None:
+            raise ValueError("--relatives community-only: the calibration has no community-only fit")
+        fit = community
+        fitted_temperature = min((r for r in temp_rows if r["lam"] >= 1), key=lambda r: r["log_loss"])["temperature"]
+        log(f"  unknown model forced to community only (--relatives community-only): the switch chose relatives "
+            f"(eta={switch['eta']:g}, lam={switch['lam']:g}, T={switch['temperature']:g}); community only at "
+            f"T={community['temperature']:g}")
+    temperature, eta, lam = fit["temperature"], fit["eta"], fit["lam"]
+    Su, Su_b = Su_by[(eta, lam)]
+    # diagnostic: the temperature each fragment length would want. A temperature that rises with
+    # length points to correlated sites (evidence over-counted more, the more sites a unit has)
+    by_length = []
+    for Lf in sorted(set(flen.tolist())):
+        sel = flen == Lf
+
+        def ll_len(T):
+            Pa = posterior(S[sel], Su[sel], p_unknown, T)
+            la = -np.log(np.maximum(Pa[np.arange(sel.sum()), truth_a[sel]], 1e-12)).mean()
+            sd = sel & distinct
+            if not sd.any():
+                return la
+            Pb = posterior(S[sd], Su_b[sd], p_unknown, T, host_mask=mask_b[sd])
+            return la - np.log(np.maximum(Pb[:, H], 1e-12)).mean()
+        best_T = min(temps, key=ll_len)
+        by_length.append({"length": int(Lf), "fragments": int(sel.sum()), "temperature": best_T,
+                          "median_sites": float(np.median(n_sites_frag[kidx][sel])) if n_sites_frag is not None else float("nan")})
+    first_fit = {"temperature": float(temperature), "eta": float(eta), "lam": float(lam), "curve": None,
+                 "fitted_temperature": float(fitted_temperature), "priors": (p_unknown,)}
     log(f"  unknown model: eta={eta:g}, lam={lam:g}; temperature fitted {fitted_temperature:g} -> used {temperature:g}")
     log("  temperature by fragment length: " + ", ".join(f"{r['length'] // 1000} kb {r['temperature']:g}" for r in by_length))
 
@@ -969,7 +767,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             "reliability": reliability, "assignability": pl.DataFrame(assign_rows),
             "fragments": frags.with_columns(pl.Series("foreign_excluded", ~keep), **{
                 k: pl.Series(_expand(v, kidx, len(keep))) for k, v in frag_extra.items()}), "model": best_model,
-            "fragment_fit": ff, "fit": first_fit, "report": report,
+            "fragment_fit": ff, "fit": first_fit, "report": report, "relatives_test": relatives_test, "switch": switch,
             "community": None if community is None else {"temperature": float(community["temperature"]),
                                                           "eta": float(community["eta"]), "lam": 1.0}}
 
@@ -978,3 +776,241 @@ def _expand(values, idx, n):
     out = np.full(n, np.nan)
     out[idx] = values
     return out
+
+
+# ------------------------------------------------------------------------------------------------------------------
+# Calibration core (mission WP3, dev log proposals/2026-11-12/wp3_designs): one function from the calibration pieces
+# to the decisions before the redundancy check, called by pipeline.run and, with resampled pieces, by the R4 bootstrap.
+# Every option's default is the behaviour of 0.11.1.
+
+T_MIN = 1.082          # smallest temperature used: the grid's smallest value >= 1 (never sharpen, D7)
+N_REF_SITES = 1000.0   # reference site count of the temperature law (log T = a + b log(n / N_REF_SITES))
+LAW_T_MAX = 100.0      # upper bound of the temperature law's search at the reference site count (exp(a))
+
+
+@dataclass(frozen=True)
+class CoreOptions:
+    """The decision-stage options of the calibration (CLI --unknown-share, --temperature-law, --evidence-temperature,
+    --relatives). The WP3 designs that lost were removed in 0.12 (U12, D63): --tau-select inf and --npmle-start cold
+    (candidate 1, D59), --relatives per-bin (candidate 2, D59) and slot with its --slot-* options (candidate 3, D60),
+    and the temper-then-mix order of the removed calibration features."""
+    unknown_share: str = "deployed"       # 'deployed' (EM at the deployed T, 0.11) | 't1' (EM at T = 1)
+    temperature_law: str = "grid"         # 'grid' (one T from the 31-point grid, 0.11) | 'sites'
+    evidence_temperature: str = "median"  # 'median' (0.11) | 'contig' (each contig's own T in the evidence cut-off)
+    relatives: str = "switch"             # 'switch' (one model for all bins, 2-SE rule, 0.11; deprecated, ablation)
+    #                                       | 'community-only' (the switch removed: lam = 1 always; option E)
+
+    def __post_init__(self):
+        for name, ok in (("unknown_share", ("deployed", "t1")), ("temperature_law", ("grid", "sites")),
+                         ("evidence_temperature", ("median", "contig")), ("relatives", ("switch", "community-only"))):
+            if getattr(self, name) not in ok:
+                raise ValueError(f"unknown {name} {getattr(self, name)!r}; choose from {', '.join(ok)}")
+
+    @property
+    def decisions_default(self) -> bool:
+        """True when the decision stage is that of 0.11.1 (the upstream options may still differ)."""
+        return ((self.unknown_share, self.temperature_law, self.evidence_temperature, self.relatives)
+                == ("deployed", "grid", "median", "switch"))
+
+
+@dataclass
+class SitesLaw:
+    """Temperature as a smooth function of a unit's number of motif sites: T(n) = max(t_min, exp(a + b log(n / n_ref))),
+    b in [0, 1]. On ZymoFecal (development) the best temperature rises from 3.1 at 2 kb to 13.8 at 500 kb and this
+    form beats one temperature by 0.19 nats per piece, 5.6 SE over bins, cross-validated (dev log
+    model_diagnostics.md section 4); on the look-alikes b is near 0."""
+    a: float
+    b: float
+    n_ref: float = N_REF_SITES
+    t_min: float = T_MIN
+
+    def __call__(self, n_sites) -> np.ndarray:
+        x = np.log(np.maximum(np.asarray(n_sites, float), 1.0) / self.n_ref)
+        return np.maximum(self.t_min, np.exp(self.a + self.b * x))
+
+    def table(self) -> list[dict]:
+        return [{"law": "sites", "a": self.a, "b": self.b, "n_ref": self.n_ref, "t_min": self.t_min,
+                 **{f"T_at_{int(n)}_sites": float(self(n)) for n in (300, 1000, 3000, 10000, 30000)}}]
+
+
+def piece_losses(ff: FragmentFit, T_kept, eta, lam, p: float):
+    """FragmentFit.losses with one temperature per kept piece (T_kept [n_kept] or scalar): the same terms."""
+    k = np.flatnonzero(ff.kept)
+    T = np.broadcast_to(np.asarray(T_kept, float), (len(k),)).astype(float)
+    Z = ff.S[k] / T[:, None]
+    rows = np.arange(len(k))
+    own = Z[rows, ff.fbin[k]].copy()
+    all_ = logsumexp(Z, axis=1)
+    Z[rows, ff.fbin[k]] = -np.inf
+    others = logsumexp(Z, axis=1) if ff.H > 1 else np.full(len(k), -np.inf)
+    zu_a, zu_b = ff._unknown(T, eta, lam, k), ff._unknown(T, eta, lam, k, exclude_own=True)
+    lpb, lpu = np.log1p(-p) - log_bins(ff.H, T), np.log(p)
+    la = -(lpb + own - np.logaddexp(lpb + all_, lpu + zu_a))
+    d = ff.distinct[k]
+    lpb1 = np.log1p(-p) - log_bins(ff.H, T[d])
+    lb = -(lpu + zu_b[d] - np.logaddexp(lpb1 + others[d], lpu + zu_b[d]))
+    cap = -np.log(1e-12)
+    return np.minimum(la, cap), np.minimum(lb, cap)
+
+
+def fit_sites_law(ff: FragmentFit, eta, lam, priors, t_start: float, log=print) -> SitesLaw:
+    """(a, b) of the temperature law minimising the calibration objective (FragmentFit.objective with one T per
+    piece) under the given unknown model. b is profiled on a grid in [0, 1] with a bounded 1-D search for a, then
+    polished by L-BFGS-B; deterministic (no random start)."""
+    from scipy.optimize import minimize, minimize_scalar
+    k = np.flatnonzero(ff.kept)
+    x = np.log(np.maximum(ff.n_sites[k], 1.0) / N_REF_SITES)
+
+    def obj(a, b):
+        T = np.maximum(T_MIN, np.exp(a + b * x))
+        la = lb = 0.0
+        for p, wa, wb in priors:
+            pa, pb = piece_losses(ff, T, eta, lam, p)
+            la, lb = la + wa * pa, lb + wb * pb
+        return float(np.mean(la) + (np.mean(lb) if np.size(lb) else 0.0))
+
+    lo, hi = np.log(T_MIN) - 3.0, np.log(LAW_T_MAX)
+    best = None
+    for b in np.linspace(0.0, 1.0, 11):
+        r = minimize_scalar(lambda a: obj(a, b), bounds=(lo, hi), method="bounded", options={"xatol": 1e-4})
+        if best is None or r.fun < best[0]:
+            best = (float(r.fun), float(r.x), float(b))
+    r = minimize(lambda v: obj(v[0], v[1]), x0=[best[1], best[2]], method="L-BFGS-B", bounds=[(lo, hi), (0.0, 1.0)],
+                 options={"maxiter": 200})
+    a, b, f = (float(r.x[0]), float(r.x[1]), float(r.fun)) if r.fun <= best[0] else (best[1], best[2], best[0])
+    law = SitesLaw(a, b)
+    log(f"  temperature law: log T = {a:.4f} + {b:.4f} log(sites / {N_REF_SITES:g}), T >= {T_MIN:g} "
+        f"(T at 300 / 3,000 / 30,000 sites: {law(300):.3g} / {law(3000):.3g} / {law(30000):.3g}); objective {f:.5f} "
+        f"against {obj(np.log(max(t_start, T_MIN)), 0.0):.5f} at the grid temperature {t_start:g}")
+    return law
+
+
+@dataclass
+class ContigScores:
+    """What the decisions read; fixed within a bootstrap. R: eta -> [N, H] relative-of-bin scores (only the etas
+    available); Su: the unknown's score as the run mixed it (mix-then-temper at the model's eta, lam), used as it is
+    on the 0.11 path."""
+    S: np.ndarray
+    Su_comm: np.ndarray
+    R: dict
+    given: np.ndarray
+    testable: np.ndarray
+    decidable: np.ndarray
+    n_sites: np.ndarray
+    Su: np.ndarray | None = None
+    Su_eta_lam: tuple | None = None   # (eta, lam) Su was mixed with
+
+
+@dataclass
+class CalibrationResult:
+    fit: dict                 # temperature (scalar, the grid value or the law's median over contigs), eta, lam, curve
+    T_contig: object          # temperature used in the decisions: scalar or [N]
+    p_unknown: float          # deployed unknown share
+    p_unknown_t1: float | None
+    refinement: object        # refine.Refinement (flags and inclusions before the redundancy check)
+    law: SitesLaw | None = None
+
+    @property
+    def inclusions(self) -> int:
+        r = self.refinement
+        return int(((r.include_bin >= 0) & (self.contigs_given < 0)).sum())
+
+    contigs_given: np.ndarray | None = None
+
+
+def _su_for(contigs: ContigScores, eta, lam):
+    """Mix-then-temper unknown score at T = 1 (0.11 order); None when R at eta is not available."""
+    if lam >= 1 or eta is None:
+        return contigs.Su_comm
+    if contigs.Su is not None and contigs.Su_eta_lam == (eta, lam):
+        return contigs.Su
+    R = contigs.R.get(eta)
+    return None if R is None else unknown_score(R, contigs.Su_comm, eta, lam)
+
+
+def community_only(fit: dict, allow_sharpening: bool = False, log=print) -> dict:
+    """--relatives community-only (WP3, option E of question U13): the unknown-model switch removed. The fit of
+    FragmentFit.fit is replaced by its best community-only row (lam = 1) at a temperature that may be used, the row
+    the 2-SE rule falls back to when relatives are not significant; a fit that already chose community only is
+    returned unchanged. The relatives test itself is still run and logged by the fit (report only)."""
+    if fit["lam"] >= 1:
+        return fit
+    simple = [r for r in fit["temperature_fit"] if r["lam"] >= 1 and (allow_sharpening or r["temperature"] >= 1.0)]
+    alt = min(simple, key=lambda r: r["log_loss"])
+    log(f"  unknown model forced to community only (--relatives community-only): the switch chose relatives "
+        f"(eta={fit['eta']:g}, lam={fit['lam']:g}, T={fit['temperature']:g}); community only at T={alt['temperature']:g}")
+    return dict(fit, temperature=float(alt["temperature"]), eta=float(alt["eta"]), lam=1.0, curve=None,
+                switch_choice={"eta": fit["eta"], "lam": fit["lam"], "temperature": fit["temperature"]})
+
+
+def calibrate_decisions(ff: FragmentFit | None, contigs: ContigScores, rules: dict, options: CoreOptions = CoreOptions(),
+                        fit: dict | None = None, p_cal: float = 0.1, share_rows=None, log=print) -> CalibrationResult:
+    """Calibration pieces in; model choice, temperature (law), unknown share and the decisions before the redundancy
+    check out.
+
+    ff: the calibration pieces (FragmentFit; the R4 bootstrap passes a copy resampled by source bins). fit: the
+    unknown-model choice and grid temperature already made by calibrate() (the pipeline passes it); None refits them
+    on ff exactly as FragmentFit.fit does at the reference prior p_cal (unknown-model switch with the 2-SE rule over
+    bins, T on the grid; community only under relatives 'community-only'). Then:
+      temperature_law 'sites': the law is fitted on ff under the chosen unknown model (the T fit is redone because
+        the unknown term moves T: ZymoFecal 5.024 community only, 1.715 with relatives);
+      unknown_share 't1': p_unknown is the EM over the decided unbinned contigs at T = 1 (bins (1 - p) / H against
+        the unknown at T = 1; at T = 1 the two orders of tempering and mixing agree), then the decisions use that p
+        with the proper, untempered prior at each contig's temperature. 'deployed' (0.11): the EM runs inside refine
+        at the deployed temperature, where the untempered 1/H prior makes p rise with T (0.41 at T 1, 0.69 at 5.02 on
+        ZymoFecal, development).
+    share_rows: rows of the unbinned contigs for the EM (the bootstrap resamples them); None = all decided ones.
+    rules: refine() options (contamination_threshold, include_threshold, methylome_difference, ...; p_unknown when
+    the user fixed it).
+    """
+    from .refine import em_weight, refine
+    rules = dict(rules)
+    p_user = rules.pop("p_unknown", None)
+    thr_c = rules.pop("contamination_threshold", 0.5)
+    thr_i = rules.pop("include_threshold", 0.9)
+    if fit is None:
+        if ff is None:
+            raise ValueError("calibrate_decisions: no calibration pieces and no fit")
+        fit = ff.fit(p_cal, log=log)
+        if options.relatives == "community-only":
+            fit = community_only(fit, ff.allow_sharpening, log=log)
+    elif options.relatives == "community-only" and fit["lam"] < 1:
+        raise ValueError("--relatives community-only: the fit passed in has relatives (lam < 1)")
+    fit = dict(fit)
+    eta, lam = fit["eta"], fit["lam"]
+    user_T = fit.get("user_temperature")
+    law = None
+    if options.temperature_law == "sites" and user_T is None:
+        if ff is None:
+            raise ValueError("--temperature-law sites needs the calibration")
+        law = fit_sites_law(ff, eta, lam, ff.priors_for(p_cal), fit["temperature"], log=log)
+        fit["curve"] = law
+    T = law(contigs.n_sites) if law is not None else (fit["curve"](contigs.n_sites) if fit.get("curve") is not None
+                                                      else fit["temperature"])
+    Su1 = _su_for(contigs, eta, lam)
+    if Su1 is None:
+        raise ValueError(f"calibrate_decisions: no contig scores for relatives at eta {eta:g}")
+    zu_of = lambda Tx, rows=slice(None): Su1[rows] / Tx     # mix-then-temper, as 0.11
+    p_t1 = None
+    p_fixed = p_user
+    prior = rules.get("p_unknown_prior", (1.0, 1.0))
+    if options.unknown_share == "t1" and p_user is None:
+        unb = np.flatnonzero((contigs.given < 0) & contigs.decidable) if share_rows is None else np.asarray(share_rows)
+        l_bins = logsumexp(contigs.S[unb], axis=1) - np.log(contigs.S.shape[1])
+        p_t1 = float(em_weight(l_bins, Su1[unb], *prior)[0])
+        p_fixed = p_t1
+        log(f"  unknown share by the EM at T = 1: {p_t1:.4f}")
+    elif share_rows is not None and p_user is None:
+        unb = np.asarray(share_rows)
+        Tu = T[unb] if np.ndim(T) else T
+        l_bins = logsumexp(contigs.S[unb] / (Tu[:, None] if np.ndim(Tu) else Tu), axis=1) - np.log(contigs.S.shape[1])
+        p_fixed = float(em_weight(l_bins, zu_of(Tu, unb), *prior)[0])
+    ref = refine(contigs.S, Su1, contigs.given, contigs.testable, T, thr_c, thr_i, p_unknown=p_fixed,
+                 decidable=contigs.decidable, **rules)
+    if law is not None:
+        fit["temperature"] = float(np.median(T))
+    res = CalibrationResult(fit=fit, T_contig=T, p_unknown=ref.p_unknown, p_unknown_t1=p_t1, refinement=ref, law=law,
+                            contigs_given=contigs.given)
+    return res
+
+

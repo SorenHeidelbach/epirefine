@@ -20,20 +20,28 @@ def _params(run) -> dict:
 def test_params_record_code_libraries_kernels_threads_seeds(base_run):
     import numpy, polars, scipy
     p = _params(base_run)
-    if (REPO / ".git").exists():
+    import epirefine
+    # the commit is the checkout's only when the package runs from it (an editable install), not from an installed wheel
+    if (REPO / ".git").exists() and Path(epirefine.__file__).resolve().parents[1] == REPO / "src":
         head = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
         assert p["commit"]["source"] == "git" and p["commit"]["commit"] == head
         assert isinstance(p["commit"]["dirty"], bool)
     lib = p["libraries"]
     assert (lib["numpy"], lib["scipy"], lib["polars"]) == (numpy.__version__, scipy.__version__, polars.__version__)
     k = p["kernels"]
-    try:
-        import epirefine_rs  # noqa: F401
-        assert k["installed"] and lib["epirefine_rs"] and k["version"] and len(k["module_sha256"]) == 64
-    except ImportError:
-        assert not k["installed"] and not k["used"]
+    from epirefine import _rs as R
+    if R.load()[0] is not None:
+        assert k["available"] and k["cpu_path"] in ("avx2_fma", "generic") and f"cpu:{k['cpu_path']}" in k["features"]
+        assert len(k["module_sha256"]) == 64 and k["api"] >= 1
+    else:
+        assert not k["available"] and not k["used"] and k["reason"].startswith("no compiled extension")
     from epirefine.model import _rs
-    assert k["used"] == (_rs() is not None)
+    assert k["used"] == (_rs() is not None) and (k["reason"] is None) == k["used"]
+    import platform
+    pf = p["platform"]  # the C library decides the last bits of exp and log (B6 review)
+    assert pf["system"] == platform.system() and pf["machine"] == platform.machine()
+    if platform.system() == "Linux" and platform.libc_ver()[0]:
+        assert (pf["libc"], pf["libc_version"]) == platform.libc_ver()
     t = p["threads"]
     assert t["workers"] == 1 and t["cores"] >= 1 and t["model_threads"] >= 1 and "openblas_num_threads" in t
     assert p["seeds"] == {"seed": 1, "calibration_seed": 1, "bootstrap": 0}
@@ -53,7 +61,7 @@ def test_kernels_off_is_recorded(monkeypatch):
     from epirefine.runinfo import kernels
     monkeypatch.setenv("EPIREFINE_RS", "0")
     k = kernels()
-    assert k["used"] is False and k["EPIREFINE_RS"] == "0"
+    assert k["used"] is False and k["EPIREFINE_RS"] == "0" and k["reason"] == "switched off by EPIREFINE_RS=0"
 
 
 def test_rerun_from_params_repeats_the_decisions(community, base_run, tmp_path):
@@ -66,6 +74,10 @@ def test_rerun_from_params_repeats_the_decisions(community, base_run, tmp_path):
     assert run.reused_cache
     assert_same_outputs(base_run.out, run.out, DECISION_FILES + ["calibration/fragments.tsv"])
     a, b = _params(base_run), _params(run)
+    # kernels.ran counts the calls of this run: a rerun from the cache makes no pileup pass
+    ka, kb = a["kernels"].pop("ran"), b["kernels"].pop("ran")
+    assert {k: v for k, v in ka.items() if k != "pileup_reader"} == {k: v for k, v in kb.items() if k != "pileup_reader"}
+    assert "pileup_reader" in ka and "pileup_reader" not in kb
     assert {k for k in set(a) | set(b) if a.get(k) != b.get(k)} <= RUN_SPECIFIC
 
 

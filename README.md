@@ -36,6 +36,12 @@ conda install -c conda-forge -c bioconda epirefine
 
 Python 3.10 or newer; Linux and macOS. Check it works with `epirefine --version`.
 
+The wheels for Linux (x86_64, aarch64; glibc 2.17 or newer, and musl on x86_64) and macOS (Apple silicon and Intel)
+carry compiled kernels, which EpiRefine uses by default. On any other platform pip installs the pure-Python wheel
+and EpiRefine runs its numpy code: the same decisions, more slowly. The log's third line says which code runs
+(`kernels: compiled (...)` or `kernels: numpy (<reason>)`), a run on numpy without being asked says so in a
+warning, and `params.json` records it under `kernels`. `EPIREFINE_RS=0` forces the numpy code.
+
 ## Quick start
 
 You need four files for the sample:
@@ -96,9 +102,9 @@ described in [docs/outputs.md](https://github.com/SorenHeidelbach/epirefine/blob
 
 ## When to trust it
 
-- **Most of its calls are right, though less often on new data than on the data it was developed on.** On six
-  held-out monoculture communities, built from isolates not used during development (version 0.10.1; 0.11.0 gives the
-  same results), 311 of 316 flags (98.4%) were true contaminants and 1,096 of 1,180 placements (92.9%) went into
+- **Most of its calls are right, though less often on new data than on the data it was developed on.** On the six
+  monoculture test and validation communities (spent: they were looked at during development, so they are no longer
+  an unseen evaluation; version 0.10.1; 0.11.0 gives the same results), 311 of 316 flags (98.4%) were true contaminants and 1,096 of 1,180 placements (92.9%) went into
   the right bin: 98.4% in the test set, 89.6% in the validation set, where contigs of genomes without a bin were
   placed into bins with few methylated motifs. It found 311 of 363 planted contaminants (85.7%). On the development
   benchmarks every flag and 99.8% of placements were right, and on the six training communities it found 94.8% of
@@ -106,9 +112,9 @@ described in [docs/outputs.md](https://github.com/SorenHeidelbach/epirefine/blob
 - **It declines rather than guesses.** Contigs below 5x coverage, shorter than 1 kb or without informative
   methylation get no decision. On a complex fecal sample (a development sample) that was 76% of the contigs and 31%
   of the assembled sequence.
-- **Results depend on the motif table.** With some motif tables EpiRefine includes nothing at all; see
-  [known limitations](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/faq.md#known-limitations) for how
-  to recognise it in the log.
+- **Results depend on the motif table**, and on whether unbinned genomes share a bin's methylation (their contigs
+  are then placed in that bin); see
+  [known limitations](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/faq.md#known-limitations).
 - **Methylation cannot separate genomes that methylate the same motifs**, such as very close strains. EpiRefine
   then keeps both bins in its credible set or leaves the contig where it is.
 
@@ -117,7 +123,7 @@ More in the [FAQ](https://github.com/SorenHeidelbach/epirefine/blob/main/docs/fa
 ## Citing
 
 A manuscript is in preparation. Until then, please cite this repository and the version you used
-(`epirefine --version`). EpiRefine builds on [Nanomotif](https://github.com/MicrobialDarkMatter/nanomotif) for
+(`epirefine --version`); `CITATION.cff` holds the citation data (GitHub's "Cite this repository"). EpiRefine builds on [Nanomotif](https://github.com/MicrobialDarkMatter/nanomotif) for
 motif discovery and on [modkit](https://github.com/nanoporetech/modkit) for the pileup.
 
 ## Contributing
@@ -130,6 +136,9 @@ git clone https://github.com/SorenHeidelbach/epirefine.git && cd epirefine
 uv venv && uv pip install -e ".[dev]"
 .venv/bin/pytest -q
 ```
+
+The editable install compiles the kernels in `rust/` and needs a Rust toolchain and a C compiler (with a conda
+toolchain, set `AR=gcc-ar`). `EPIREFINE_RS=0` runs the numpy code in such an install.
 
 Development rules are in [CLAUDE.md](https://github.com/SorenHeidelbach/epirefine/blob/main/CLAUDE.md), the
 benchmark used for every release in `benchmarks/` (results per version in

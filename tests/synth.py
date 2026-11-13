@@ -66,6 +66,16 @@ GENOMES = {
 }
 _CONTIG_LENGTHS = (4_000, 6_000, 9_000, 12_000, 14_000, 18_000, 22_000, 28_000, 35_000, 60_000)
 
+# The community with sister genomes (option E tests): GENOMES plus three binned sisters, each differing from a bin
+# only in one rare motif (a Type I pair or a 6-mer), so a calibration piece whose own bin is removed (test B) is
+# explained better by a relative of its sister than by a random community draw. Here the 2-SE switch of 0.11
+# chooses an unknown model with relatives (seed 1: statistic 3.4, lam 0.1 at T 1.715), while option E uses
+# community only (T 5.857): the two paths give different decisions.
+SISTERS = {**GENOMES,
+           "F": (300_000, "binF", (GATC, TCGA, CCWGG, GCGC, TYPE_I2)),   # A plus TYPE_I2
+           "G": (300_000, "binG", (GANTC, CATG, CCGG)),                  # B without TYPE_I
+           "H": (300_000, "binH", (CTGCAG, GTAC, CCWGG, ACGT))}          # C without TYPE_I2
+
 
 def revcomp(seq: str) -> str:
     return seq.translate(_COMP)[::-1]

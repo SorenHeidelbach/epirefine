@@ -31,6 +31,8 @@ from scipy.special import expit
 
 from .detection import DetectionParams, bb_logpmf
 from .grid import Grid
+from ._rs import count as _count
+from ._rs import kernels as _rs_kernels
 
 
 def logsumexp(a: np.ndarray, axis: int = -1, keepdims: bool = False, work: np.ndarray | None = None) -> np.ndarray:
@@ -67,18 +69,12 @@ def logsumexp(a: np.ndarray, axis: int = -1, keepdims: bool = False, work: np.nd
 
 
 def _rs(feature: str = "model_kernels"):
-    """The optional compiled model kernels (package epirefine-rs), or None when they are not installed, are
-    switched off (EPIREFINE_RS=0) or do not provide the interface this code was written for. The numpy code
-    below is the reference; the kernels do the same float64 arithmetic in one pass per unit, and their results
-    differ from it in the last bits of exp, log and sums (relative 1e-15), except cell_sums, which adds in
-    numpy's order and returns numpy's bits."""
-    if os.environ.get("EPIREFINE_RS", "1").strip().lower() in ("0", "false", "no", "off"):
-        return None
-    try:
-        import epirefine_rs
-    except ImportError:
-        return None
-    return epirefine_rs if epirefine_rs.supports("api>=1") and epirefine_rs.supports(feature) else None
+    """The compiled model kernels (epirefine._kernels, through epirefine._rs), or None when the numpy code below
+    runs: switched off (EPIREFINE_RS=0), no compiled extension in this install, or a build without `feature`. The
+    numpy code is the reference; the kernels do the same float64 arithmetic in one pass per unit, and their results
+    differ from it in the last bits of exp, log and sums (relative 1e-15), except cell_sums, which adds in numpy's
+    order and returns numpy's bits."""
+    return _rs_kernels(feature)
 
 
 def _cores() -> int:
@@ -161,8 +157,9 @@ def _cell_sums(table: np.ndarray, r: np.ndarray, w: np.ndarray, starts: np.ndarr
     """[cells, G] float64: per cell (its rows start at starts[c]) the sum of w[i] * table[r[i]], as
     np.add.reduceat(table[r] * w[:, None], starts, axis=0) adds it (the first row plus numpy's pairwise sum of
     the others), in blocks of whole cells of about chunk_rows rows, so that the [rows, G] products are never
-    held for more than a block. The kernel of epirefine-rs does the same additions in one pass (same bits)."""
+    held for more than a block. The compiled kernel (cell_sums) does the same additions in one pass (same bits)."""
     rs = _rs("cell_sums")
+    _count("cell_sums", rs is not None)
     if rs is not None:
         return rs.cell_sums(table, r, w, starts, threads=1 if len(r) < 100_000 else _n_threads())
     res = np.empty((len(starts), table.shape[1]))
@@ -403,6 +400,7 @@ def bin_loglik(Lp_chunks: np.ndarray, chunk_bin: np.ndarray, n_bins: int, w: np.
     at once as keep the float64 copies of their chunks within BIN_BYTES (the largest bin sets the number)."""
     w = np.ones(len(chunk_bin)) if w is None else w
     rs = _rs()
+    _count("bin_loglik", rs is not None and Lp_chunks.dtype == np.float32 and Lp_chunks.ndim == 3)
     if rs is not None and Lp_chunks.dtype == np.float32 and Lp_chunks.ndim == 3:
         return rs.bin_loglik(Lp_chunks, chunk_bin, n_bins, w, threads=_n_threads())
     ell = np.zeros((n_bins,) + Lp_chunks.shape[1:])
@@ -442,6 +440,7 @@ def npmle(ell: np.ndarray, iters: int = 300, tol: float = 1e-6, init: np.ndarray
     lik = np.exp(ell - ell.max(-1, keepdims=True)).transpose(1, 0, 2).copy()  # M, B, G
     pi = np.full((M, G), 1.0 / G) if init is None else init.copy()
     rs = _rs() if blocks is None else None
+    _count("npmle", rs is not None)
     if rs is not None:
         return rs.npmle(lik, pi, iters, tol, threads=_n_threads())
     n_blocks = min(8, _n_threads()) if blocks is None else blocks  # more threads than 8 wait for each other
@@ -652,7 +651,7 @@ def _summed_scores_rows(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None 
         log((1 - eta) P + eta e^Au) = log(q + c d) + log(1 - eta) + am + bm,
         q = sum_g e^(a - am) e^(b - bm), c = eta e^(Au - am) / (1 - eta), d = e^-bm,
     instead of numpy's logaddexp (scalar code, 20 ns a cell); c <= eta / (1 - eta) since Au <= am, and
-    d <= G for normalised profiles. Agrees with group_scores(...).sum(-1) and with the kernel of epirefine-rs to
+    d <= G for normalised profiles. Agrees with group_scores(...).sum(-1) and with the compiled kernel to
     about 1e-15 relative (another order of the products inside a group, another logarithm)."""
     U, M, G = Lp.shape
     H = log_prof.shape[0]
@@ -721,7 +720,7 @@ def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None
     The order of the sums is part of the definition: for every unit its groups are added one after another in
     ascending order, and a unit's sums do not depend on the units scored with it beyond its ROWS_STEP-aligned
     slice, nor on the number of threads. Two implementations keep that order: the numpy row form
-    (_summed_scores_rows) and the kernel of epirefine-rs (score_sums), which takes tables from 1e5 to ROWS_MIN
+    (_summed_scores_rows) and the compiled kernel (score_sums), which takes tables from 1e5 to ROWS_MIN
     unit x bin x group cells when it is installed. They agree to about 1e-15 relative (another order of the 64
     products inside a group's dot product, and libm's logarithm against numpy's).
 
@@ -737,11 +736,13 @@ def summed_scores(Lp: np.ndarray, log_prof: np.ndarray, rel: tuple | None = None
     H = log_prof.shape[0]
     rs = _rs("score_sums") if U * H * M >= 100_000 else None
     if rs is None or (form or _score_form(U, H, M)) == "rows":
+        _count("score_sums", False)
         return _summed_scores_rows(Lp, log_prof, rel)
     # The kernel does the sums; the exponentials stay numpy's (the float32 exp of the unit tables decides the
     # eighth digit of a score).
     if rel is not None:
         le1, le0 = np.log1p(-rel[0]), np.log(rel[0]) + rel[1]
+    _count("score_sums", True)
     bm = log_prof.max(-1)                                                          # [H, M]
     eb = np.ascontiguousarray(_profile_exp(log_prof).transpose(1, 2, 0))           # [M, G, H]
     bm = np.ascontiguousarray(bm.T)
@@ -859,25 +860,13 @@ def score_units(Lp: np.ndarray, log_prof: np.ndarray) -> np.ndarray:
     return summed_scores(Lp, log_prof)
 
 
-# Calibration feature tempered-bin-prior (calibrate.FEATURES): set by pipeline.run for the length of a run.
-_TEMPERED_BIN_PRIOR = False
-
-
-def set_tempered_bin_prior(on: bool) -> bool:
-    """Switches the form of the prior over bins in every posterior; returns the previous setting."""
-    global _TEMPERED_BIN_PRIOR
-    old, _TEMPERED_BIN_PRIOR = _TEMPERED_BIN_PRIOR, bool(on)
-    return old
-
-
 def log_bins(n, temperature=1.0):
     """log of the number n of candidate bins as it enters a posterior: the uniform prior over bins costs each bin
-    log n. The evidence is tempered (S / T) and, by default (0.10), this cost is not, so the log odds of 'unknown'
-    against 'some bin' gain log(n) (1 - 1 / T) from the temperature alone and the estimated p_unknown rises with T
-    (ZymoFecal, community-only: 0.41 at T 1, 0.69 at T 5.02, 0.94 at T 10). With tempered-bin-prior the cost is
-    log(n) / T: the mixture over bins is tempered as a whole, as the relatives' mixture already is."""
-    ln = np.log(n)
-    return ln / temperature if _TEMPERED_BIN_PRIOR else ln
+    log n. The evidence is tempered (S / T) and this cost is not, so the log odds of 'unknown' against 'some bin'
+    gain log(n) (1 - 1 / T) from the temperature alone and an unknown share estimated at the deployed temperature
+    rises with T (ZymoFecal, community-only: 0.41 at T 1, 0.69 at T 5.02, 0.94 at T 10); since 0.12 the share is
+    estimated at T = 1 (option E). temperature is accepted for the callers' symmetry and does not enter."""
+    return np.log(n)
 
 
 def posterior(S_hosts: np.ndarray, S_unknown: np.ndarray | None, p_unknown: float, temperature=1.0,
@@ -891,7 +880,7 @@ def posterior(S_hosts: np.ndarray, S_unknown: np.ndarray | None, p_unknown: floa
     U, H = S_hosts.shape
     T = np.asarray(temperature, float)
     Tb = T[:, None] if T.ndim else T
-    lp_bin = np.log1p(-p_unknown) - log_bins(H, Tb) if _TEMPERED_BIN_PRIOR else np.log((1 - p_unknown) / H)
+    lp_bin = np.log((1 - p_unknown) / H)
     # one [U, H + 1] array, updated in place
     if Zu is None:
         logits = np.concatenate([S_hosts, S_unknown[:, None]], 1)
@@ -938,21 +927,20 @@ class FittedModel:
     """Host profiles and population prior for a given tau; scores arbitrary units."""
 
     def __init__(self, L_chunks, chunk_bin, n_bins, group_modtype, grid: Grid, tau, prior_lam=5.0,
-                 prior_floor=0.02, contam_eps=0.05, robust_iters=None, init_w=None, init_pi=None,
-                 robust_fit="alternating", robust_damping=0.5, robust_tol=1e-3, lp_out=None):
-        """robust_fit: how the chunk weights w = 1 - P(chunk foreign to its bin) and the bin profiles are
-        brought into agreement.
-
-        "alternating" (the scheme up to 0.10.x): w <- 1 - r(w) for a fixed 4 rounds. Where a bin holds two
-        methylomes in comparable shares the pooled profile sits between them and fits no chunk, so every
-        chunk is called foreign, the next profile is the prior, every chunk is a member again, and so on:
-        a 2-cycle that the fixed round count ends in the pooled state (no chunk down-weighted).
-        "damped": w <- w + damping * ((1 - r(w)) - w), until no weight moves by more than robust_tol
-        (at most robust_iters rounds). The same fixed points, but the step is too short to jump over
-        them; from the pooled start all weights shrink together, the profile widens, the majority's
-        chunks fit it first and the fit settles with the minority down-weighted.
+                 prior_floor=0.02, contam_eps=0.05, robust_iters=4, init_w=None, init_pi=None,
+                 robust_tol=1e-3, lp_out=None):
+        """The chunk weights w = 1 - P(chunk foreign to its bin) and the bin profiles are brought into agreement
+        by alternating: w <- 1 - r(w) for a fixed robust_iters rounds (4), stopping early when no weight moves by
+        more than robust_tol. Where a bin holds two methylomes in comparable shares the pooled profile sits
+        between them and fits no chunk, so every chunk is called foreign, the next profile is the prior, every
+        chunk is a member again, and so on: a 2-cycle that the fixed round count ends in the pooled state (no
+        chunk down-weighted). (A damped iteration, --robust-fit damped up to 0.11, settled such bins with the
+        minority down-weighted but changed no flag or inclusion on any development set; removed in 0.12.)
         robust_delta[u] is the last change of each chunk's weight (bins whose chunks still move did not
         converge: see robust_unconverged()).
+
+        Every population-prior fit (NPMLE) starts from the previous solution (init_pi, then the previous robust
+        round's).
         """
         self.grid, self.tau, self.n_bins = grid, tau, n_bins
         self.T = transition_spec(grid, tau)
@@ -960,11 +948,6 @@ class FittedModel:
         self.chunk_bin = chunk_bin
         self._s_out = None
         self.w = np.ones(len(chunk_bin)) if init_w is None else init_w.copy()
-        if robust_fit not in ("damped", "alternating"):
-            raise ValueError(f"unknown robust_fit {robust_fit!r}")
-        alpha = robust_damping if robust_fit == "damped" else 1.0
-        if robust_iters is None:
-            robust_iters = 50 if robust_fit == "damped" else 4
         raw = init_pi
         self.robust_delta = np.zeros(len(chunk_bin))
         self.robust_rounds = 0
@@ -980,13 +963,9 @@ class FittedModel:
             raw = fit_profiles(raw)
             if it == robust_iters or contam_eps <= 0:
                 break
-            if robust_fit == "damped":
-                self._s_out = None  # the community term follows the refitted population prior
             target = 1.0 - self._outlier_responsibility(contam_eps)
-            # convergence is judged on the full step, so a damped fit does not stop early
             self.robust_delta = np.abs(target - self.w)
-            # (alternating: the target itself, as in 0.10; w + 1.0 * (target - w) can differ from it in the last bit)
-            self.w = target if alpha == 1.0 else self.w + alpha * (target - self.w)
+            self.w = target
             self.robust_rounds = it + 1
             if self.robust_delta.max() < robust_tol:  # warm-started fits (e.g. the next tau) often need one or two rounds
                 raw = fit_profiles(raw)
@@ -1079,6 +1058,7 @@ class FittedModel:
         only, so the batch size does not change it.
         """
         rs = _rs() if batch is None and self.Lp_chunks.dtype == np.float32 else None
+        _count("chunk_terms", rs is not None)
         if rs is not None:
             if getattr(self, "_s_out", None) is None:
                 self._s_out = rs.community_terms(self.Lp_chunks, self.log_pi, threads=_n_threads())
@@ -1151,7 +1131,7 @@ class FittedModel:
     def _score_in_batches(self, L_units, lp_rows: np.ndarray, form: str = "groups") -> Scores:
         """score() without the marginal tables of all units at once: they are a second copy of L_units (6.3 GB
         for the 34,878 contigs of ZymoFecal, and the peak of the run), of which only the rows lp_rows are kept.
-        Used with the row form of summed_scores and with the scoring kernel of epirefine-rs, whose sums for a unit do
+        Used with the row form of summed_scores and with the compiled scoring kernel, whose sums for a unit do
         not depend on the units scored with it (beyond its ROWS_STEP-aligned slice)."""
         U, M, G = L_units.shape
         eta = self.eta if self.eta else 0.05
@@ -1185,18 +1165,6 @@ class FittedModel:
             off[s:s + batch] = logsumexp(Lp + l_off[None], -1)
             on[s:s + batch] = logsumexp(Lp + l_on[None], -1)
         return off, on, q
-
-    def unlisted_score(self, sc: Scores, batch: int = 2000) -> np.ndarray:
-        """log P(unit | a genome with none of the listed motifs): every group's level drawn from the part of
-        the population prior below 0.5 (the levels of bins that do not methylate the group)."""
-        if sc.lp_rows is not None:
-            raise ValueError("needs the Lp rows of every unit: score with lp_rows=None")
-        off = np.where(self.grid.x[None, :] < 0.5, self.log_pi, -np.inf)
-        off = off - logsumexp(off, axis=-1, keepdims=True)
-        out = np.empty(len(sc.Lp))
-        for s in range(0, len(out), batch):
-            out[s:s + batch] = logsumexp(sc.Lp[s:s + batch].astype(np.float64) + off[None], -1).sum(-1)
-        return out
 
     def host_terms(self, sc: Scores, rows: np.ndarray, hosts: np.ndarray | None = None,
                    log_prof: np.ndarray | None = None, batch: int = 1000) -> np.ndarray:

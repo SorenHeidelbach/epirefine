@@ -27,7 +27,10 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
+from . import _rs as _rs_state
+from ._rs import kernels as _rs_kernels
 from .model import _cores
+from .runinfo import note_worker_peaks
 from .motifs import Motif, MotifMatcher, _CODE, canonical_index, group_sizes
 
 MOD_CODE = {"a": 0, "m": 1, "21839": 2, "h": 3}
@@ -507,24 +510,18 @@ def same_pairs(motifs, pairing: str) -> bool:
 
 
 def _rs(cfg: dict | None = None):
-    """The optional compiled kernels (package epirefine-rs), or None when they are not installed, are switched
-    off (EPIREFINE_RS=0), do not provide the interface this code was written for, or (cfg given) do not
-    implement the site definition of the run: the kernel builds the sites of 0.10 (complement pairs by
-    sequence, strands summed, shared positions by the motifs' record counts), so --shared-sites motif,
-    --strand-sites auto or split, and a --complement-pairs rule that pairs this motif list differently are read
-    by the Python pass, which is the reference."""
-    if os.environ.get("EPIREFINE_RS", "1").strip().lower() in ("0", "false", "no", "off"):
-        return None
+    """The compiled pileup reader (epirefine._kernels, through epirefine._rs), or None when the Python pass runs:
+    switched off (EPIREFINE_RS=0), no compiled extension in this install, or (cfg given) a site definition the
+    reader does not implement: it builds the sites of 0.10 (complement pairs by sequence, strands summed, shared
+    positions by the motifs' record counts), so --shared-sites motif, --strand-sites auto or split, and a
+    --complement-pairs rule that pairs this motif list differently are read by the Python pass, which is the
+    reference."""
     if cfg is not None:
         if cfg.get("group_rank") is not None or cfg.get("strand_sites", "sum") != "sum":
             return None
         if not same_pairs(cfg["motifs"], cfg.get("pairing", "sequence")):
             return None
-    try:
-        import epirefine_rs
-    except ImportError:
-        return None
-    return epirefine_rs if epirefine_rs.supports("api>=1") and epirefine_rs.supports("pileup_reader") else None
+    return _rs_kernels("pileup_reader")
 
 
 def _run_range_rs(rs, cfg: dict, path: str, start: int, end: int, out_prefix: str, flush_rows: int):
@@ -540,11 +537,12 @@ def _run_range_rs(rs, cfg: dict, path: str, start: int, end: int, out_prefix: st
         parts.append(f)
     names = reader.contigs
     return {"parts": parts, "contigs": sorted(names), "first": names[0] if names else None,
-            "last": names[-1] if names else None}
+            "last": names[-1] if names else None, "kernel_counts": _rs_state.take_counts()}
 
 
 def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, block: int, flush_rows: int):
     rs = _rs(cfg)
+    _rs_state.count("pileup_reader", rs is not None)
     if rs is not None:
         return _run_range_rs(rs, cfg, path, start, end, out_prefix, flush_rows)
     w = _Worker(cfg)
@@ -591,7 +589,8 @@ def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, bloc
         if s is not None:
             buf.append(s)
     flush()
-    return {"parts": parts, "contigs": sorted(seen), "first": first_contig, "last": last_contig}
+    return {"parts": parts, "contigs": sorted(seen), "first": first_contig, "last": last_contig,
+            "kernel_counts": _rs_state.take_counts()}
 
 
 def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: list[int], motif_rank,
@@ -609,7 +608,7 @@ def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: l
            "pairing": pairing, "strand_sites": strand_sites}
     rs = _rs(cfg)
     log(f"  pileup pass: {len(ranges)} byte ranges on {min(workers, len(ranges))} workers"
-        + (f" (epirefine-rs {rs.__version__} reader)" if rs is not None else ""))
+        + (" (compiled reader)" if rs is not None else ""))
     env_before = os.environ.get("POLARS_MAX_THREADS")
     os.environ["POLARS_MAX_THREADS"] = "1"
     try:
@@ -619,8 +618,10 @@ def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: l
             results = []
             for i, f in enumerate(futs):
                 results.append(f.result())
+                _rs_state.add_counts(results[-1].pop("kernel_counts", None))  # which code the worker ran
                 if (i + 1) % max(1, len(futs) // 10) == 0:
                     log(f"  pileup pass: {i + 1}/{len(futs)} ranges done")
+            note_worker_peaks()
     finally:
         if env_before is None:
             os.environ.pop("POLARS_MAX_THREADS", None)
@@ -732,6 +733,7 @@ def _unit_part(part: str, cfg: dict) -> dict:
         units, rows = _fragment_rows(cid, pos, fr)
         if len(rows):
             out["frags"] = tables(units, rows, True)
+    out["kernel_counts"] = _rs_state.take_counts()  # which code this worker ran, for params.json
     return out
 
 
@@ -981,6 +983,7 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
                     done, pending = wait(pending, return_when=FIRST_COMPLETED)
                     while done:
                         r = done.pop().result()
+                        _rs_state.add_counts(r.pop("kernel_counts", None))
                         if "chunks" in r:
                             c = r["chunks"]
                             res["L_chunks"][c["ids"]] = c["L"]; res["chunk_sites"][c["ids"]] = c["n_sites"]
@@ -1012,6 +1015,7 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
             except BaseException:  # the run stops: parts not yet started are not computed first
                 ex.shutdown(wait=False, cancel_futures=True)
                 raise
+            note_worker_peaks()
         if disk is not None:
             res["L_t"] = disk.finish()
     except BaseException:

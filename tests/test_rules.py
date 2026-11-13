@@ -1,5 +1,6 @@
-"""Rules revisited after the 2026-11-10 reviews: robust fit convergence, merged bins, regional withdrawal,
-contamination rate after the gate, redundancy among inclusions."""
+"""Rules revisited after the 2026-11-10 reviews: robust fit convergence report, flagged share, regional withdrawal,
+contamination rate after the gate, redundancy among inclusions. (The damped robust fit and the merged-bin rule
+--max-flagged-share were removed in 0.12, U12.)"""
 import numpy as np
 import polars as pl
 
@@ -31,24 +32,14 @@ def two_genome_bin(share_major, sites=60, n_chunks=40, n_other=10, M=8, seed=0, 
     return unit_loglik(df, len(genome), M, det, grid).astype(np.float32), chunk_bin, n_other + 1, ["a"] * M, grid, genome
 
 
-def test_damped_robust_fit_converges_where_alternating_ends_pooled():
+def test_alternating_robust_fit_reports_a_bin_that_did_not_settle():
     L, cb, H, mt, grid, genome = two_genome_bin(0.6)
-    old = FittedModel(L, cb, H, mt, grid, float("inf"), robust_fit="alternating")
+    old = FittedModel(L, cb, H, mt, grid, float("inf"))
     # the 2-cycle: no chunk of the bin is down-weighted, and the fit reports that it did not settle
     assert (1 - old.w[genome == 1]).mean() < 0.5
     assert old.robust_unconverged()[0] and not old.robust_unconverged()[1:].any()
-    new = FittedModel(L, cb, H, mt, grid, float("inf"), robust_fit="damped")
-    assert not new.robust_unconverged().any()
-    assert (1 - new.w[genome == 1]).min() > 0.9 and (1 - new.w[genome == 0]).max() < 0.1
-
-
-def test_damped_fit_matches_alternating_on_a_lightly_contaminated_bin():
-    L, cb, H, mt, grid, genome = two_genome_bin(0.95)
-    old = FittedModel(L, cb, H, mt, grid, float("inf"), robust_fit="alternating")
-    new = FittedModel(L, cb, H, mt, grid, float("inf"), robust_fit="damped")
-    assert not old.robust_unconverged().any() and not new.robust_unconverged().any()
-    assert np.abs(old.w - new.w).max() < 0.01
-    assert np.abs(np.exp(old.log_prof) - np.exp(new.log_prof)).max() < 0.05
+    light = FittedModel(*two_genome_bin(0.95)[:5], float("inf"))
+    assert not light.robust_unconverged().any()
 
 
 def test_flag_not_withdrawn_when_the_chunks_say_member():
@@ -130,13 +121,3 @@ def test_no_inclusion_into_a_bin_without_sites():
     kw = dict(given=np.full(N, -1), testable=np.zeros(N, bool), temperature=1.0, p_unknown=0.001)
     assert (refine(S, Su, **kw).include_bin == 1).all()
     assert (refine(S, Su, empty_bins=np.array([False, True]), **kw).include_bin == -1).all()
-
-
-def test_merged_bin_rule_is_off_at_its_default():
-    """--max-flagged-share 1 (default) withholds no flag, also in a bin whose judged contigs are all flagged
-    (share exactly 1: on ZymoFecal 4 bins with one or two judged contigs lost 5 flags to `>= 1`)."""
-    from epirefine.refine import suspected_merges
-    share = np.array([0.0, 0.3, 1.0])
-    assert not suspected_merges(share, 1.0).any()
-    assert suspected_merges(share, 0.5).tolist() == [False, False, True]
-    assert suspected_merges(share, 0.3).tolist() == [False, True, True]

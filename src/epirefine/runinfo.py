@@ -28,17 +28,58 @@ except ImportError:  # pragma: no cover
 _T0 = [time.time()]
 
 
+# largest peak resident memory of a worker process seen in this run, in kB (note_worker_peaks)
+_WORKER_PEAK_KB = [0]
+
+
 def start_clock():
     """Elapsed times in the log count from here (the start of a run), not from the import."""
     _T0[0] = time.time()
+    _WORKER_PEAK_KB[0] = 0
 
 
 def elapsed() -> float:
     return time.time() - _T0[0]
 
 
+def _vm_hwm_kb(pid) -> int | None:
+    """VmHWM (peak resident set) of a process from /proc, in kB; None where there is no /proc."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def note_worker_peaks() -> None:
+    """Record the peak resident memory of the live worker processes of this process.
+
+    Called at the end of each process pool, while its workers are still alive and idle. Each worker's own
+    high-water mark (VmHWM) is read; getrusage(RUSAGE_CHILDREN) cannot be used, because a spawned child's
+    ru_maxrss starts at the parent's high-water mark (the kernel carries it through fork and exec), so it
+    reported the main process's peak at the moment the pool started, not the worker's.
+    """
+    import multiprocessing
+
+    for p in multiprocessing.active_children():
+        kb = _vm_hwm_kb(p.pid)
+        if kb is not None:
+            _WORKER_PEAK_KB[0] = max(_WORKER_PEAK_KB[0], kb)
+
+
 def peak_rss_gb(children: bool = False) -> float:
-    """Peak resident memory of this process (or of its largest finished worker process), in GB."""
+    """Peak resident memory of this process, or (children=True) of its largest worker process, in GB.
+
+    The worker value is the largest VmHWM recorded by note_worker_peaks (0 when no pool ran). Where /proc does
+    not exist (macOS) it falls back to getrusage(RUSAGE_CHILDREN), which can include the main process's peak.
+    """
+    if children and _WORKER_PEAK_KB[0]:
+        return _WORKER_PEAK_KB[0] / 1e6
+    if children and _vm_hwm_kb("self") is not None:
+        return 0.0
     if resource is None:
         return float("nan")
     r = resource.getrusage(resource.RUSAGE_CHILDREN if children else resource.RUSAGE_SELF).ru_maxrss
@@ -71,6 +112,11 @@ def begin(args: dict, log=log) -> None:
     log("inputs: " + ", ".join(f"{k.removesuffix('_path')}={args[k]}" for k in INPUT_NAMES) + f"; out={args['out']}; "
         f"workers={n_workers(args['workers'])}; seed={args['seed']}"
         + (f"; calibration seed={args['calibration_seed']}" if args.get("calibration_seed") is not None else ""))
+    from . import _rs  # which code runs: the compiled kernels, or numpy and why (one warning when not asked for);
+    _rs.start_run()    # decided here, once for the whole run and its worker processes
+    log(_rs.summary())
+    if (warn := _rs.notice()) is not None:
+        log(warn)
     check_settings(args)
     if args["contam_eps"] == 0:
         log("--contam-eps 0: no robust bin profiles and no regional model (long contigs are judged as a whole)")
@@ -289,40 +335,38 @@ def tool_commit(root=None) -> dict:
     return {"commit": None, "source": None}
 
 
-def _version(module: str):
-    try:
-        from importlib.metadata import version
-        return version(module)
-    except Exception:  # not installed, or no metadata
-        return None
-
-
 def kernels() -> dict:
-    """Whether the compiled kernels (epirefine_rs) are installed and used, and which build: version, API level,
-    features, the SHA-256 of the compiled module (identifies the build even when the version does not change) and
-    where it was installed from. `used` follows EPIREFINE_RS and the kernels' interface, as the model code does."""
-    from .model import _rs
-    rec = {"installed": False, "used": False, "EPIREFINE_RS": os.environ.get("EPIREFINE_RS")}
-    try:
-        import epirefine_rs as rs
-    except ImportError:
+    """Whether the compiled kernels (epirefine._kernels, built into the platform wheels) are available and chosen for
+    this run (`used`; decided once at its start, epirefine._rs.start_run), and if not, why; and which build: the
+    commit it was built from, the CPU path of the model kernels (avx2_fma or generic), the API level, the features
+    and the SHA-256 of the loaded compiled module (identifies the build exactly). Which code each kernel's calls
+    actually took is added at the end of the run (`ran`, finish)."""
+    from . import _rs
+    rs, _ = _rs.load()
+    used = _rs.kernels() is not None
+    rec = {"available": rs is not None, "used": used, "reason": None if used else _rs.reason(),
+           "EPIREFINE_RS": os.environ.get("EPIREFINE_RS"), "EPIREFINE_RS_NO_SIMD": os.environ.get("EPIREFINE_RS_NO_SIMD")}
+    if rs is None:
         return rec
-    rec.update(installed=True, used=_rs() is not None, version=getattr(rs, "__version__", None),
-               commit=getattr(rs, "__commit__", None), api=getattr(rs, "API", None))
+    rec.update(commit=getattr(rs, "__commit__", None), api=getattr(rs, "API", None))
     try:
-        rec["features"] = sorted(rs.features() if callable(rs.features) else rs.features)
+        rec["cpu_path"] = rs.cpu_path()
+        rec["features"] = sorted(rs.features())
     except Exception:
-        rec["features"] = None
-    so = sorted(Path(rs.__file__).parent.glob("_core*"))
-    if so:
-        rec["module_sha256"] = hashlib.sha256(so[0].read_bytes()).hexdigest()
-    try:
-        from importlib.metadata import distribution
-        url = json.loads(distribution("epirefine_rs").read_text("direct_url.json") or "{}").get("url")
-        rec["installed_from"] = url
-    except Exception:
-        pass
+        rec["cpu_path"], rec["features"] = None, None
+    rec["module_sha256"] = _rs.module_sha256(rs)  # of the build this process loaded (hashed at load, not now)
     return rec
+
+
+def platform_record() -> dict:
+    """The operating system, CPU architecture and C library the run used: the last bits of exp and log (in numpy and
+    in the kernels) come from the platform's maths library, which differs between glibc, musl and macOS."""
+    import platform
+    libc, libc_version = platform.libc_ver()
+    if not libc and sys.platform == "darwin":
+        libc, libc_version = "macOS libSystem", platform.mac_ver()[0]
+    return {"system": platform.system(), "release": platform.release(), "machine": platform.machine(),
+            "libc": libc or None, "libc_version": libc_version or None}
 
 
 THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "POLARS_MAX_THREADS")
@@ -337,8 +381,9 @@ def environment(args: dict) -> dict:
     return {
         "commit": tool_commit(),
         "libraries": {"python": sys.version.split()[0], "numpy": numpy.__version__, "scipy": scipy.__version__,
-                      "polars": polars.__version__, "epirefine_rs": _version("epirefine_rs")},
+                      "polars": polars.__version__},
         "kernels": kernels(),
+        "platform": platform_record(),
         "threads": {"workers": n_workers(args["workers"]), "cores": _cores(), "model_threads": _n_threads(),
                     "polars_threads": polars.thread_pool_size(),
                     **{v.lower(): os.environ.get(v) for v in THREAD_VARS}},
@@ -353,6 +398,33 @@ _GIVEN = {"p_unknown": "p_unknown_given", "tau": "tau_given", "temperature": "te
 _INPUT_KEYS = {"assembly": "assembly", "pileup": "pileup", "contig_bin": "contig_bin", "motifs_path": "motifs"}
 
 
+# options removed in 0.12 (U12, D63: they lost) with the value that equals the behaviour that remains. A params.json
+# that records one of them at that value repeats as before; any other value cannot be repeated by this version.
+REMOVED_OPTIONS = {
+    "calibration": ("--calibration", "default"), "regional_inclusion": ("--regional-inclusion", False),
+    "robust_fit": ("--robust-fit", "alternating"), "max_flagged_share": ("--max-flagged-share", 1.0),
+    "unlisted_genome": ("--unlisted-genome", False), "inclusion_support": ("--inclusion-support", "none"),
+    "tau_support": ("--tau-support", "all"), "tau_select": ("--tau-select", "per-group"),
+    "npmle_start": ("--npmle-start", "warm"), "calibration_exclusion": ("--calibration-exclusion", True),
+    "slot_objective": ("--slot-objective", "legacy"), "slot_test_b": ("--slot-test-b", "decidable"),
+    "slot_kappa": ("--slot-kappa", None),
+}
+REMOVED_VALUES = {"relatives": ("--relatives", ("per-bin", "slot"))}
+
+
+def removed_options(params: dict) -> list[str]:
+    """The options a params.json records with a value that 0.12 removed (as '--name value')."""
+    out = []
+    for key, (flag, default) in REMOVED_OPTIONS.items():
+        if key in params and params[key] != default:
+            v = params[key]
+            out.append(flag if v is True else f"{flag} {v}")
+    for key, (flag, gone) in REMOVED_VALUES.items():
+        if params.get(key) in gone:
+            out.append(f"{flag} {params[key]}")
+    return out
+
+
 def rerun_arguments(params: dict, out, workers=None, cache_dir=None, log=log, temp_dir=None) -> dict:
     """Keyword arguments of pipeline.run that repeat the run params.json describes (inputs from their recorded
     paths, every option as it was given), with a new output folder. Says in the log what differs from the
@@ -361,6 +433,11 @@ def rerun_arguments(params: dict, out, workers=None, cache_dir=None, log=log, te
     that kept its temporary tables in its output folder keeps them in the new one)."""
     import inspect
     from .pipeline import run
+    gone = removed_options(params)
+    if gone:
+        raise InputError(f"the recorded run used {'an option' if len(gone) == 1 else 'options'} removed in 0.12 "
+                         f"({', '.join(gone)}); repeat it with the epirefine version it names "
+                         f"({params.get('version', 'unknown')})")
     names = [n for n in inspect.signature(run).parameters]
     kw = {}
     for name in names:
@@ -386,6 +463,12 @@ def rerun_arguments(params: dict, out, workers=None, cache_dir=None, log=log, te
         elif _GIVEN.get(name, name) in params:
             v = params[_GIVEN.get(name, name)]
             kw[name] = tuple(v) if isinstance(v, list) else v
+    if "relatives" not in params:
+        # a run from before option E (0.12) had the unknown-model switch and the share at the deployed temperature;
+        # the defaults changed since, so the old path is passed explicitly
+        kw.update(relatives="switch", unknown_share=params.get("unknown_share", "deployed"))
+        log("rerun: the recorded run predates option E (no 'relatives' in params.json): the unknown-model switch "
+            "of 0.11.1 is used (--relatives switch)")
     if params.get("version") != package_version():
         log(f"WARNING: the recorded run used epirefine {params.get('version')}, this is {package_version()}")
     rec, now = (params.get("commit") or {}).get("commit"), tool_commit().get("commit")
@@ -394,7 +477,28 @@ def rerun_arguments(params: dict, out, workers=None, cache_dir=None, log=log, te
     return kw
 
 
+def record_failure(path, error: BaseException) -> None:
+    """A run that stopped: add to the params.json it wrote at its start what is known at the stop: which code each
+    kernel's calls took so far (`kernels.ran`, the workers' that returned included), `finished: false` and the error
+    (type and message). Never raises: the run's own error is the one to report."""
+    try:
+        from . import _rs
+        params = json.loads(Path(path).read_text())
+        if isinstance(params.get("kernels"), dict):
+            params["kernels"] = {**params["kernels"], "ran": _rs.ran(), "missing_features": _rs.missing_features()}
+        params.update(finished=False, error=f"{type(error).__name__}: {error}", elapsed_s=round(elapsed(), 1),
+                      peak_rss_gb=round(peak_rss_gb(), 3))
+        write_params(path, params)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def finish(params: dict) -> dict:
-    """Closing entries of params.json."""
+    """Closing entries of params.json; under `kernels`, which code each kernel's calls took in this run, the
+    workers' included (`ran`: {kernel: {compiled, numpy}}), and the features a call asked for that the build lacks."""
+    from . import _rs
+    if isinstance(params.get("kernels"), dict):
+        params = {**params, "kernels": {**params["kernels"], "ran": _rs.ran(),
+                                        "missing_features": _rs.missing_features()}}
     return {**params, "finished": True, "elapsed_s": round(elapsed(), 1), "peak_rss_gb": round(peak_rss_gb(), 3),
             "peak_rss_worker_gb": round(peak_rss_gb(children=True), 3)}

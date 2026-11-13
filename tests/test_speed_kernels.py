@@ -402,14 +402,16 @@ def test_profile_exp_flush_keeps_products():
 
 
 def test_host_profiles_threads_bits(monkeypatch):
-    """host_profiles on row slices on threads = the one-call expression, bit for bit."""
-    from scipy.special import logsumexp
+    """host_profiles on row slices on threads = the one-call expression, bit for bit.
+
+    The reference is the package's own logsumexp in one call: scipy's has other arithmetic before 1.15, so against
+    it this test failed with the lowest scipy that pyproject.toml allows (test_v2 compares the two functions)."""
     monkeypatch.setenv("OMP_NUM_THREADS", "4")
     rng = np.random.default_rng(9)
     ell = -rng.gamma(2.0, 50.0, (40, 410, 64))
     log_pi = np.log(rng.dirichlet(np.ones(64), 410))
     lp = ell + log_pi[None]
-    assert np.array_equal(M.host_profiles(ell, log_pi), lp - logsumexp(lp, axis=-1, keepdims=True))
+    assert np.array_equal(M.host_profiles(ell, log_pi), lp - M.logsumexp(lp, axis=-1, keepdims=True))
 
 
 def test_mix_log_is_logaddexp():
@@ -536,6 +538,7 @@ def test_threads_follow_cpu_affinity(monkeypatch):
 
 def test_prefetch_cache_reads_parts(tmp_path):
     import json
+    from pathlib import Path
     import epirefine.pipeline as P
     assert P._prefetch_cache(tmp_path) is None  # no manifest
     (tmp_path / "sites").mkdir()
@@ -543,6 +546,11 @@ def test_prefetch_cache_reads_parts(tmp_path):
         (tmp_path / "sites" / f"p{i}.parquet").write_bytes(b"x" * 1000)
     (tmp_path / "manifest.json").write_text(json.dumps({"parts": [f"elsewhere/sites/p{i}.parquet" for i in range(3)]}))
     th = P._prefetch_cache(tmp_path)
+    if not Path("/proc/meminfo").exists():
+        # By design: without /proc/meminfo (macOS) the free memory is unknown, so the optional prefetch (a speed-up
+        # only; nothing reads its result) is skipped and the run reads the cache from disk as before.
+        assert th is None
+        return
     th.join(10)
     assert not th.is_alive()
 

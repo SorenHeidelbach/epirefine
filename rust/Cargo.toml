@@ -1,0 +1,33 @@
+[package]
+# The compiled kernels of EpiRefine, built by maturin into the extension epirefine._kernels._core of the platform
+# wheels (D73). The package version is pyproject.toml's; this crate is never published and its version stays 0.0.0
+# (the extension reports the commit it was built from, see build.rs).
+name = "epirefine-kernels"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+description = "Compiled kernels of EpiRefine: pileup reader, motif scan and model kernels"
+publish = false
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+
+[features]
+default = ["libdeflate"]
+# libdeflate (C, built by the cc crate) inflates BGZF blocks; without it the pure-Rust flate2 path is used
+libdeflate = ["dep:libdeflater"]
+# faster pure-Rust inflate for builds without libdeflate
+zlib-rs = ["flate2/zlib-rs"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["abi3-py310"] }
+numpy = "0.22"
+memchr = "2"
+rayon = "1"
+flate2 = "1"
+libdeflater = { version = "1", optional = true }
+
+[profile.release]
+lto = true
+codegen-units = 1

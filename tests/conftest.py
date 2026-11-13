@@ -4,7 +4,17 @@ import pytest
 
 import synth
 from small_community import write_community
-from helpers import Run, logged, run_pipeline
+from helpers import Run, copy_cache, logged, run_pipeline
+
+
+@pytest.fixture(autouse=True)
+def _kernels_state():
+    """Each test starts with a fresh kernels state (epirefine._rs keeps the import once per process, and a run's
+    decision until the run ends), so that tests which hide or patch the build see their own."""
+    from epirefine import _rs
+    _rs.reset()
+    yield
+    _rs.reset()
 
 
 @pytest.fixture(scope="session")
@@ -17,6 +27,25 @@ def community(tmp_path_factory):
 def base_run(community, tmp_path_factory) -> Run:
     """The reference run: epirefine.pipeline.run with default options, one worker, a cold cache."""
     return run_pipeline(**community.args(tmp_path_factory.mktemp("base") / "out"))
+
+
+@pytest.fixture(scope="session")
+def sisters(tmp_path_factory):
+    """The synthetic community with sister genomes (synth.SISTERS, seed 1), where the switch of 0.11 picks relatives."""
+    return synth.make_community(tmp_path_factory.mktemp("sisters"), seed=1, genomes=synth.SISTERS)
+
+
+@pytest.fixture(scope="session")
+def sisters_run(sisters, tmp_path_factory) -> Run:
+    """The sister community at the default options (option E), one worker, a cold cache."""
+    return run_pipeline(**sisters.args(tmp_path_factory.mktemp("sisters_e") / "out"))
+
+
+@pytest.fixture(scope="session")
+def sisters_switch_run(sisters, sisters_run, tmp_path_factory) -> Run:
+    """The sister community with the deprecated --relatives switch (the path of 0.11.1), from sisters_run's cache."""
+    out = copy_cache(sisters_run, tmp_path_factory.mktemp("sisters_switch") / "out")
+    return run_pipeline(**sisters.args(out), cache_dir=str(out / "cache"), relatives="switch")
 
 
 @pytest.fixture(scope="session")

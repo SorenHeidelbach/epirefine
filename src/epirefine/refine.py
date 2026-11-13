@@ -72,8 +72,7 @@ class Refinement:
     contaminant: np.ndarray    # [N] bool (P(foreign) above threshold and a methylome difference)
     candidate: np.ndarray      # [N] bool: unbinned, or flagged contaminant
     include_bin: np.ndarray    # [N] bin index to include into (high confidence), -1 otherwise
-    Su: np.ndarray | None = None     # [N] log P(contig | unbinned genome) as used (with the unlisted-genome part)
-    unlisted_share: float | None = None  # share of unbinned genomes without any listed motif (None: not modelled)
+    Su: np.ndarray | None = None     # [N] log P(contig | unbinned genome) as used
 
 
 def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarray, temperature: float,
@@ -82,8 +81,7 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
            methylome_difference: np.ndarray | None = None, min_difference: float = 0.4,
            decidable: np.ndarray | None = None, unmethylated_bins: np.ndarray | None = None,
            include_threshold_unmethylated: float = 0.95, Zu: np.ndarray | None = None,
-           eps_after_gate: bool = False, eps_gated: bool = False,
-           S_unlisted: np.ndarray | None = None, empty_bins: np.ndarray | None = None) -> Refinement:
+           eps_gated: bool = False, empty_bins: np.ndarray | None = None) -> Refinement:
     """given[i] = bin index of contig i, -1 if unbinned; testable[i] = binned and scored leave-one-out.
     With one bin only (H = 1) no binned contig is tested for contamination (eps is NaN); unbinned contigs are
     still tested for inclusion into it.
@@ -105,7 +103,7 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     Zu[i]: the unknown hypothesis' tempered log-score (model.unknown_logit: every explanation tempered, then
     mixed); when given, Su is not used.
 
-    eps_after_gate: the contamination rate counts only contigs that can be flagged, i.e. that clear
+    eps_gated (--eps-gated): the contamination rate counts only contigs that can be flagged, i.e. that clear
     min_difference. Without it eps is estimated before the gate withdraws its flags, so contigs the gate
     clears (73% of the likelihood-only flags on human_gut, D20) still raise the prior odds of "foreign"
     for every other contig, and the reported rate is a discordance rate, not a contamination rate.
@@ -119,30 +117,6 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     unb = (given < 0) & dec
     # p_u from the unbinned contigs: "some bin, uniformly" vs "an unbinned genome"
     l_bins = logsumexp(Z, axis=1) - log_bins(H, T)
-    unlisted_share = None
-    if S_unlisted is not None:
-        # An unbinned genome is a community draw (each motif group's level drawn independently from the levels
-        # seen among the bins) or an "unlisted" genome: one with none of the listed motifs, unmethylated at every
-        # group. The motif list comes from the bins only, so that is what a genome without a bin usually looks
-        # like, and a community draw makes it improbable (the product over groups of P(off)), which is what
-        # made the one unmethylated or motif-poor bin the best explanation of every such contig. The three
-        # weights (some bin / community draw / unlisted) are estimated together from the unbinned contigs.
-        Zn = S_unlisted / T
-        w = np.full(3, 1 / 3) if p_unknown is None else np.array([1 - p_unknown, p_unknown / 2, p_unknown / 2])
-        cls = np.stack([l_bins[unb], Zu[unb], Zn[unb]], 1)
-        for _ in range(500 if len(cls) else 0):
-            z = cls + np.log(w)[None]
-            r = np.exp(z - logsumexp(z, axis=1, keepdims=True)).mean(0)
-            if p_unknown is not None:  # fixed by the user: only the split of the unbinned genomes is estimated
-                r = np.r_[1 - p_unknown, p_unknown * r[1:] / max(r[1:].sum(), 1e-12)]
-            new = np.clip(r, 1e-6, None); new /= new.sum()
-            done = np.abs(new - w).max() < 1e-8
-            w = new
-            if done:
-                break
-        p_unknown = float(np.clip(w[1] + w[2], 1e-6, 1 - 1e-6))
-        unlisted_share = float(w[2] / (w[1] + w[2]))
-        Zu = np.logaddexp(np.log1p(-unlisted_share) + Zu, np.log(unlisted_share) + Zn)
     if p_unknown is None:
         p_unknown, _ = em_weight(l_bins[unb], Zu[unb], *p_unknown_prior)
     lpu, lpb = np.log(p_unknown), np.log1p(-p_unknown)
@@ -180,9 +154,8 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
     p_foreign = np.full(N, np.nan)
     t = testable & (given >= 0)
     gate_ok = None
-    # (eps_gated, the option --eps-gated, and eps_after_gate, part of the calibration feature em-priors, ask for
-    # the same thing; one implementation: em_weight's can_be_out)
-    if (eps_after_gate or eps_gated) and methylome_difference is not None:
+    # (--eps-gated; one implementation: em_weight's can_be_out)
+    if eps_gated and methylome_difference is not None:
         gate_ok = methylome_difference[t] >= min_difference
     eps, r = em_weight(Z[t, own[t]], l_alt[t], *eps_prior, can_be_out=gate_ok)
     if H == 1:
@@ -205,7 +178,7 @@ def refine(S: np.ndarray, Su: np.ndarray, given: np.ndarray, testable: np.ndarra
         # is included into it (review 01, finding 7).
         include_bin[(include_bin >= 0) & np.asarray(empty_bins)[np.maximum(include_bin, 0)]] = -1
     return Refinement(float(p_unknown), float(eps), p_foreign, best_alt, p_best_alt, contaminant, candidate,
-                      include_bin, Zu * T, unlisted_share)
+                      include_bin, Zu * T)
 
 
 def regional_pattern(llrs: list[np.ndarray], switch: float = 0.05, iters: int = 100, weights=None):
@@ -282,17 +255,6 @@ def flagged_share_per_bin(given: np.ndarray, contaminant: np.ndarray, judged: np
     return np.divide(flag_bp, bin_bp, out=np.zeros(n_bins), where=bin_bp > 0)
 
 
-def suspected_merges(flagged_share: np.ndarray, max_flagged_share: float) -> np.ndarray:
-    """Per bin: True when the flags of the bin are not to be applied because its flagged contigs hold at least
-    max_flagged_share of its judged sequence (--max-flagged-share). At 1 or more the rule is off and no bin is
-    marked, also not a bin whose judged contigs are all flagged (share exactly 1): a diagnostic or an option at
-    its default must never withhold a flag."""
-    flagged_share = np.asarray(flagged_share, float)
-    if max_flagged_share >= 1:
-        return np.zeros(len(flagged_share), bool)
-    return flagged_share >= max_flagged_share
-
-
 def confidence(p: float) -> str:
     return next((name for lo, name in CONFIDENCE if p >= lo), "")
 
@@ -329,8 +291,10 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
                   n_sites: np.ndarray, sole: set, P: np.ndarray, methylome_difference: np.ndarray | None = None,
                   redundancy: np.ndarray | None = None, evidence: np.ndarray | None = None, min_evidence: float = 3.0,
                   coverage: np.ndarray | None = None, low_coverage: np.ndarray | None = None,
-                  too_short: np.ndarray | None = None, regional: dict | None = None):
-    """Nanomotif-compatible files + epirefine's per-contig decision table."""
+                  too_short: np.ndarray | None = None, regional: dict | None = None, withhold_candidates: bool = False):
+    """Nanomotif-compatible files + epirefine's per-contig decision table. withhold_candidates (the calibration
+    guard fired, so the run makes no call): include_contigs.tsv is written with its header and no row, so that no
+    candidate reads as an inclusion to a tool that applies the file by its confidence labels."""
     H = len(bins)
     labels = bins + ["unknown"]
     given_lbl = np.array([bins[g] if g >= 0 else "" for g in given], dtype=object)
@@ -362,7 +326,8 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
     dropped = (np.zeros(len(contigs), bool) if redundancy is None
                else ~np.isnan(redundancy) & (ref.include_bin < 0))
     rows = []
-    for i in np.flatnonzero(ref.candidate & (ref.best_alt < H) & (ref.p_best_alt >= CONFIDENCE[-1][0])):
+    listed = ref.candidate & (ref.best_alt < H) & (ref.p_best_alt >= CONFIDENCE[-1][0]) & (not withhold_candidates)
+    for i in np.flatnonzero(listed):
         p = float(ref.p_best_alt[i])
         # a dropped candidate is not added to any bin, so it must not read as a high-confidence inclusion
         rows.append({"contig": contigs[i], "bin": given_lbl[i] or "unbinned", "assigned_bin": labels[ref.best_alt[i]],

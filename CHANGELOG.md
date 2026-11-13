@@ -5,6 +5,120 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
 
 ## Unreleased (0.12)
 
+### Breaking: options that lost are removed
+The command line no longer offers the options below. None was a default; each lost on the development benchmarks or
+was a design that was tried and rejected (dev log U12, D63; the reason for each is in
+`docs/development/method-notes.md` §7.6 and the dev log). At the defaults nothing changes: on the 15 development
+scenarios of the small suites (monoculture training, ZymoOral, simulated look-alikes) every decision file is
+byte-identical to the run before the removal. A command line that names one of them now fails with argparse's
+usage error, and `epirefine rerun` of a `params.json` that used one at a non-default value stops with one line
+naming it (the same option at its old default, as every 0.11.1 record holds, is accepted).
+- `--calibration` with its sets (`default`, `legacy`, `consistent`, `coherent`) and features (`temper-then-mix`,
+  `prior-averaged`, `prior-matched`, `conservative-temperature`, `full-test-b`, `unit-temperature`,
+  `sites-temperature`, `common-tau`, `em-priors`, `tempered-bin-prior`, `deployed-unknown`). The 0.11.1 default
+  (`default`: the relatives test's standard error over bins) is built in; the module-level switch of
+  `tempered-bin-prior` is gone with it.
+- `--robust-fit` (`damped`: no flag or inclusion changed on any development set).
+- `--max-flagged-share` (withheld 8 of 12 correct flags in a merge stress set and fired in none of 42 merges). The
+  `flagged_share` column and the `warning` column of `bin_evidence.tsv` stay; the warning
+  `merged_bin_suspected_flags_not_applied` can no longer occur.
+- `--tau-support` (`leave_bin_out`: no decision changed).
+- `--unlisted-genome` and `--inclusion-support` (rejected inclusion designs: inclusion recall 89.3% -> 87.4% and
+  58.4% on the training communities, development). `params.json` no longer has `unlisted_share`.
+- `--regional-inclusion` (no benchmark gained an inclusion; on ZymoFecal it placed long contigs the contig-level
+  model gives to an unknown genome).
+- The calibration-core designs that lost (mission WP3): `--tau-select`, `--npmle-start`, `--relatives per-bin`,
+  `--relatives slot` with `--slot-objective`, `--slot-test-b` and `--slot-kappa`; with them the report files
+  `hidden_relative.tsv` and `calibration/relatives_by_bin.tsv` (written only by `per-bin` and `slot`) and the
+  `params.json` keys `relatives_per_bin` and `relatives_slot`. The hidden diagnostic `--calibration-exclusion` too.
+- `params.json` no longer holds the keys of these options (`calibration`, `calibration_features`, `robust_fit`,
+  `max_flagged_share`, `tau_support`, `unlisted_genome`, `inclusion_support`, `regional_inclusion`, `tau_select`,
+  `npmle_start`, `calibration_exclusion`, `slot_objective`, `slot_test_b`, `slot_kappa`) nor
+  `unknown_model_deployed_check`. No column of any output table changed.
+- Kept: `--relatives switch` (hidden, deprecated; the 0.11.1 path, for comparison with option E), now used
+  automatically only with `--no-calibrate`; `--unknown-share`; the experimental `--temperature-law` and
+  `--evidence-temperature`; and the rule variants not yet judged (`--regional-leave-out`, `--regional-withdraw`,
+  `--regional-tempered`, `--gate-leave-out`, `--gate-unweighted`, `--eps-gated`, `--unknown-prior`,
+  `--redundancy-order`, `--siteless-bin-guard`, and the site options).
+
+### Changed
+- **Method: the unknown-model switch is removed (new default, "option E").** Up to 0.11.1 EpiRefine chose, during
+  calibration, between two models of a genome without a bin: a random draw from the community, or a relative of
+  one of the bins, the latter kept when it beat the former by 2 standard errors over bins. That choice sat on a
+  knife edge: on a fecal development sample (ZymoFecal, Nanomotif 1.3.0 motifs) the statistic was 0.4-1.9 SE on
+  five sets of calibration pieces, and when the bins of the calibration were resampled it chose the relatives in
+  2.5-20% of 200 resamples, every time with no or almost no inclusion (gate R4: 129-165 of 200 resamples kept the
+  outcome). Now every run uses the community model (`--relatives community-only`, the default) and estimates the
+  share of unbinned contigs from genomes without a bin at temperature 1 (`--unknown-share t1`, the default), where
+  it does not rise with the temperature. With both, 200 of 200 resamples kept the outcome on each of the three
+  development calibration sets (dev log D61-D63). The methylation-evidence check (`--min-evidence`) divides by the
+  temperature of this community-only fit.
+  Measured (development data): on ZymoFecal (calibration seeds 1-3) flags are unchanged (147), inclusions rise
+  from 503 to 589 with the Hi-C agreement unchanged in rate, and the estimated unknown share falls from 0.69 to
+  0.41; on the monoculture training set and ZymoOral every flag is unchanged and 2-3 more contigs per seed return to
+  their own bin. On the simulated look-alikes (unbinned genomes that copy a bin's methylation) the change puts
+  back 31% of the unbinned contigs of binned genomes (0.11.1: 0%), but also places 112 contigs of unbinned
+  genomes into the bin of a same-methylome sister genome, and leaves 14-21% of contigs with no call: see Known
+  limitations below and the FAQ.
+- **Relatives statistic on every run.** The test the switch used is still computed and reported as a number, with
+  no threshold: one log line (`relatives statistic: ...`) and `params.json` `relatives_statistic` (gain, standard
+  error, their ratio `statistic`, and what the 0.11 switch would have chosen). Large positive values mean some
+  calibration pieces are explained better by an unbinned relative of a bin than by a random community genome
+  (development data: 4.4-5.4 on the simulated look-alikes, 0.4-1.9 on ZymoFecal). When the switch would have
+  chosen the relatives, `params.json` also holds `unknown_model_forced`; the calibration tables (`summary.tsv`,
+  `reliability.tsv`, `temperature_by_length.tsv`, `assignability.tsv`, `fragments.tsv`) and the log line `unknown
+  model: ... -> used T` then describe the community-only fit the decisions use, and `fitted_temperature` is that
+  fit's best temperature before the never-sharpen rule.
+- `--relatives switch` (hidden, deprecated, for comparison only) restores the switch of 0.11.1 and, unless
+  `--unknown-share` is given, its share estimate at the deployed temperature: it reproduces 0.11.1. A run with
+  `--no-calibrate` uses it when `--relatives` is not given, and says so in the log. `params.json` records the
+  `relatives` and `unknown_share` actually used; `epirefine rerun` of a `params.json` written before 0.12 uses the
+  switch.
+
+- **Guard for calibrations without a usable temperature.** When the calibrated temperature ends at the cap of the
+  grid (20), the calibration pieces were not predicted better by any temperature the grid allows, and the fit
+  says nothing about how far the scores can be trusted. Such a run now makes no call (no flag, inclusion or move;
+  the posteriors are still written, for inspection only; `include_contigs.tsv` lists no candidate), writes one log line `WARNING: calibration guard: ...`
+  and records `params.json` `calibration_guard` (`fired`, `reason`, `temperature`, `cap`, the numbers of
+  calibration pieces and of test-B pieces, `fallback`). `--temperature` bypasses it. With the experimental
+  `--temperature-law sites` it checks the law instead (its temperature at 1,000 sites at the law's cap, 100), since
+  the decisions then use the law's temperature, not the grid's. It is checked on the default
+  path only (not with the deprecated `--relatives switch`). Measured (development data): it fires on none of the
+  normal development runs (temperature at most 5.9 on the monoculture training set, ZymoOral, the simulated
+  look-alikes, ZymoFecal and its 600 bin resamples, fecal_inhouse) and on 3 of the 653 stress-set-2 runs that
+  finish (every
+  other one has a temperature of at most 1.7), all three of which made no call under option E anyway; decisions
+  are unchanged everywhere. The number of calibration pieces does not trigger it: from a single piece the
+  calibration usually lands at temperature 1.08 and the calls are right.
+
+### Known limitations (new in 0.12)
+- **Unbinned genomes with a bin's methylation.** Contigs from a genome that has no bin but has the same, or nearly
+  the same, methylation as a binned genome (a strain or close sister that methylates the same motifs) are placed
+  into that genome's bin. Methylation cannot tell the two apart; with the switch of 0.11.1 such samples usually
+  got no inclusions at all. On such samples the temperature also rises (simulated look-alikes: 3.7-4.3 against 1.3
+  under 0.11.1), and because the evidence check is evidence / T < `--min-evidence`, more short contigs get no call
+  (about 12-35% of the contigs, depending on where the temperature lands: look-alike set s1 has 245, 396 and 619 no
+  calls at T 3.7, 4.3 and 5.0 of its 1,849 contigs; development data). A no call never changes a bin: the status is
+  written last, and flags, inclusions and the refined bins do not depend on it. A large relatives statistic warns
+  of such a sample.
+
+- **A calibration at the temperature cap gives no calls.** When the temperature of the calibration ends at the cap
+  of the grid (20), the guard above withholds every call. On development data this happened only on stress samples
+  of two bins with a single calibration piece without usable sites (or a confidently wrong one) or with half of the
+  methylation knocked out. On such a sample a fixed temperature (`--temperature`) can still give calls, but they
+  are not calibrated: on one development stress run, `--temperature 1` placed 25 contigs, one of them wrongly.
+### Changed
+- **Compiled kernels by default (U5, D73).** The wheels for Linux (manylinux2014 x86_64 and aarch64, musllinux_1_2
+  x86_64) and macOS (arm64, x86_64) now carry the compiled kernels (pileup reader, motif scan, model kernels; the
+  Rust code is in `rust/`, the module `epirefine._kernels`), and EpiRefine uses them unless `EPIREFINE_RS=0`. They
+  were a separate, unpublished package (`epirefine-rs`) before; no new dependency is added. Every other platform
+  gets a pure wheel of the same version and runs the numpy code, which takes the same decisions (slower), with one
+  warning line. The log's third line and `params.json` (`kernels`: `available`, `used`, `reason`, `commit`,
+  `cpu_path`, and per kernel the calls on each path, `ran`) say which code ran; the choice is made once per run and
+  handed to the worker processes, and a worker that loads another build stops the run. A separately installed `epirefine_rs` is no longer used. Building from source
+  (the sdist, or an editable install) needs Rust and a C compiler. Byte identity against 0.12 development with the
+  separate kernels: see the branch's build log.
+
 ### Fixed
 - **Site-cache key.** The manifest now has a format number (2) and a content fingerprint of the assembly and the
   pileup (SHA-256 of three 1 MiB blocks: start, middle, end; files up to 16 MiB whole). A pileup replaced by one of
@@ -14,6 +128,17 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   `epirefine cache upgrade` adds the fingerprints, reading only the blocks.
 - **Lock on the cache directory.** Two runs no longer write one cache at once: a run that rebuilds the cache holds
   an exclusive lock, runs that read it a shared one, so readers do not wait for each other.
+- **Tests and the benchmark suite at the lowest allowed dependency versions.** The thread test of `host_profiles`
+  compares with the package's own logsumexp (scipy before 1.15 differs in the last bits, up to 5.7e-14); the
+  benchmark suite's summary keeps the left order without `join(maintain_order=...)`, which polars 1.2.1 lacks; the
+  batch test compares the log terms with an absolute tolerance of 1e-12 (two batch shapes differ by up to 4.4e-16
+  in 7 of 73,728 cells; runs use one fixed batch size). Test and tooling changes only: the small suites are
+  byte-identical (345 of 345 tables, development data).
+- **Worker peak memory.** `peak_rss_worker_gb` in `params.json` (and the last log line) reported the main
+  process's peak at the moment the first worker pool started (a spawned worker inherits that high-water mark):
+  13.4 GB on ZymoFecal at 12 workers (development) was never a worker's size. Each worker pool now reads its live
+  workers' own peak (VmHWM) before it closes, and the largest is reported. Only run fields of `params.json`
+  change; decisions and every output table are untouched.
 
 ### Changed
 - **Large tables on disk.** On large samples the contig tables (5.9 GiB on ZymoFecal) are written to a temporary
@@ -35,7 +160,7 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   the pieces are exactly those of 0.11.1 (tested against stored 0.11.1 draws, and on ZymoFecal's two motif tables
   against the groups of their site caches), so no decision changes. `params.json` records `calibration_seed`.
 - `params.json` records the code and where it ran: `commit` (from git, `EPIREFINE_COMMIT` or a `COMMIT` file),
-  `libraries`, `kernels` (installed, used, build hash), `threads` and `seeds`. `epirefine rerun --params
+  `libraries`, `kernels` (available, used, reason, build commit, CPU path, build hash), `threads` and `seeds`. `epirefine rerun --params
   params.json --out DIR` repeats a run from it (tested: same decisions).
 - Input checks with one-line errors: a contig listed in two bins (it was silently put in the last one), a
   contig-bin table with its columns swapped, a motif table without the needed columns (names the missing ones).
@@ -43,6 +168,26 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   ZymoOral, simulated, ZymoFecal, fecal_inhouse contig-bin tables) passes as before.
 - `epirefine cache check`: says whether a run with given inputs would reuse a cache ("reused") or rebuild it
   ("would rebuild", with the reason), without the pass over the pileup.
+
+### Documentation
+- The docs describe the released model (option E with the calibration guard): the method notes
+  (`docs/development/method-notes.md`) are rewritten for bin refinement and the code of 0.12 (the unknown genome,
+  the 31-point temperature grid and its step as a stated limitation, the evidence check and what a no call means,
+  the look-alike limitation, the relatives statistic, the guard); `how-it-works.md`, the FAQ and the README follow.
+  `outputs.md` documents every output file, every column (the eleven calibration tables included) and every
+  `params.json` key the code writes, and defines "5x" as the code computes it (median valid calls per motif site,
+  both strands summed at two-strand sites); `usage.md` lists every option of `--help`; `tests/test_docs.py` keeps
+  both complete. The README and FAQ call the monoculture test and validation communities spent, not held-out.
+- `CITATION.cff` (version 0.12.0, no DOI yet).
+- A small synthetic example dataset, `tests/data/example_community` (1.6 MB; the golden-snapshot community of the
+  tests), with a section in `getting-started.md` and a test that runs it end to end (about 5 s on one core).
+### Known limitations
+- `params.json` `kernels.ran` counts calls without a lock. On the usual (GIL) Python builds no count is lost; on a
+  free-threaded build (3.13t and later, which installs the pure wheel) concurrent counts from threads can be lost,
+  so the numbers may be low there. Decisions are not affected.
+- The site cache does not record which code built it (compiled reader or Python pass). The site rows are the same
+  integers on both paths, but a run that reuses a cache shows no pileup-reader calls in `kernels.ran`, and nothing
+  says which path built the cache.
 
 ## 0.11.1 (2026-11-12): the unknown-genome model no longer absorbs every unbinned contig
 

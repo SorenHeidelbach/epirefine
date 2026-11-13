@@ -130,5 +130,12 @@ def assert_same_outputs_to_rounding(a: Path, b: Path, rel: float = 1e-9):
             continue
         if isinstance(pa[key], float):
             assert pb[key] == pytest.approx(pa[key], rel=rel, abs=1e-12), key
+        elif isinstance(pa[key], dict):  # e.g. relatives_statistic: its floats to `rel`, the rest as written
+            assert pa[key].keys() == pb[key].keys(), key
+            for k, v in pa[key].items():
+                if isinstance(v, float):
+                    assert pb[key][k] == pytest.approx(v, rel=rel, abs=1e-12), (key, k)
+                else:
+                    assert pb[key][k] == v, (key, k)
         else:
             assert pa[key] == pb[key], key
