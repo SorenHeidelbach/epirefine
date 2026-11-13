@@ -727,8 +727,8 @@ The status column is assigned in this order, later rules overriding earlier ones
 
 ### 9.1 A likelihood model rather than a distance or a classifier
 
-Methylation-based binning and host linking (Beaulaurier *et al.* 2018; Tourancheau *et al.* 2021; Nanomotif's
-contamination and inclusion steps) compare per-contig motif methylation summaries by distance or with classifiers.
+Methylation-based binning and host linking (Beaulaurier *et al.* 2018; Tourancheau *et al.* 2021) and earlier
+methylation-based bin refinement compare per-contig motif methylation summaries by distance or with classifiers.
 A likelihood model does what those cannot easily do:
 
 | Need | How the likelihood handles it |
@@ -783,7 +783,7 @@ The price is that a genome without a bin but with a bin's methylation looks like
 
 Treating each 50 kb chunk as a unit lets methylation vary along a genome through τ, stops one long contig from
 dominating its bin's profile, and makes leave-one-out scoring possible even when a bin is one complete chromosome.
-τ is chosen by held-out likelihood on the calibration pieces, the standard way to set a variance component without
+τ is chosen by leave-out likelihood on the calibration pieces, the standard way to set a variance component without
 overfitting.
 
 ### 9.8 Robust profiles

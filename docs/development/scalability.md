@@ -1,6 +1,12 @@
 # EpiRefine: scalability evaluation and speed-up plan
 
-This document evaluates how EpiRefine v2 scales, measured on this server (16 cores, 62 GB RAM), and
+> **Status (0.12).** Sections 1-6 are the plan and the measurements of October 2026, made on EpiRefine's
+> predecessor (before 0.5.0) and kept as the record of why the code is built as it is. Parts they name that no
+> longer exist (plasmid scoring, the δ × τ_p fit, the HTML report, the scripts under `scripts/`) were removed
+> later; their timings are not those of the current version. Section 7 (large tables on disk) and section 8
+> (compiled kernels) describe version 0.12.
+
+This document evaluates how EpiRefine v2 scales, measured on a 16-core server with 62 GB RAM, and
 lists concrete ways to make the critical steps faster: by lowering their complexity or by more
 efficient code. Each speed-up is estimated either from a prototype timed here or from a scaling
 argument; the table says which.
@@ -285,11 +291,10 @@ Two tables of the main process are large and read only in row batches late in th
     read. That page cache (up to the table's size) is charged to the run's cgroup from the final fit to the
     summaries; it is clean and can be reclaimed.
   - *Where the whole table is still read.* `FittedModel.score` reads in row batches only when the kept rows are
-    a list (the default) and the table has more than 8,192 rows, and either the row form is used or the kernels
-    (`epirefine-rs`, `score_sums`) are installed. Otherwise it reads the file whole into memory, as the in-memory
-    table was before: with `--unknown-prior unbinned`, `--unlisted-genome`, `--inclusion-support` other than
-    `none` or the `prior-matched` calibration feature, and without the kernels on samples with about 19 bins or
-    fewer. On these paths the scoring peak is that of the in-memory table; the unit-table and calibration peaks
+    a list (the default) and the table has more than 8,192 rows, and either the row form is used or the compiled
+    kernels (`score_sums`) are in use. Otherwise it reads the file whole into memory, as the in-memory table was
+    before: with `--unknown-prior unbinned`, and on the numpy code (pure wheel or `EPIREFINE_RS=0`) on samples with
+    about 19 bins or fewer. On these paths the scoring peak is that of the in-memory table; the unit-table and calibration peaks
     are still lower.
 - **Host chunk tables** (`L_chunks`, 5.1 GiB on ZymoFecal). After the final fit only rows of a few mixed contigs
   are read: the table moves to a memory-mapped temporary file, written back and dropped from the page cache (the
@@ -299,7 +304,7 @@ Two tables of the main process are large and read only in row batches late in th
 
 **Where, and how to switch it off.** `--temp-dir DIR` puts both files in DIR (default: the output directory;
 created if missing; a folder in which no file can be made stops the run at the start with one line).
-`--tables-in-memory` takes the path of 0.11 instead: the contig tables stay in memory (about 5.9 GiB more in the
+`--tables-in-memory` takes the path used before 0.12 instead: the contig tables stay in memory (about 5.9 GiB more in the
 main process on ZymoFecal, from the unit tables to the scores) and the chunk tables' file is memory-mapped as
 before, without write-back or page drop, so its pages stay in the page cache. The outputs are the same either way.
 Both are recorded in `params.json` (`temp_dir`, `tables_in_memory`) and replayed by `epirefine rerun`.
@@ -327,3 +332,27 @@ warning (the outputs do not depend on it).
 Outputs are byte-identical whether the tables are on disk or in memory (tests force the disk path on the synthetic
 community with 1 and 3 workers, down-weighted groups, the unbinned prior and without the kernels; the small suites
 were compared file by file).
+
+## 8. Compiled kernels (0.12)
+
+The pileup reader, the motif scan and the model's inner loops (`npmle`, `bin_loglik`, `chunk_terms`, `cell_sums`,
+`score_sums`) have compiled versions in Rust (`rust/`), built by maturin into the extension
+`epirefine._kernels._core` of the platform wheels (Linux manylinux2014 x86_64 and aarch64, musllinux_1_2 x86_64,
+macOS arm64 and x86_64; one abi3 wheel per platform for Python 3.10 and later). Every other platform gets a pure
+`py3-none-any` wheel of the same version, made from a compiled wheel without the extension, and runs the numpy code.
+Up to 0.11 the kernels were a separate, unpublished package (`epirefine_rs`); 0.12 ignores it.
+
+- **Choice.** `epirefine._rs` decides once per run whether the kernels are used (they load, offer the interface
+  this code needs and `EPIREFINE_RS` is not 0), hands that decision to the worker processes, and stops the run if a
+  worker loads another build. Each call site keeps its numpy fallback; some options and small tables take the
+  numpy code also when the kernels are in use.
+- **Same decisions.** Both paths give the same decisions; the probabilities agree to the last digits (development:
+  monoculture training suite, ZymoOral and the simulated look-alikes, every output table byte-identical, params.json
+  values within 1.7e-14). The kernels' two CPU paths, `avx2_fma` (x86-64 with AVX2 and FMA) and `generic`
+  (`EPIREFINE_RS_NO_SIMD=1` forces it), give the same bits.
+- **Record.** The log's third line (`kernels: compiled (<cpu path>; built from <commit>)` or `kernels: numpy
+  (<reason>)`) and `params.json` `kernels` (available, used, reason, build commit, CPU path, module hash, and the
+  calls per kernel on each path, `ran`) say which code ran. Two limits are in the CHANGELOG: `ran` can undercount
+  on free-threaded Python, and the site cache does not record which reader built it.
+- **Building.** An editable install or the sdist compiles the extension and needs Rust and a C compiler (libdeflate
+  is linked statically); `pip install --no-binary epirefine epirefine` does that for a platform without a wheel.
