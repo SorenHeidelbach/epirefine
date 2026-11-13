@@ -351,6 +351,33 @@ _GIVEN = {"p_unknown": "p_unknown_given", "tau": "tau_given", "temperature": "te
 _INPUT_KEYS = {"assembly": "assembly", "pileup": "pileup", "contig_bin": "contig_bin", "motifs_path": "motifs"}
 
 
+# options removed in 0.12 (U12, D63: they lost) with the value that equals the behaviour that remains. A params.json
+# that records one of them at that value repeats as before; any other value cannot be repeated by this version.
+REMOVED_OPTIONS = {
+    "calibration": ("--calibration", "default"), "regional_inclusion": ("--regional-inclusion", False),
+    "robust_fit": ("--robust-fit", "alternating"), "max_flagged_share": ("--max-flagged-share", 1.0),
+    "unlisted_genome": ("--unlisted-genome", False), "inclusion_support": ("--inclusion-support", "none"),
+    "tau_support": ("--tau-support", "all"), "tau_select": ("--tau-select", "per-group"),
+    "npmle_start": ("--npmle-start", "warm"), "calibration_exclusion": ("--calibration-exclusion", True),
+    "slot_objective": ("--slot-objective", "legacy"), "slot_test_b": ("--slot-test-b", "decidable"),
+    "slot_kappa": ("--slot-kappa", None),
+}
+REMOVED_VALUES = {"relatives": ("--relatives", ("per-bin", "slot"))}
+
+
+def removed_options(params: dict) -> list[str]:
+    """The options a params.json records with a value that 0.12 removed (as '--name value')."""
+    out = []
+    for key, (flag, default) in REMOVED_OPTIONS.items():
+        if key in params and params[key] != default:
+            v = params[key]
+            out.append(flag if v is True else f"{flag} {v}")
+    for key, (flag, gone) in REMOVED_VALUES.items():
+        if params.get(key) in gone:
+            out.append(f"{flag} {params[key]}")
+    return out
+
+
 def rerun_arguments(params: dict, out, workers=None, cache_dir=None, log=log) -> dict:
     """Keyword arguments of pipeline.run that repeat the run params.json describes (inputs from their recorded
     paths, every option as it was given), with a new output folder. Says in the log what differs from the
@@ -358,6 +385,11 @@ def rerun_arguments(params: dict, out, workers=None, cache_dir=None, log=log) ->
     decisions; they are taken from the arguments (default: as recorded)."""
     import inspect
     from .pipeline import run
+    gone = removed_options(params)
+    if gone:
+        raise InputError(f"the recorded run used {'an option' if len(gone) == 1 else 'options'} removed in 0.12 "
+                         f"({', '.join(gone)}); repeat it with the epirefine version it names "
+                         f"({params.get('version', 'unknown')})")
     names = [n for n in inspect.signature(run).parameters]
     kw = {}
     for name in names:
