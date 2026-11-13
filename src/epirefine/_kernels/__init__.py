@@ -19,7 +19,14 @@ from typing import Iterator, Sequence
 
 import numpy as np
 
-from . import _core
+try:
+    from . import _core
+except ImportError as e:  # the pure wheel (or a source tree without a build) has no _core: say so plainly
+    import importlib.util
+    if importlib.util.find_spec(f"{__name__}._core") is None:
+        raise ModuleNotFoundError("this install has no compiled extension epirefine._kernels._core",
+                                  name=f"{__name__}._core") from e
+    raise
 from ._core import __commit__  # the commit the extension was built from (None: built from an sdist)
 
 __all__ = ["PileupReader", "MotifScanner", "site_records", "bin_loglik", "cell_sums", "score_sums", "npmle", "community_terms", "leave_chunk_out_terms", "supports", "features", "cpu_path", "SITE_COLUMNS", "API", "__commit__"]

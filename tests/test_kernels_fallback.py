@@ -37,6 +37,22 @@ def test_no_extension_gives_numpy_with_one_warning(monkeypatch):
     assert sum("compiled kernels not used" in x for x in lines) == 1 and f"kernels: numpy ({why})" in lines
 
 
+def test_install_without_the_extension_module(tmp_path):
+    """The package as the pure wheel installs it (no _core file), in a fresh interpreter: the reason is "no compiled
+    extension", not a failed load (hiding the module in sys.modules, as above, does not show the real import error)."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+    import epirefine
+    shutil.copytree(Path(epirefine.__file__).parent, tmp_path / "epirefine",
+                    ignore=lambda d, names: [n for n in names if n.startswith("_core") or n == "__pycache__"])
+    env = {**os.environ, "PYTHONPATH": str(tmp_path)}
+    env.pop("EPIREFINE_RS", None)
+    code = "import epirefine, sys; from epirefine import _rs; assert epirefine.__file__.startswith(sys.argv[1]); print(_rs.reason())"
+    out = subprocess.run([sys.executable, "-c", code, str(tmp_path)], env=env, capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "no compiled extension in this install (pure wheel, or a source tree without a build)"
+
+
 def test_switched_off_gives_numpy_without_warning(monkeypatch):
     monkeypatch.setenv("EPIREFINE_RS", "0")
     assert R.kernels() is None and R.reason() == "switched off by EPIREFINE_RS=0" and R.notice() is None
