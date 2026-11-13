@@ -5,6 +5,42 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
 
 ## Unreleased (0.12)
 
+### Breaking: options that lost are removed
+The command line no longer offers the options below. None was a default; each lost on the development benchmarks or
+was a design that was tried and rejected (dev log U12, D63; the reason for each is in
+`docs/development/method-notes.md` §7.6 and the dev log). At the defaults nothing changes: on the 15 development
+scenarios of the small suites (monoculture training, ZymoOral, simulated look-alikes) every decision file is
+byte-identical to the run before the removal. A command line that names one of them now fails with argparse's
+usage error, and `epirefine rerun` of a `params.json` that used one at a non-default value stops with one line
+naming it (the same option at its old default, as every 0.11.1 record holds, is accepted).
+- `--calibration` with its sets (`default`, `legacy`, `consistent`, `coherent`) and features (`temper-then-mix`,
+  `prior-averaged`, `prior-matched`, `conservative-temperature`, `full-test-b`, `unit-temperature`,
+  `sites-temperature`, `common-tau`, `em-priors`, `tempered-bin-prior`, `deployed-unknown`). The 0.11.1 default
+  (`default`: the relatives test's standard error over bins) is built in; the module-level switch of
+  `tempered-bin-prior` is gone with it.
+- `--robust-fit` (`damped`: no flag or inclusion changed on any development set).
+- `--max-flagged-share` (withheld 8 of 12 correct flags in a merge stress set and fired in none of 42 merges). The
+  `flagged_share` column and the `warning` column of `bin_evidence.tsv` stay; the warning
+  `merged_bin_suspected_flags_not_applied` can no longer occur.
+- `--tau-support` (`leave_bin_out`: no decision changed).
+- `--unlisted-genome` and `--inclusion-support` (rejected inclusion designs: inclusion recall 89.3% -> 87.4% and
+  58.4% on the training communities, development). `params.json` no longer has `unlisted_share`.
+- `--regional-inclusion` (no benchmark gained an inclusion; on ZymoFecal it placed long contigs the contig-level
+  model gives to an unknown genome).
+- The calibration-core designs that lost (mission WP3): `--tau-select`, `--npmle-start`, `--relatives per-bin`,
+  `--relatives slot` with `--slot-objective`, `--slot-test-b` and `--slot-kappa`; with them the report files
+  `hidden_relative.tsv` and `calibration/relatives_by_bin.tsv` (written only by `per-bin` and `slot`) and the
+  `params.json` keys `relatives_per_bin` and `relatives_slot`. The hidden diagnostic `--calibration-exclusion` too.
+- `params.json` no longer holds the keys of these options (`calibration`, `calibration_features`, `robust_fit`,
+  `max_flagged_share`, `tau_support`, `unlisted_genome`, `inclusion_support`, `regional_inclusion`, `tau_select`,
+  `npmle_start`, `calibration_exclusion`, `slot_objective`, `slot_test_b`, `slot_kappa`) nor
+  `unknown_model_deployed_check`. No column of any output table changed.
+- Kept: `--relatives switch` (hidden, deprecated; the 0.11.1 path, for comparison with option E), now used
+  automatically only with `--no-calibrate`; `--unknown-share`; the experimental `--temperature-law` and
+  `--evidence-temperature`; and the rule variants not yet judged (`--regional-leave-out`, `--regional-withdraw`,
+  `--regional-tempered`, `--gate-leave-out`, `--gate-unweighted`, `--eps-gated`, `--unknown-prior`,
+  `--redundancy-order`, `--siteless-bin-guard`, and the site options).
+
 ### Changed
 - **Method: the unknown-model switch is removed (new default, "option E").** Up to 0.11.1 EpiRefine chose, during
   calibration, between two models of a genome without a bin: a random draw from the community, or a relative of
@@ -29,14 +65,31 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   error, their ratio `statistic`, and what the 0.11 switch would have chosen). Large positive values mean some
   calibration pieces are explained better by an unbinned relative of a bin than by a random community genome
   (development data: 4.4-5.4 on the simulated look-alikes, 0.4-1.9 on ZymoFecal). When the switch would have
-  chosen the relatives, `params.json` also holds `unknown_model_forced`.
+  chosen the relatives, `params.json` also holds `unknown_model_forced`; the calibration tables (`summary.tsv`,
+  `reliability.tsv`, `temperature_by_length.tsv`, `assignability.tsv`, `fragments.tsv`) and the log line `unknown
+  model: ... -> used T` then describe the community-only fit the decisions use, and `fitted_temperature` is that
+  fit's best temperature before the never-sharpen rule.
 - `--relatives switch` (hidden, deprecated, for comparison only) restores the switch of 0.11.1 and, unless
-  `--unknown-share` is given, its share estimate at the deployed temperature: it reproduces 0.11.1. Runs with an
-  option that only works on that path (`--no-calibrate`, `--unlisted-genome`, `--regional-inclusion`, the
-  calibration features `sites-temperature`, `prior-matched`, `prior-averaged`, `unit-temperature`,
-  `deployed-unknown`) use it when `--relatives` is not given, and say so in the log. `params.json` records the
+  `--unknown-share` is given, its share estimate at the deployed temperature: it reproduces 0.11.1. A run with
+  `--no-calibrate` uses it when `--relatives` is not given, and says so in the log. `params.json` records the
   `relatives` and `unknown_share` actually used; `epirefine rerun` of a `params.json` written before 0.12 uses the
   switch.
+
+- **Guard for calibrations without a usable temperature.** When the calibrated temperature ends at the cap of the
+  grid (20), the calibration pieces were not predicted better by any temperature the grid allows, and the fit
+  says nothing about how far the scores can be trusted. Such a run now makes no call (no flag, inclusion or move;
+  the posteriors are still written, for inspection only; `include_contigs.tsv` lists no candidate), writes one log line `WARNING: calibration guard: ...`
+  and records `params.json` `calibration_guard` (`fired`, `reason`, `temperature`, `cap`, the numbers of
+  calibration pieces and of test-B pieces, `fallback`). `--temperature` bypasses it. With the experimental
+  `--temperature-law sites` it checks the law instead (its temperature at 1,000 sites at the law's cap, 100), since
+  the decisions then use the law's temperature, not the grid's. It is checked on the default
+  path only (not with the deprecated `--relatives switch`). Measured (development data): it fires on none of the
+  normal development runs (temperature at most 5.9 on the monoculture training set, ZymoOral, the simulated
+  look-alikes, ZymoFecal and its 600 bin resamples, fecal_inhouse) and on 3 of the 653 stress-set-2 runs that
+  finish (every
+  other one has a temperature of at most 1.7), all three of which made no call under option E anyway; decisions
+  are unchanged everywhere. The number of calibration pieces does not trigger it: from a single piece the
+  calibration usually lands at temperature 1.08 and the calls are right.
 
 ### Known limitations (new in 0.12)
 - **Unbinned genomes with a bin's methylation.** Contigs from a genome that has no bin but has the same, or nearly
@@ -49,10 +102,13 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   written last, and flags, inclusions and the refined bins do not depend on it. A large relatives statistic warns
   of such a sample.
 
+- **A calibration at the temperature cap gives no calls.** When the temperature of the calibration ends at the cap
+  of the grid (20), the guard above withholds every call. On development data this happened only on stress samples
+  of two bins with a single calibration piece without usable sites (or a confidently wrong one) or with half of the
+  methylation knocked out. On such a sample a fixed temperature (`--temperature`) can still give calls, but they
+  are not calibrated: on one development stress run, `--temperature 1` placed 25 contigs, one of them wrongly.
+
 ### Fixed
-- On the decision path of the calibration-core options, the `coverage` column of `contig_decisions.tsv` held the
-  evidence routine's value (empty for a contig without motif sites) instead of the contig's coverage. Decisions
-  did not read it.
 - **Site-cache key.** The manifest now has a format number (2) and a content fingerprint of the assembly and the
   pileup (SHA-256 of three 1 MiB blocks: start, middle, end; files up to 16 MiB whole). A pileup replaced by one of
   the same size and modification time was reused with the old sites; it is now rebuilt (the strict expected failure

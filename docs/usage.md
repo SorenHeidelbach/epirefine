@@ -61,7 +61,6 @@ agreement is not an independent check of them. Most users only set the inputs, `
 |---|---|---|
 | `--chunk-size` | 50000 | Binned contigs are split into pieces of this size to build robust bin fingerprints and to judge long contigs along their length. |
 | `--no-regional-model` | off | Judge long binned contigs only as a whole. By default a long contig that is partly its bin's and partly another genome's is reported as `mixed`, with its foreign segments, instead of being flagged. |
-| `--regional-inclusion` | off | Also include long unbinned contigs from their 50 kb windows. Experimental; it added inclusions the whole-contig model didn't support. |
 
 ## Model and calibration
 
@@ -75,24 +74,26 @@ estimates. Leave them unset unless you are testing the model.
 | `--variation` | beta | How a contig's methylated fraction varies around its bin's: `beta` or `logit` (logit-normal). |
 | `--tau` | calibrated | The variation parameter (beta concentration, or logit-normal sigma). |
 | `--no-calibrate` | off | Skip calibration: temperature 1 and a fixed variation (beta concentration 100) unless set. Probabilities are then overconfident; for testing only. |
-| `--calibration` | `default` | Calibration design: `default` (as in 0.10, plus `bin-parsimony`: an unknown model with relatives must beat the community-only one by 2 SE taken over bins; since 0.11.1), `legacy` (exactly as in 0.10 and 0.11.0), `consistent` (the features `temper-then-mix`, `common-tau`, `em-priors`), `coherent` (the full proposed design), or a comma-separated list of features; see `docs/development/method-notes.md` §7.6. |
-| `--relatives` | `community-only` | Model of a genome without a bin: a random draw from the community on every run (since 0.12). The relatives test of 0.11 is reported as a number (log line `relatives statistic`, `params.json` `relatives_statistic`) and decides nothing. `per-bin` and `slot` are experimental designs. The switch of 0.11.1 (`switch`) is deprecated and kept for comparison only; it is used automatically with `--no-calibrate`, `--unlisted-genome`, `--regional-inclusion` and the calibration features that need it. |
+| `--relatives` | `community-only` | Model of a genome without a bin: a random draw from the community on every run (since 0.12). The relatives test of 0.11 is reported as a number (log line `relatives statistic`, `params.json` `relatives_statistic`) and decides nothing. The switch of 0.11.1 (`switch`) is deprecated and kept for comparison only; it is used automatically with `--no-calibrate`. |
 | `--unknown-share` | `t1` | How the share of unbinned contigs from genomes without a bin (`p_unknown`) is estimated: at temperature 1 (`t1`, since 0.12; it does not rise with the temperature), or at the calibrated temperature (`deployed`, 0.11; the default with `--relatives switch`). |
+| `--temperature-law` | `grid` | Experimental. `sites`: a temperature that grows smoothly with a contig's number of motif sites (log T = a + b log(sites / 1000), b between 0 and 1, T at least 1.082) instead of one temperature from the grid. |
+| `--evidence-temperature` | `median` | Experimental. With `--temperature-law sites`, `contig` divides each contig's methylation evidence by its own temperature instead of the median one. |
 | `--frag-lengths` | `2000,5000,10000,20000,50000,100000` | Lengths of the calibration pieces in bp, comma-separated. |
 | `--frag-budget` | 6000 | Total number of calibration pieces, spread over bins and lengths. |
 | `--frags-per-bin` | 30 | At most this many pieces per bin and length. |
 | `--contam-eps` | 0.05 | Prior share of foreign pieces in a bin when building its fingerprint (0 = trust every piece; the regional model for long contigs is then off too, and the log says so; must be below 1). |
-| `--robust-fit` | `alternating` | `damped`: iterate the bin fingerprints in damped steps until they settle (slower; the same flags and inclusions on the development benchmarks it was tried on). |
 | `--unknown-prior` | `bins` | `unbinned`: a genome without a bin is assumed to carry each motif as often as the unbinned contigs do, not as often as the bins do. On development sets, far fewer contigs of genomes without a bin were placed into bins with no or one common motif (13 -> 0 and 233 -> 16 in two test sets), and fewer removed contigs were put back (training communities 89.3% -> 81.8%). Not tested on held-out data or a metagenome. |
 | `--unknown-prior-strength` | 5 | With `--unknown-prior unbinned`: pseudo-contigs at the bins' frequency (large values return to `bins`). |
 | `--redundancy-order` | `independent` | `sequential`: inclusion candidates of a bin are compared with the bin plus the candidates already accepted (most probable first), so two unbinned copies of one sequence are not both included. |
 | `--regional-leave-out`, `--regional-withdraw`, `--regional-tempered` | `chunk`, `vs_foreign`, off | Variants of the regional model: `contig` scores a long contig's pieces against the bin without the whole contig; `largest` withdraws a flag as `mixed` only when mixed is the most probable of member / foreign / mixed. |
 | `--gate-leave-out`, `--gate-unweighted`, `--eps-gated` | `none`, off, off | Variants of the methylome-difference requirement: against the bin's 95% interval without the contig; contig intervals from unweighted sites; contamination rate from contigs that pass it. |
-| `--max-flagged-share` | 1 | Below 1: apply no flag of a bin whose flagged contigs hold at least this share of its judged sequence (not recommended: see the dev log proposal of 2026-11-10). 1 = off. |
 | `--siteless-bin-guard` | off | Include nothing into a bin without a single motif site. |
-| `--tau-support` | `all` | `leave_bin_out`: a motif group gets between-contig variation only if the calibration supports it without its best bin. |
-| `--unlisted-genome`, `--inclusion-support` | off, `none` | Two rejected inclusion designs, kept for comparison. |
 | `--grid-size` | 64 | Points on the grid of methylated fractions. |
+
+Removed in 0.12 (they lost on the development benchmarks; see `CHANGELOG.md`): `--calibration`, `--robust-fit`,
+`--max-flagged-share`, `--tau-support`, `--unlisted-genome`, `--inclusion-support`, `--regional-inclusion`,
+`--tau-select`, `--npmle-start`, `--relatives per-bin` and `slot` with `--slot-objective`, `--slot-test-b` and
+`--slot-kappa`, and the hidden `--calibration-exclusion`.
 
 ## Speed and caching
 
@@ -130,6 +131,10 @@ epirefine rerun --params first_run/params.json --out repeat [--workers N] [--cac
 
 The log warns when an input file's size or modification time, the version or the commit differs from the record.
 Decisions do not depend on the worker count.
+A run recorded before 0.12 that used an option removed in 0.12 (below) cannot be repeated by this version: `rerun`
+stops with one line naming the option; repeat it with the version the record names. Such options at the value that
+was their default (for example `"calibration": "default"` in a 0.11.1 record) are accepted, since that behaviour
+remains.
 
 ## Examples
 

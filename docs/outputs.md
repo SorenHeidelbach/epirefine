@@ -73,7 +73,8 @@ outputs can read EpiRefine's.
   `medium_confidence` ≥ 0.8, `low_confidence` ≥ 0.5; `dropped_redundant` for a candidate that reached the inclusion
   threshold but was not added because the bin already holds its sequence). This lists candidates, not decisions:
   inclusion is applied at 0.9 (0.95 for a bin without detected methylation), so some `medium_confidence` rows are
-  applied and the contigs actually added are those with status `included` or `moved` in `contig_decisions.tsv`.
+  applied and the contigs actually added are those with status `included` or `moved` in `contig_decisions.tsv`. When
+  the calibration guard fires (`params.json` `calibration_guard.fired`), the file has its header and no row.
 - **`decontaminated_contig_bin.tsv`**: `contig`, `bin`: the input bins minus the flagged contigs.
 
 ## Bins and motifs
@@ -114,7 +115,10 @@ outputs can read EpiRefine's.
   and credible-set coverage per piece length before and after calibration (`summary.tsv`, `reliability.tsv`), the
   fitted temperature, overall and by length (`temperature_fit.tsv`, `temperature_by_length.tsv`), the variation
   parameter (`tau_fit.tsv`, `tau_groups.tsv`), the pieces themselves (`fragments.tsv`), how well each bin can be told
-  apart (`assignability.tsv`) and bins whose methylation looks alike (`lookalikes.tsv`). Two tables describe the
+  apart (`assignability.tsv`) and bins whose methylation looks alike (`lookalikes.tsv`). `summary.tsv`,
+  `reliability.tsv`, `temperature_by_length.tsv`, `assignability.tsv` and the extra columns of `fragments.tsv` are
+  made with the unknown model and temperature the decisions use (since 0.12 the community-only fit, also when the
+  0.11 switch would have chosen relatives: `unknown_model_forced`). Two tables describe the
   probabilities as they are used for the decisions: `false_flag_rate.tsv`, per piece length the share of pieces
   of true members (scored without their own contig) that would be flagged at the run's settings, for all pieces
   and for those kept by the calibration (`false_flag_rate`, `false_flags`; on the development benchmarks
@@ -140,7 +144,7 @@ outputs can read EpiRefine's.
     `include_threshold`, `include_threshold_unmethylated`, `min_methylome_difference`, `max_redundancy`,
     `min_evidence`, `min_contig_coverage`, `min_contig_length`, `min_cov`, `chunk_size`, `grid_size`, `contam_eps`,
     `min_jaccard`, `variation`, `frag_lengths`, `frags_per_bin`, `frag_budget`, `allow_sharpening`, and the switches
-    `motif_noise_filter`, `group_weights`, `regional_model`, `regional_inclusion`, `do_calibrate`,
+    `motif_noise_filter`, `group_weights`, `regional_model`, `do_calibrate`,
     `write_motif_fit`; `group_sample_bp` is `--group-sample-mb` in bp). `p_unknown_given`, `tau_given` and
     `temperature_given` hold `--p-unknown`, `--tau` and `--temperature` (`null` when not given).
   - Fitted values: `temperature` (used) and `fitted_temperature`, `tau` (variation), `unknown_eta`, `unknown_lam`,
@@ -154,5 +158,11 @@ outputs can read EpiRefine's.
     `relatives_temperature`, `community_temperature`, and `switch_choice` (what the 2-SE switch of 0.11.1 would have
     chosen); `null` without calibration or with one bin. `unknown_model_forced` (only when the switch would have chosen
     the relatives): its `switch_eta`, `switch_lam`, `switch_temperature` and the `community_temperature` used.
+  - `calibration_guard` (since 0.12): `fired` (true when the calibrated temperature is at the cap of the grid; the
+    run then makes no call), `reason`, `temperature`, `cap` (20), `pieces` (calibration pieces used),
+    `test_b_pieces` (pieces in test B) and `fallback` (`"no calls"` when fired); `null` without calibration, with
+    `--temperature` or with the deprecated `--relatives switch`. With `--temperature-law sites` the guard reads the law, whose
+    temperature the decisions use: `fired` when the law's temperature at 1,000 sites is at the upper bound of its
+    search, `temperature` is that value and `cap` 100. See the FAQ, "Known limitations".
   - The file is strict JSON: an infinite value is written as the string `"inf"` (a `tau` of `"inf"` means no
     variation between a contig and its bin), a missing one as `null`.

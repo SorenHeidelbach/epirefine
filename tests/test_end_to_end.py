@@ -186,7 +186,7 @@ def test_command_line_defaults_and_switches(monkeypatch):
     base = ["run", "--assembly", "a.fa", "--pileup", "p.bed", "--contig-bin", "cb.tsv", "--motifs", "m.tsv", "--out", "o"]
     cli.main(base)
     cli.main(base + ["--no-group-weights", "--no-motif-noise-filter", "--no-regional-model", "--no-calibrate",
-                     "--regional-inclusion", "--allow-sharpening", "--motif-fit", "--group-sample-mb", "2",
+                     "--allow-sharpening", "--motif-fit", "--group-sample-mb", "2",
                      "--frag-lengths", "2000,5000"])
     (args, plain), (_, switched) = calls
     assert args == ("a.fa", "p.bed", "cb.tsv", "m.tsv", "o")
@@ -194,7 +194,7 @@ def test_command_line_defaults_and_switches(monkeypatch):
     assert {k: v for k, v in plain.items() if v != sig[k].default} == {}
     changed = {k: v for k, v in switched.items() if v != plain[k]}
     assert changed == {"group_weights": False, "motif_noise_filter": False, "regional_model": False,
-                       "do_calibrate": False, "regional_inclusion": True, "allow_sharpening": True,
+                       "do_calibrate": False, "allow_sharpening": True,
                        "write_motif_fit": True, "group_sample_bp": 2e6, "frag_lengths": (2000, 5000)}
 
 

@@ -627,29 +627,35 @@ A reliability table, the τ and T fits, and accuracy against assignability (§8.
 Together these give a **sample-specific detection limit**: how short a plasmid can be and still be
 assigned reliably *in this sample*, with its coverage, motif repertoire and caller behaviour.
 
-### 7.6 Calibration designs (`--calibration`)
+### 7.6 The relatives test's standard error (`bin-parsimony`), and the calibration designs removed in 0.12
 
-The calibration of 0.10 (`--calibration legacy`, the default up to 0.11.0) is the one described above. Since 0.11.1 the default (`--calibration default`) is that calibration plus the feature `bin-parsimony`. A set of
-features, each selectable alone, changes one step each (`epirefine.calibrate.FEATURES`);
-`--calibration coherent` switches on the proposed set (temper-then-mix, prior-averaged, full-test-b,
-common-tau, em-priors); `coherent,-name` leaves one out.
+The calibration is the one of 0.10 described above, with one change since 0.11.1: the parsimony test of the unknown
+model (relatives, $\lambda < 1$, kept only when they beat community-only by 2 SE) takes its standard error from a
+bootstrap over bins instead of over single fragments (`bin-parsimony`). The evidence for relatives comes from sibling
+pairs of bins and a few bins hold most of it (ZymoFecal with the Nanomotif 1.3.0 motifs: 5 of 213 bins hold 44% of
+the test-B gain), so fragments are not independent: the gain 0.142 is 2.9 SE over fragments but 1.8 SE over bins, and
+the relatives model it used to select sent $p_\text{unknown}$ to 1 (no inclusions). On the simulated look-alikes,
+where every bin has an unbinned sibling, the gain stays at 5 SE over bins. Since 0.12 the test only reports (§7.7),
+except under the deprecated `--relatives switch`.
 
-| Feature | What changes |
-|---|---|
-| `temper-then-mix` | "Unknown" is a mixture of $H + 1$ explanations: a community draw (weight $\lambda$) and a relative of each bin (weight $(1-\lambda)/H$). Each is tempered on its own and the tempered terms are mixed, $Z_u = \log\big(\lambda e^{S_c/T} + \tfrac{1-\lambda}{H}\sum_h e^{R_h/T}\big)$, as the bins are. The legacy order (mix, then divide by $T$) also tempers the weights $1/H$ and gives "unknown" $\log(H)(1 - 1/T)$ of log odds over a bin that fits perfectly. No effect when $\lambda = 1$ or $T = 1$. |
-| `prior-averaged` | $(T, \eta, \lambda)$ minimise a proper score. A share $p$ of unbinned contigs has no bin (test B), $1 - p$ has one (test A), and the posterior is computed with that same prior: $J(\theta; p) = (1-p)\,\overline{\mathrm{LL}}_A + p\,\overline{\mathrm{LL}}_B$, averaged over $p = 0.1, 0.3, 0.5, 0.7, 0.9$. The legacy objective scores posteriors at prior 0.1 with the tests weighted 1 : 1, and then inflates $T$ to make up for the prior (1.62 on exact synthetic likelihoods whose true $T$ is 1). In test B the $H - 1$ remaining bins share $1 - p$. |
-| `prior-matched` | The same objective at one prior, the estimated $p_\text{unknown}$: fit, estimate $p_\text{unknown}$, refit, until the fit stops changing. Excludes `prior-averaged`. |
-| `full-test-b` | Test B counts every fragment, also those that cannot tell their bin from its nearest competitor (left out since D12). Contigs of a genome without a bin that resembles a bin are part of the population the posteriors are reported for. Meant for a proper objective. |
-| `unit-temperature` | Adds $T = 1$ to the grid, so "never sharpen" clips at 1 instead of at the grid's first value above 1 (1.082). |
-| `conservative-temperature` | Among $T \ge 1$, the largest $T$ whose objective is within 2 SE of the best (paired differences, bootstrap over source contigs). The fragments are easier to place than real unbinned contigs, so where they cannot tell two temperatures apart the flatter one is used. |
-| `sites-temperature` | $T$ may rise with a unit's number of sites: the best $T \ge 1$ per fragment length, made non-decreasing (pool adjacent violators), interpolated in log sites, constant outside the calibrated range; used only when it beats one temperature by more than 2 SE. |
-| `common-tau` | $\tau$ values (and the per-group choice) are compared on the fragments every $\tau$ fit keeps; each fit otherwise drops the fragments its own robust weights call foreign, which favours large $\tau$. |
-| `bin-parsimony` | The parsimony test of the unknown model (relatives, $\lambda < 1$, kept only when they beat community-only by 2 SE) takes its standard error from a bootstrap over bins instead of over single fragments. The evidence for relatives comes from sibling pairs of bins and a few bins hold most of it (ZymoFecal with the Nanomotif 1.3.0 motifs: 5 of 213 bins hold 44% of the test-B gain), so fragments are not independent: the gain 0.142 is 2.9 SE over fragments but 1.8 SE over bins, and the relatives model it used to select sent $p_\text{unknown}$ to 1 (no inclusions). On the simulated look-alikes, where every bin has an unbinned sibling, the gain stays at 5 SE over bins. Default since 0.11.1; since 0.12 the test only reports (§7.7). |
-| `tempered-bin-prior` | The uniform prior over the $H$ bins is tempered with the evidence: a bin's logit is $S_h/T + \log(1-p_\text{unknown}) - \log(H)/T$ instead of $\ldots - \log H$, in calibration and in the decisions. Without it the log odds of "unknown" against "some bin" gain $\log(H)(1 - 1/T)$ from the temperature alone and the EM estimate of $p_\text{unknown}$ rises with $T$ (ZymoFecal, community-only: 0.41 at $T = 1$, 0.69 at 5.02, 0.94 at 10; simulated look-alikes with relatives: 1.00 against a true share of 0.44-0.46). Option; result-changing (more inclusions). |
-| `deployed-unknown` | Checks the choice of the unknown model at the prior it is deployed with. The fit compares the model with relatives ($\lambda < 1$) and the community-only model ($\lambda = 1$, each at its best $T$) at the reference prior 0.1, but decisions use the $p_\text{unknown}$ that the EM finds on the unbinned contigs, and that estimate depends on the model: a relative of bin $h$ fits every contig that fits $h$, so where the relatives' likelihood ratio unknown : bins exceeds $1 - f$ ($f$ the share of unbinned contigs that fit no bin) the EM runs to $p_\text{unknown} = 1$ and nothing can be placed. With this feature, after the contigs are scored, $p_\text{unknown}$ is estimated under each of the two models, both are scored on the calibration fragments (tests A and B weighted 1 : 1) at their own estimate, and the relatives model is kept only if it is better by more than 2 SE (paired bootstrap over source contigs; D28's convention). Otherwise the community-only model and its temperature are used. No effect when the fit already chose $\lambda = 1$. Logged, and written to `params.json` (`unknown_model_deployed_check`). |
-| `em-priors` | $p_\text{unknown}$ gets a Beta(2, 2) prior (a flat prior runs to 0 or 1 with a handful of unbinned contigs); the contamination rate counts only contigs that pass the methylome-difference gate (the gate inside the E-step). |
+Up to 0.11.1 `--calibration` selected further designs of single steps of the calibration. None became a default
+and the option was removed in 0.12 (dev log U12, D63); `--relatives switch` reproduces the 0.11.1 default
+(`--calibration default`). What each did and why it was not kept (development data):
 
-Written in every mode: `calibration/false_flag_rate.tsv`, the share of member fragments (scored without
+| Removed design | What it changed | Why not kept |
+|---|---|---|
+| `temper-then-mix` | Each explanation of "unknown" tempered, then mixed, as the bins are (the order of 0.10 also tempers the weights $1/H$). No effect when $\lambda = 1$ | Changed no decision while $\lambda = 1$; with it the switch chose relatives at 4.6 SE on ZymoFecal and nothing was included (D59, candidate 1b). Option E uses $\lambda = 1$ |
+| `prior-averaged`, `prior-matched`, `full-test-b` | A proper objective (tests weighted $(1-p, p)$, averaged over priors or at the estimated prior; test B over every fragment) | Never confirmed on a metagenome; a cost in put back on the training communities; superseded by the unknown share at $T = 1$ (option E, §7.7) |
+| `unit-temperature` | $T = 1$ on the grid | Contig posteriors at exactly $T = 1$ overconfident (83% right at P 0.9-0.95 on the training communities) |
+| `conservative-temperature` | The flattest $T$ within 2 SE of the best | Without the proper objective no gain; with it only costs inclusions |
+| `sites-temperature` | $T$ rising with the number of sites, per fragment length | Worse than one temperature where its guard let it act; the smooth law `--temperature-law sites` (experimental) replaces it |
+| `common-tau` | $\tau$ compared on the fragments every fit keeps | Changed no decision on the development sets |
+| `em-priors` | Beta(2, 2) prior on $p_\text{unknown}$; contamination rate after the gate | No decision changed; the gated rate is still `--eps-gated` |
+| `tempered-bin-prior` | The bin prior $\log(H)/T$ (a module-level switch) | On ZymoFecal it made the switch choose relatives decisively: 1 inclusion. Option E estimates the share at $T = 1$ instead |
+| `deployed-unknown` | The unknown model checked at its deployed prior | On the look-alikes wrongly placed contigs 2 -> 19 (D51) |
+| `legacy` | The SE over single fragments (0.10, 0.11.0) | The ZymoFecal inclusion collapse (D50, D51) |
+
+Written on every run: `calibration/false_flag_rate.tsv`, the share of member fragments (scored without
 their contig) that the deployed rule would flag, per fragment length, with and without the fragments the
 robust profiles exclude; and `calibration/reliability_deployed.tsv`, the reliability of the fragments'
 posteriors at the priors and temperature actually used for decisions.
@@ -698,6 +704,28 @@ statistic is the warning: near 0 or below, the pieces give no sign of unbinned r
 deployed temperature unless `--unknown-share` is given.
 
 ---
+
+### 7.8 The calibration guard (since 0.12)
+
+*Code: `calibrate.calibration_guard`, `pipeline.run` (after the calibration block).*
+
+On the default path (option E, no `--temperature`), the run checks whether the calibrated temperature is at the
+largest point of the grid (the cap, 20). If so, it makes no call: the contamination and inclusion thresholds are
+set beyond 1 for the run, so no contig is flagged, included or moved, and the posteriors are written at the cap
+for inspection only. One log line (`WARNING: calibration guard`) and `params.json` `calibration_guard` say so.
+
+**Why the cap and not the number of pieces.** A temperature at the boundary of the search means no tempering the
+grid allows predicted the pieces better: the loss is flat in $T$ (pieces without usable sites) or still falling
+at 20 (pieces confidently wrong); either way the fit gives no temperature to decide with. On development data the
+temperature is at most 5.9 on every normal run (monoculture training set, ZymoOral, simulated look-alikes,
+ZymoFecal and 600 bin resamples of its calibration, fecal_inhouse) and either at most 1.7 or exactly 20 on the 653
+finished runs of stress set 2; nothing lies in between, so the check does not sit on a threshold. Counts of pieces do not
+separate: from a single calibration piece the fit usually lands at the never-sharpen floor (1.08) and the calls
+are right (stress set 2: tens of runs, flag precision 100%), so a guard on few pieces would remove correct calls.
+The three stress runs at the cap made no call under option E anyway (the contamination rate and $p_\text{unknown}$
+fall to 0 at $T = 20$ and every contig has evidence / $T$ below 3); the guard makes this explicit and guarantees
+it on data where some calls would survive $T = 20$. A fixed fallback temperature was rejected: $T = 1$ on one of
+those runs placed 25 contigs, one wrongly, where the calibration had found the scores untrustworthy.
 
 ## 8. Uncertainty, assignability and diagnostics
 

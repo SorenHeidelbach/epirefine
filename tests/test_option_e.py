@@ -29,18 +29,17 @@ def test_the_default_is_option_e():
 def test_switch_alone_is_the_path_of_0_11_1():
     assert resolve_unknown_model("switch", None, log=_quiet) == ("switch", "deployed")
     assert CoreOptions(relatives="switch", unknown_share="deployed").decisions_default
-    # other explicit choices keep their own defaults; an explicit share is kept
-    assert resolve_unknown_model("per-bin", None, log=_quiet) == ("per-bin", "deployed")
+    # an explicit share is kept
     assert resolve_unknown_model("switch", "t1", log=_quiet) == ("switch", "t1")
     assert resolve_unknown_model(None, "deployed", log=_quiet) == ("community-only", "deployed")
 
 
-@pytest.mark.parametrize("kw", [dict(do_calibrate=False), dict(unlisted_genome=True), dict(regional_inclusion=True),
-                                dict(features=frozenset({"deployed-unknown"}))])
-def test_options_that_need_the_switch_fall_back_to_it(kw):
+def test_a_run_without_calibration_falls_back_to_the_switch():
     said = []
-    assert resolve_unknown_model(None, None, log=said.append, **kw) == ("switch", "deployed")
+    assert resolve_unknown_model(None, None, do_calibrate=False, log=said.append) == ("switch", "deployed")
     assert "switch" in said[0]
+    with pytest.raises(ValueError):   # the removed designs are refused by name
+        CoreOptions(relatives="per-bin")
 
 
 def test_default_run_records_option_e_and_the_relatives_statistic(base_run):
@@ -78,25 +77,58 @@ def test_relatives_switch_reproduces_the_old_path(community, base_run, tmp_path)
     assert_same_outputs(run.out, explicit.out)
 
 
-def test_where_the_switch_picks_relatives_only_the_old_path_follows_it(community, base_run, tmp_path, monkeypatch):
-    """A calibration made to choose relatives (as the switch does on the look-alikes): the default forces community
-    only and records it; --relatives switch keeps the relatives model as 0.11.1 did."""
+def test_where_the_switch_picks_relatives_only_the_old_path_follows_it(sisters_run, sisters_switch_run):
+    """The sister community (synth.SISTERS), where the 2-SE switch of 0.11 really chooses relatives: the default
+    forces community only and records it; --relatives switch keeps the relatives model as 0.11.1 did."""
+    e, s = _params(sisters_run), _params(sisters_switch_run)
+    assert e["relatives_statistic"]["switch_choice"] == "relatives" and e["relatives_statistic"]["statistic"] > 2
+    assert e["unknown_lam"] == 1.0 and e["unknown_model_forced"]["switch_lam"] < 1
+    assert e["unknown_model_forced"]["community_temperature"] == e["temperature"]
+    assert e["unknown_model_forced"]["switch_temperature"] == s["temperature"] != e["temperature"]
+    assert "unknown model forced to community only" in sisters_run.log
+    assert s["unknown_lam"] < 1 and "unknown_model_forced" not in s
+
+
+def test_calibration_tables_describe_the_community_fit_used(sisters, sisters_run, sisters_switch_run, tmp_path,
+                                                            monkeypatch):
+    """Review F2: where the switch would choose relatives, the calibration tables and the log line describe the
+    community-only fit the decisions use (they were made from the switch's choice before the forcing). The
+    reference is computed independently: the best community-only row of temperature_fit.tsv, reported by the
+    calibration's own report function."""
+    import polars as pl
+
     import epirefine.pipeline as P
+    T = _params(sisters_run)["temperature"]
+    Ts = _params(sisters_switch_run)["temperature"]
+    assert T != Ts
+    assert f"-> used {T:g}" in sisters_run.log and f"-> used {Ts:g}" not in sisters_run.log
+    seen = {}
     real = P.calibrate
 
-    def relatives_chosen(*a, **k):
-        cal = real(*a, **k)
-        T = cal["temperature"] * 3
-        cal["fit"] = dict(cal["fit"], eta=0.05, lam=0.1, temperature=T)
-        cal.update(eta=0.05, lam=0.1, temperature=T)
-        return cal
-    monkeypatch.setattr(P, "calibrate", relatives_chosen)
-    out = copy_cache(base_run, tmp_path / "e")
-    e = _params(run_pipeline(**community.args(out), cache_dir=str(out / "cache")))
-    assert e["unknown_lam"] == 1.0 and e["unknown_model_forced"]["switch_lam"] == 0.1
-    out = copy_cache(base_run, tmp_path / "s")
-    s = _params(run_pipeline(**community.args(out), cache_dir=str(out / "cache"), relatives="switch"))
-    assert s["unknown_lam"] == 0.1 and "unknown_model_forced" not in s
+    def keep(*a, **k):
+        seen["cal"] = real(*a, **k)
+        return seen["cal"]
+    monkeypatch.setattr(P, "calibrate", keep)
+    out = copy_cache(sisters_run, tmp_path / "again")
+    run = run_pipeline(**sisters.args(out), cache_dir=str(out / "cache"))
+    tf = pl.read_csv(run.out / "calibration" / "temperature_fit.tsv", separator="\t")
+    com = tf.filter((pl.col("lam") >= 1) & (pl.col("temperature") >= 1)).sort("log_loss", maintain_order=True).row(
+        0, named=True)
+    assert com["temperature"] == T
+    fit = {"temperature": T, "eta": com["eta"], "lam": 1.0, "curve": None,
+           "fitted_temperature": tf.filter(pl.col("lam") >= 1).sort("log_loss", maintain_order=True)["temperature"][0]}
+    summary, reliability = seen["cal"]["report"](fit, 0.1)
+    for name, want in (("summary", summary), ("reliability", reliability)):
+        path = tmp_path / f"{name}.tsv"
+        want.write_csv(path, separator="\t", float_precision=4)
+        assert (run.out / "calibration" / f"{name}.tsv").read_text() == path.read_text(), name
+    # the fragments' expected log Bayes factors are divided by the temperature used (the margins at T = 1 are the
+    # same pieces and model in both runs)
+    fe = pl.read_csv(run.out / "calibration" / "fragments.tsv", separator="\t")
+    fs = pl.read_csv(sisters_switch_run.out / "calibration" / "fragments.tsv", separator="\t")
+    a = (fe["expected_log_bf_vs_nearest"] * T).drop_nulls().drop_nans()
+    b = (fs["expected_log_bf_vs_nearest"] * Ts).drop_nulls().drop_nans()
+    assert len(a) == len(b) > 0 and ((a - b).abs() <= 1e-3 * (1 + b.abs())).all()
 
 
 def test_rerun_of_a_run_from_before_option_e_uses_the_switch(base_run, tmp_path):

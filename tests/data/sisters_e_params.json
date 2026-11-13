@@ -1,0 +1,9 @@
+{
+ "tau": Infinity,
+ "temperature": 5.857,
+ "p_unknown": 0.2786441701148884,
+ "contamination_rate": 0.09650887952708626,
+ "unknown_eta": 0.02,
+ "unknown_lam": 1.0,
+ "n_fragments": 561
+}
