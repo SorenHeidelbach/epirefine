@@ -1,45 +1,209 @@
-# Release on a version tag (v*): build and check the package, test the built wheel, publish to TestPyPI and then
-# PyPI with trusted publishing (no tokens: PyPI trusts this workflow through GitHub's OIDC identity), and attach the
-# files to a GitHub release. PyPI and TestPyPI each need a trusted publisher for this repository, workflow
-# release.yml and environment pypi / testpypi (see the dev log's release notes).
+# Build, test and (on a version tag only) publish EpiRefine (D73, D74).
+#
+# Wheels: the kernels in rust/ compiled into one abi3 wheel (CPython >= 3.10) per platform: manylinux2014 x86_64 and
+# aarch64, musllinux_1_2 x86_64, macOS arm64 and x86_64; the pure py3-none-any wheel derived from the linux x86_64
+# one (dev/pure_wheel.py: same metadata, no extension; pip and uv take it only where no compiled wheel fits, and
+# EpiRefine then runs its numpy code); and the sdist (compiles the kernels; needs Rust and a C compiler).
+# Every wheel is installed and tested before anything is uploaded: Python 3.10 and 3.13 with current dependencies,
+# once with the lowest versions pyproject.toml allows, the kernels required to be used (params.json and the CPU path
+# checked), and on x86_64 also with the generic CPU path forced. The pure wheel is tested once (numpy and warning).
+#
+# Uploads happen ONLY for a v* tag equal to the version in pyproject.toml: TestPyPI, then PyPI, by trusted publishing
+# (environments testpypi and pypi; no tokens), then a GitHub release with every file. A push of a branch, or a
+# manual run, builds and tests and uploads nothing (D74: branch pushes run the ARM and macOS builds).
 name: release
 
 on:
   push:
     tags: ["v*"]
+    branches: ["feat/kernels-in-wheel", "release/*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+env:
+  EPIREFINE_RS_COMMIT: ${{ github.sha }}
 
 jobs:
-  build:
-    name: Build and check
+  version:
+    name: Tag matches the package version
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Tag matches the package version
-        run: |
+      - run: |
           v=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME but pyproject.toml says $v"; exit 1; }
-      - name: Build sdist and wheel
-        run: |
-          python -m pip install build twine
-          python -m build
-          python -m twine check --strict dist/*
-      - name: Test the built wheel in a clean environment
-        run: |
-          python -m venv /tmp/wheeltest
-          /tmp/wheeltest/bin/pip install dist/*.whl pytest
-          /tmp/wheeltest/bin/epirefine --version
-          cd /tmp && /tmp/wheeltest/bin/python -m pytest -q "$GITHUB_WORKSPACE/tests"
+
+  wheels:
+    name: Wheel ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: manylinux2014 x86_64, runner: ubuntu-latest, target: x86_64, manylinux: "2014" }
+          - { name: manylinux2014 aarch64, runner: ubuntu-24.04-arm, target: aarch64, manylinux: "2014" }
+          - { name: musllinux_1_2 x86_64, runner: ubuntu-latest, target: x86_64-unknown-linux-musl, manylinux: musllinux_1_2 }
+          - { name: macOS arm64, runner: macos-14, target: aarch64-apple-darwin, manylinux: "", macos: "11.0" }
+          - { name: macOS x86_64, runner: macos-15-intel, target: x86_64-apple-darwin, manylinux: "", macos: "10.12" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        uses: PyO3/maturin-action@v1
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos }}
+        with:
+          command: build
+          args: --release --out dist
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          docker-options: -e EPIREFINE_RS_COMMIT
+      - name: The wheel is abi3 and names its platform
+        shell: bash
+        run: ls dist && ls dist/*-cp310-abi3-*.whl
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: dist/
+          name: wheel-${{ matrix.target }}
+          path: dist/*.whl
+
+  pure-and-sdist:
+    name: Pure wheel and sdist
+    needs: wheels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel-x86_64
+          path: compiled
+      - name: Derive the pure wheel; build the sdist
+        run: |
+          python -m pip install "maturin>=1.16,<2" twine
+          mkdir -p dist
+          python dev/pure_wheel.py compiled/*manylinux*x86_64*.whl --out dist
+          maturin sdist --out dist
+          python -m twine check --strict dist/* compiled/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pure-and-sdist
+          path: dist/*
+
+  test-wheels:
+    name: Test ${{ matrix.wheel }} on Python ${{ matrix.python }}${{ matrix.lowest && ' (lowest pins)' || '' }}
+    needs: wheels
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        wheel: [x86_64, aarch64, aarch64-apple-darwin, x86_64-apple-darwin]
+        python: ["3.10", "3.13"]
+        lowest: [false]
+        include:
+          - { wheel: x86_64, runner: ubuntu-latest, simd: true }
+          - { wheel: aarch64, runner: ubuntu-24.04-arm, simd: false }
+          - { wheel: aarch64-apple-darwin, runner: macos-14, simd: false }
+          - { wheel: x86_64-apple-darwin, runner: macos-15-intel, simd: true }
+          - { wheel: x86_64, runner: ubuntu-latest, simd: true, python: "3.10", lowest: true }
+          - { wheel: aarch64, runner: ubuntu-24.04-arm, simd: false, python: "3.10", lowest: true }
+          - { wheel: aarch64-apple-darwin, runner: macos-14, simd: false, python: "3.10", lowest: true }
+          - { wheel: x86_64-apple-darwin, runner: macos-15-intel, simd: true, python: "3.10", lowest: true }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel-${{ matrix.wheel }}
+          path: dist
+      - name: Install the wheel
+        shell: bash
+        run: |
+          python -m pip install uv
+          uv venv -p python .venv-test
+          if [ "${{ matrix.lowest }}" = "true" ]; then
+            deps=$(python3 -c "import re; t=open('pyproject.toml').read(); print(' '.join(re.findall(r'\"([a-z]+>=[0-9.]+)\"', t.split('dependencies = [')[1].split(']')[0])))")
+            VIRTUAL_ENV=.venv-test uv pip install --resolution lowest-direct dist/*.whl $deps "pytest>=8" "pytest-xdist>=3"
+          else
+            VIRTUAL_ENV=.venv-test uv pip install dist/*.whl "pytest>=8" "pytest-xdist>=3"
+          fi
+      - name: The kernels are used (params.json of a small run, CPU path)
+        shell: bash
+        env:
+          EPIREFINE_EXPECT_KERNELS: "1"
+        run: |
+          .venv-test/bin/python -c "from epirefine import _rs; print(_rs.summary()); assert _rs.kernels('model_kernels') is not None"
+          .venv-test/bin/python -m pytest -q tests/test_kernels_fallback.py tests/test_run_record.py::test_params_record_code_libraries_kernels_threads_seeds
+      - name: Tests
+        shell: bash
+        env:
+          EPIREFINE_EXPECT_KERNELS: "1"
+        run: .venv-test/bin/python -m pytest -q -n auto tests
+      - name: Kernel tests on the generic CPU path
+        if: matrix.simd && !matrix.lowest
+        shell: bash
+        env:
+          EPIREFINE_EXPECT_KERNELS: "1"
+          EPIREFINE_RS_NO_SIMD: "1"
+        run: .venv-test/bin/python -m pytest -q -n auto tests/test_kernels_*.py tests/test_rs_*.py tests/test_threads.py
+
+  test-musl:
+    name: Test musllinux_1_2 x86_64 on Python ${{ matrix.python }}
+    needs: wheels
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel-x86_64-unknown-linux-musl
+          path: dist
+      - name: Tests in Alpine (binary dependencies only, so a missing musl wheel of a dependency fails fast)
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w -e EPIREFINE_EXPECT_KERNELS=1 python:${{ matrix.python }}-alpine sh -c '
+            pip install --only-binary :all: dist/*.whl "pytest>=8" "pytest-xdist>=3" &&
+            python -c "from epirefine import _rs; print(_rs.summary()); assert _rs.kernels(\"model_kernels\") is not None" &&
+            python -m pytest -q -n auto tests &&
+            EPIREFINE_RS_NO_SIMD=1 python -m pytest -q -n auto tests/test_kernels_cpu_path.py tests/test_rs_model.py'
+
+  test-pure:
+    name: Test the pure wheel (numpy code and its warning)
+    needs: pure-and-sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          name: pure-and-sdist
+          path: dist
+      - name: Install and test
+        run: |
+          python -m pip install dist/*-py3-none-any.whl "pytest>=8" "pytest-xdist>=3"
+          python -c "from epirefine import _rs; r = _rs.reason(); print(r); assert r.startswith('no compiled extension')"
+          python -m pytest -q -n auto tests
 
   testpypi:
     name: Publish to TestPyPI
-    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, pure-and-sdist, test-wheels, test-musl, test-pure]
     runs-on: ubuntu-latest
     environment:
       name: testpypi
@@ -49,8 +213,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist/
+          path: dist
+          merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
@@ -58,6 +222,7 @@ jobs:
 
   pypi:
     name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: testpypi
     runs-on: ubuntu-latest
     environment:
@@ -68,12 +233,13 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist/
+          path: dist
+          merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   github-release:
     name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: pypi
     runs-on: ubuntu-latest
     permissions:
@@ -81,8 +247,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist/
+          path: dist
+          merge-multiple: true
       - name: Create the release with the built files
         env:
           GH_TOKEN: ${{ github.token }}
