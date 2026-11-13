@@ -33,7 +33,7 @@ from .redundancy import inclusion_redundancy
 from .refine import (bin_evidence_table, em_weight, flagged_share_per_bin, refine, regional_pattern, suspected_merges,
                      withdraw_as_mixed,
                      write_outputs)
-from .sites import EncodedAssembly, RowFile, drop_pages, extract_sites, same_pairs, unit_tables
+from .sites import EncodedAssembly, RowFile, TableFileError, drop_pages, extract_sites, same_pairs, unit_tables
 from . import sitecache
 
 
@@ -257,9 +257,37 @@ def _batched_summary(grid, logp_fn, n, batch=2000):
 SPILL_MIN_BYTES = 256 << 20  # tables from this size on are moved to a temporary file once only rows of them are read
 
 
-def _spill(a: np.ndarray, directory) -> np.ndarray:
+class _SpillWriteback:
+    """Writes a spilled table's file back to disk and drops its pages from the page cache (charged to the run's
+    memory too) in a background thread: on the main thread this sync cost about 40 s on ZymoFecal (5.5 GB at
+    about 130 MB/s), inside the robust-profile stage. check() waits for it and stops the run with TableFileError
+    if it failed: after a failed write-back the file can no longer be trusted, so it is not read."""
+
+    def __init__(self, fh, directory, nbytes):
+        import threading
+        self.fh, self.directory, self.nbytes, self.error = fh, directory, nbytes, None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        try:
+            drop_pages(self.fh.fileno())
+        except OSError as e:
+            self.error = e
+
+    def check(self) -> None:
+        self._thread.join()
+        if self.error is not None:
+            raise TableFileError(f"the chunk tables' temporary file in {self.directory} could not be written to disk "
+                                 f"({self.error}); it needs about {self.nbytes / 1e9:.1f} GB of free space there. "
+                                 f"The run stops: the file cannot be read back safely")
+
+
+def _spill(a: np.ndarray, directory, writebacks: list | None = None) -> np.ndarray:
     """a as a read-only memory map of an unlinked temporary file in `directory` (the same values; its memory is freed
-    when the caller drops its last reference to the array), or a itself when it is small or the file cannot be written."""
+    when the caller drops its last reference to the array), or a itself when it is small or the file cannot be written.
+    The file is written back and its pages dropped: here, or with `writebacks` given in the background (the
+    _SpillWriteback is appended to it; call its check() before reading the map)."""
     if a.nbytes < SPILL_MIN_BYTES:
         return a
     import tempfile
@@ -267,10 +295,14 @@ def _spill(a: np.ndarray, directory) -> np.ndarray:
         fh = tempfile.TemporaryFile(dir=directory)
         a.tofile(fh)
         fh.flush()
-        drop_pages(fh.fileno())  # written out and dropped: the page cache is charged to the run's memory too
-        return np.memmap(fh, dtype=a.dtype, mode="r", shape=a.shape)
+        if writebacks is None:
+            drop_pages(fh.fileno())  # written out and dropped: the page cache is charged to the run's memory too
+        m = np.memmap(fh, dtype=a.dtype, mode="r", shape=a.shape)
     except OSError:
         return a
+    if writebacks is not None:
+        writebacks.append(_SpillWriteback(fh, directory, a.nbytes))
+    return m
 
 
 
@@ -588,7 +620,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     model.set_unknown_params(*unknown_params)
     # from here on the chunk tables are read only for the few mixed contigs of the regional step: kept in a temporary
     # file (memory-mapped, removed when the run ends) instead of memory, next to the model's own marginal copy
-    L_chunks = _spill(L_chunks, out)
+    spill_sync: list = []  # its write-back runs in the background (checked before the map is read)
+    L_chunks = _spill(L_chunks, out, spill_sync)
     p_foreign = 1 - model.w
     _write(pl.DataFrame({"contig": [asm.names[i] for i in chunk_contig], "start": chunk_no * chunk_size,
                          "bin": [bins[b] for b in chunk_bin], "p_foreign": p_foreign}),
@@ -965,6 +998,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         mixed_u = [u for u in long_u if mixed[tidx[u]]]
         if mixed_u:
             all_ks = np.concatenate([np.asarray(by_contig[u], np.int64) for u in mixed_u])
+            for w in spill_sync:
+                w.check()
             sc_all = model.score(L_chunks[all_ks])
             at = 0
             for u in mixed_u:

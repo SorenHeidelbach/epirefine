@@ -293,7 +293,9 @@ Two tables of the main process are large and read only in row batches late in th
     are still lower.
 - **Host chunk tables** (`L_chunks`, 5.1 GiB on ZymoFecal). After the final fit only rows of a few mixed contigs
   are read: the table moves to a memory-mapped temporary file, written back and dropped from the page cache (the
-  page cache is charged to the run's cgroup like any other memory).
+  page cache is charged to the run's cgroup like any other memory) by a background thread. On the main thread that
+  sync took about 40 s on ZymoFecal (5.5 GB; 7.2-7.8 s per GB measured on the test server's disk), inside the
+  robust-profile stage.
 
 **Space.** A run needs free space in the output directory for both files: about 12 GB on ZymoFecal-size samples.
 Both are removed when the run ends, also when it fails (on NFS an unlinked open file shows as `.nfsXXXX` while the
@@ -309,7 +311,8 @@ a full disk or quota shows), the tables go back to memory (one warning; the file
 so far are read back). If a write-back fails (`fdatasync`, in the background or at the end; usual for quota or space
 errors on network file systems, and for I/O errors), the run stops with one line naming the folder and the space
 needed: after a failed write-back the system may drop the unwritten pages, and the file can no longer be trusted.
-The chunk-table file falls back to the array still in memory on any error.
+The chunk-table file falls back to the array still in memory if it cannot be written; if its background write-back
+fails, the run stops in the same way before the file is read (the regional step), and goes on if it is never read.
 
 Outputs are byte-identical whether the tables are on disk or in memory (tests force the disk path on the synthetic
 community with 1 and 3 workers, down-weighted groups, the unbinned prior and without the kernels; the small suites
