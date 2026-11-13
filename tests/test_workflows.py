@@ -42,3 +42,14 @@ def test_every_upload_waits_for_every_test():
     tests = {k for k in j if k.startswith("test-") or k in ("licences",)}
     assert "test-sdist" in tests and tests <= set(needs) and "version" in needs
     assert "--no-binary epirefine" in j["test-sdist"] and "_rs.kernels('model_kernels') is not None" in j["test-sdist"]
+
+
+def test_pure_wheel_runs_with_the_lowest_pins_on_python_310():
+    """The numpy code is what users of the pure wheel run: both workflows test it with the lowest dependency versions
+    on Python 3.10 (B6 review P3), reading the bounds with tomllib."""
+    t = jobs("tests.yml")["numpy-only"]
+    assert re.search(r'wheel: "\*-py3-none-any.whl"\n\s+rs: ""\n\s+python: "3.10"\n\s+lowest: true', t)
+    r = jobs("release.yml")["test-pure"]
+    assert '{ python: "3.10", lowest: true }' in r
+    for text in (t, r):
+        assert "--resolution lowest-direct" in text and "tomllib.load" in text
