@@ -29,18 +29,17 @@ def test_the_default_is_option_e():
 def test_switch_alone_is_the_path_of_0_11_1():
     assert resolve_unknown_model("switch", None, log=_quiet) == ("switch", "deployed")
     assert CoreOptions(relatives="switch", unknown_share="deployed").decisions_default
-    # other explicit choices keep their own defaults; an explicit share is kept
-    assert resolve_unknown_model("per-bin", None, log=_quiet) == ("per-bin", "deployed")
+    # an explicit share is kept
     assert resolve_unknown_model("switch", "t1", log=_quiet) == ("switch", "t1")
     assert resolve_unknown_model(None, "deployed", log=_quiet) == ("community-only", "deployed")
 
 
-@pytest.mark.parametrize("kw", [dict(do_calibrate=False), dict(unlisted_genome=True), dict(regional_inclusion=True),
-                                dict(features=frozenset({"deployed-unknown"}))])
-def test_options_that_need_the_switch_fall_back_to_it(kw):
+def test_a_run_without_calibration_falls_back_to_the_switch():
     said = []
-    assert resolve_unknown_model(None, None, log=said.append, **kw) == ("switch", "deployed")
+    assert resolve_unknown_model(None, None, do_calibrate=False, log=said.append) == ("switch", "deployed")
     assert "switch" in said[0]
+    with pytest.raises(ValueError):   # the removed designs are refused by name
+        CoreOptions(relatives="per-bin")
 
 
 def test_default_run_records_option_e_and_the_relatives_statistic(base_run):

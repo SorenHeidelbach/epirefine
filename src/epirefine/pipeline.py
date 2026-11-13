@@ -8,8 +8,6 @@ number of motifs is held in memory.
 """
 from __future__ import annotations
 
-import dataclasses
-
 import json
 from types import SimpleNamespace
 import os
@@ -22,21 +20,18 @@ import polars as pl
 
 from . import io as pio
 from . import runinfo
-from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, ETA_REL, ContigScores, CoreOptions, SitesLaw,
-                        hidden_relative, slot_hidden_relative,
+from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, ContigScores, CoreOptions, SitesLaw,
                         calibrate, calibrate_decisions, contig_chunks, fragment_chunks,
-                        calibration_guard, fragments_per_bin, parse_features, select_fragments)
+                        calibration_guard, fragments_per_bin, select_fragments)
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
-from .model import (LOO_BATCH, LOO_THREADS_MIN, FittedModel, _cores, _n_threads, log_bins, logsumexp, posterior, set_tempered_bin_prior, summed_scores, unbinned_state_frequencies, unknown_logit,
-                    unknown_score)
+from .model import (LOO_BATCH, LOO_THREADS_MIN, FittedModel, _cores, _n_threads, log_bins, posterior,
+                    unbinned_state_frequencies, unknown_score)
 from .motifs import (build_records, describe_groups, group_motifs, noisy_groups, redundancy_weights,
                      specificity_ranks)
 from .redundancy import inclusion_redundancy
-from .refine import (bin_evidence_table, em_weight, flagged_share_per_bin, refine, regional_pattern, suspected_merges,
-                     withdraw_as_mixed,
-                     write_outputs)
+from .refine import bin_evidence_table, flagged_share_per_bin, regional_pattern, withdraw_as_mixed, write_outputs
 from .sites import EncodedAssembly, extract_sites, same_pairs, unit_tables
 from . import sitecache
 
@@ -274,53 +269,17 @@ def _spill(a: np.ndarray, directory) -> np.ndarray:
 
 
 
-def _bin_prior_scope(f):
-    """Runs f with the form of the bin prior that its calibration features ask for (tempered-bin-prior) and puts
-    the previous form back afterwards, also when the run fails."""
-    import functools
-    import inspect
-    sig = inspect.signature(f)
-
-    @functools.wraps(f)
-    def wrapped(*args, **kwargs):
-        bound = sig.bind(*args, **kwargs)
-        bound.apply_defaults()
-        try:
-            on = "tempered-bin-prior" in parse_features(bound.arguments["calibration"])
-        except ValueError:
-            on = False  # run() reports the bad value
-        old = set_tempered_bin_prior(on)
-        try:
-            return f(*args, **kwargs)
-        finally:
-            set_tempered_bin_prior(old)
-    return wrapped
-
-
-# calibration features the community-only path (option E) cannot be combined with
-_SWITCH_ONLY_FEATURES = frozenset({"sites-temperature", "prior-matched", "prior-averaged", "unit-temperature",
-                                   "deployed-unknown"})
-
-
-def resolve_unknown_model(relatives, unknown_share, features=frozenset(), do_calibrate=True, unlisted_genome=False,
-                          regional_inclusion=False, log=print) -> tuple[str, str]:
+def resolve_unknown_model(relatives, unknown_share, do_calibrate=True, log=print) -> tuple[str, str]:
     """The unknown model and unknown-share estimate a run uses (pipeline.run's relatives / unknown_share; None = the
     default). Default since 0.12 (option E, D63): 'community-only' with the share at T = 1. The removed switch
-    ('switch', deprecated) stays for ablation: it reproduces 0.11.1, and its share default is 'deployed'. A run with
-    an option that predates option E and needs the switch path gets 'switch' when relatives is not given."""
+    ('switch', deprecated) stays for ablation: it reproduces 0.11.1, and its share default is 'deployed'. A run
+    without calibration (no fit to force to community only) gets 'switch' when relatives is not given."""
     if relatives is None:
-        blockers = sorted(features & _SWITCH_ONLY_FEATURES)
-        if not do_calibrate:
-            blockers.append("no calibration")
-        if unlisted_genome:
-            blockers.append("--unlisted-genome")
-        if regional_inclusion:
-            blockers.append("--regional-inclusion")
         relatives = "community-only"
-        if blockers:
+        if not do_calibrate:
             relatives = "switch"
-            log(f"unknown model: the unknown-model switch of 0.11.1 (--relatives switch) is used, because "
-                f"{', '.join(blockers)} needs it")
+            log("unknown model: the unknown-model switch of 0.11.1 (--relatives switch) is used, because "
+                "no calibration needs it")
     elif relatives == "switch":
         log("WARNING: --relatives switch is deprecated (ablation only): it restores the unknown-model switch of "
             "0.11.1, which flips under resampling of the calibration (D63)")
@@ -329,51 +288,36 @@ def resolve_unknown_model(relatives, unknown_share, features=frozenset(), do_cal
     return relatives, unknown_share
 
 
-@_bin_prior_scope
 @_releases_cache_locks
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
-        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, regional_inclusion=False, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
+        max_redundancy=0.3, min_evidence=3.0, min_contig_coverage=5.0, min_contig_length=1000, motif_noise_filter=True, group_weights=True, include_threshold_unmethylated=0.95, regional_model=True, do_calibrate=True, frag_lengths=DEFAULT_LENGTHS, frags_per_bin=30, frag_budget=6000,
         tau=None, temperature=None, contam_eps=0.05, allow_sharpening=False, min_jaccard=0.9,
         variation="beta", group_sample_bp=50e6, workers=None, cache_dir=None, write_motif_fit=False, seed=1,
         shared_sites="sample", complement_pairs="sequence", strand_sites="sum", noise_max_off_share=1.0,
-        robust_fit="alternating", max_flagged_share=1.0, regional_leave_out="chunk", regional_withdraw="vs_foreign",
+        regional_leave_out="chunk", regional_withdraw="vs_foreign",
         regional_tempered=False, gate_leave_out="none", gate_unweighted=False, eps_gated=False,
-        redundancy_order="independent", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all",
-        unknown_prior="bins", unknown_prior_strength=5.0,
-        calibration="default", siteless_bin_guard=False,
-        tau_select="per-group", npmle_start="warm", calibration_exclusion=True, unknown_share=None,
-        temperature_law="grid", evidence_temperature="median", relatives=None, slot_objective="legacy",
-        slot_test_b="decidable", slot_kappa=None, calibration_seed=None):
-    """calibration: 'default' (the calibration of 0.10 with the parsimony test of the unknown model resampled over
-    bins, since 0.11.1), 'legacy' (the calibration of 0.10 and 0.11.0), 'consistent', 'coherent', or a comma-separated
-    list of calibrate.FEATURES; see calibrate.parse_features.
+        redundancy_order="independent", two_state_warning=0.2,
+        unknown_prior="bins", unknown_prior_strength=5.0, siteless_bin_guard=False, unknown_share=None,
+        temperature_law="grid", evidence_temperature="median", relatives=None, calibration_seed=None):
+    """The calibration is that of 0.10 with the relatives test resampled over bins (0.11.1); the options that
+    lost were removed in 0.12 (U12, D63: the calibration feature list, rejected rule variants and WP3 designs;
+    see CHANGELOG).
 
     The unknown model (option E of question U13, the default since 0.12): relatives None = 'community-only' (the
     unknown-model switch of 0.11 removed: contigs from genomes without a bin are modelled as random community draws
     on every run; the relatives test is reported as a number, params.json relatives_statistic) and unknown_share
     None = 't1' (the share of unbinned contigs from genomes without a bin estimated at T = 1). The methylation-evidence
-    check uses the temperature of that community-only fit. Runs with an option the community-only path does not
-    support (no calibration, --unlisted-genome, --regional-inclusion, the calibration features sites-temperature,
-    prior-matched, prior-averaged, unit-temperature, deployed-unknown) fall back to relatives 'switch' when relatives
-    is not given. relatives 'switch' (deprecated; ablation only) is the path of 0.11.1; with it unknown_share None =
-    'deployed', so '--relatives switch' alone reproduces 0.11.1. The values used are recorded in params.json.
+    check uses the temperature of that community-only fit. A run without calibration falls back to relatives
+    'switch' when relatives is not given. relatives 'switch' (deprecated; ablation only) is the path of 0.11.1; with
+    it unknown_share None = 'deployed', so '--relatives switch' alone reproduces 0.11.1. The values used are recorded
+    in params.json.
 
-    Calibration core options (WP3, experimental; the defaults of the others are the behaviour of 0.11.1):
-    tau_select: 'per-group' (the tau scan and a tau per motif group) or 'inf' (no between-contig variation: the
-    calibration fits tau = inf only; the seed's main route into the scores, dev log model_diagnostics.md 6a).
-    npmle_start: 'warm' or 'cold' (every population-prior fit from the uniform; model.FittedModel).
     unknown_share: 'deployed' (the EM at the deployed temperature) or 't1' (the EM at T = 1, the decisions with that
     share and the untempered bin prior). temperature_law: 'grid' (one temperature) or 'sites' (log T linear in
     log(sites), refitted under the chosen unknown model). evidence_temperature: 'median' or 'contig' (each contig's own
-    temperature in the methylation-evidence cut-off). relatives: 'switch' (one unknown model for all bins, chosen by
-    the 2-SE rule) or 'per-bin' (one mixture with a relatives weight per bin, fitted on the pieces; writes
-    calibration/relatives_by_bin.tsv and hidden_relative.tsv, report only) or 'slot' (design C: each bin's slot holds
-    its own genome or an unbinned relative, pi_h fitted jointly with the temperature; needs unknown_share 't1')
-    or 'community-only' (the switch removed: the community-only fit always, the relatives test logged only).
-    Slot model: slot_objective 'legacy' | 'averaged', slot_test_b 'decidable' | 'all', slot_kappa None =
-    cross-validated. See calibrate.calibrate_decisions.
-    calibration_exclusion: False keeps the calibration fragments from chunks called foreign (diagnostic only).
+    temperature in the methylation-evidence cut-off). relatives: 'community-only' or 'switch' (one unknown model for
+    all bins, chosen by the 2-SE rule). See calibrate.calibrate_decisions.
     seed: the motif-grouping sample (and the calibration pieces unless calibration_seed is given);
     calibration_seed: the calibration pieces only (default: seed). Each random step has its own generator."""
     args = dict(locals())  # first statement: the options as given
@@ -382,30 +326,13 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # cost the minutes (hours on a large sample) it takes to reach the place where it is used
     runinfo.check_inputs(args)
     provenance = runinfo.provenance(args)
-    features = parse_features(calibration)
-    relatives, unknown_share = resolve_unknown_model(relatives, unknown_share, features, do_calibrate=do_calibrate,
-                                                     unlisted_genome=unlisted_genome,
-                                                     regional_inclusion=regional_inclusion, log=_log)
+    relatives, unknown_share = resolve_unknown_model(relatives, unknown_share, do_calibrate=do_calibrate, log=_log)
     provenance.update(relatives=relatives, unknown_share=unknown_share)   # the values used (rerun repeats them)
-    core = CoreOptions(tau_select=tau_select, npmle_start=npmle_start, unknown_share=unknown_share,
-                       temperature_law=temperature_law, evidence_temperature=evidence_temperature,
-                       relatives=relatives, slot_objective=slot_objective, slot_test_b=slot_test_b,
-                       slot_kappa=slot_kappa)
-    if not core.decisions_default:
-        if features & {"sites-temperature", "prior-matched", "prior-averaged", "unit-temperature", "deployed-unknown"}:
-            raise ValueError("--unknown-share, --temperature-law, --evidence-temperature and --relatives cannot be "
-                             "combined with the calibration features sites-temperature, prior-matched, prior-averaged, "
-                             "unit-temperature or deployed-unknown")
-        # the feature temper-then-mix is carried by the core path (the unknown's order of tempering and mixing)
-        core = dataclasses.replace(core, temper_then_mix="temper-then-mix" in features)
-    if not core.decisions_default and (unlisted_genome or regional_inclusion or not do_calibrate):
-        raise ValueError("--unknown-share, --temperature-law and --evidence-temperature need the calibration and cannot "
-                         "be combined with --unlisted-genome or --regional-inclusion")
-    if "deployed-unknown" in features and features & {"prior-matched", "sites-temperature"}:
-        raise ValueError("the calibration feature deployed-unknown checks one fit with one temperature; it cannot be "
-                         "combined with prior-matched (which refits the unknown model) or sites-temperature")
-    if "deployed-unknown" in features and unlisted_genome:
-        raise ValueError("the calibration feature deployed-unknown cannot be combined with --unlisted-genome")
+    core = CoreOptions(unknown_share=unknown_share, temperature_law=temperature_law,
+                       evidence_temperature=evidence_temperature, relatives=relatives)
+    if not core.decisions_default and not do_calibrate:
+        raise ValueError("--unknown-share, --temperature-law, --evidence-temperature and --relatives community-only "
+                         "need the calibration")
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     runinfo.write_params(out / "params.json", provenance)  # a run that does not finish leaves its settings
@@ -553,17 +480,11 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     for c in host_contigs:
         chunk_offset[cid[c]] = off; off += n_chunks_of[c]
     n_host_chunks = off
-    # windows of long unbinned contigs (regional model for inclusion), scored like host chunks but kept
-    # out of the bin profiles. Off by default: no benchmark gains an inclusion from it, and on ZymoFecal
-    # (0.7.0) it included 58 long contigs the contig-level model gives P(unknown) 0.54-1 (42 above
-    # 0.99), with Hi-C's best bin agreeing for 7 of 43 (contig-level inclusions: 135 of 267; dev log D40)
-    win_contigs = ([c for c in targets if c not in cb and lengths[c] >= 2 * chunk_size and lengths[c] >= min_contig_length
-                    and cov_of.get(cid[c], 0.0) >= min_contig_coverage] if regional_model and regional_inclusion else [])
-    for c in win_contigs:
-        n_chunks_of[c] = -(-lengths[c] // chunk_size)
-        chunk_offset[cid[c]] = off; off += n_chunks_of[c]
+    # (windows of long unbinned contigs, the regional inclusion of --regional-inclusion, were removed in 0.12: no
+    # benchmark gained an inclusion from them, and on ZymoFecal they placed long contigs the contig-level model gives
+    # to an unknown genome; dev log D40)
     n_chunks_all = off
-    unit_contigs = list(host_contigs) + win_contigs
+    unit_contigs = list(host_contigs)
     chunk_contig = np.repeat([cid[c] for c in unit_contigs], [n_chunks_of[c] for c in unit_contigs]).astype(np.int64)
     chunk_no = np.concatenate([np.arange(n_chunks_of[c]) for c in unit_contigs]) if unit_contigs else np.zeros(0, int)
     chunk_bin_all = np.concatenate([np.repeat([bin_idx[cb[c]] for c in host_contigs], [n_chunks_of[c] for c in host_contigs]),
@@ -592,8 +513,6 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
             tabs[key] *= wf
         tabs["H_frag"] = (tabs["H_frag"][0] * wf, tabs["H_frag"][1] * wf)
     L_all = tabs.pop("L_chunks")
-    win = np.arange(n_host_chunks, n_chunks_all)[tabs["chunk_sites"][n_host_chunks:] > 0]
-    L_win, win_contig, win_no = L_all[win], chunk_contig[win], chunk_no[win]
     keep = np.flatnonzero(tabs["chunk_sites"][:n_host_chunks] > 0)  # chunks without sites carry no information
     remap = np.full(n_chunks_all, -1, np.int64); remap[keep] = np.arange(len(keep))
     L_chunks = L_all[keep]
@@ -608,28 +527,21 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
             return -1
         return int(remap[chunk_offset[contig_id] + c])
 
-    # prior used by the calibration before p_unknown is estimated: 0.1 in the legacy calibration; with
-    # prior-matched a neutral 0.5 (the fit is redone at the estimate); prior-averaged does not use it
-    p_cal = (0.5 if "prior-matched" in features else 0.1) if p_unknown is None else p_unknown
-    # (provenance holds --calibration as given; calibration_features the features it stands for)
+    # prior used by the calibration before p_unknown is estimated: 0.1, as in the calibration of 0.10
+    p_cal = 0.1 if p_unknown is None else p_unknown
     params = {**provenance, "chunk_size": chunk_size, "grid_size": grid_size, "p_unknown": p_unknown, "min_cov": min_cov,
-              "contam_eps": contam_eps, "calibration_features": sorted(features) or ["legacy"]}
+              "contam_eps": contam_eps}
     ffit = fit = None
     user_temperature = temperature
-    model_kw = {"contam_eps": contam_eps, "robust_fit": robust_fit}
-    if npmle_start != "warm":
-        model_kw["prior_start"] = npmle_start
+    model_kw = {"contam_eps": contam_eps}
     cal_taus = DEFAULT_TAUS if variation == "beta" else DEFAULT_SIGMAS
-    if tau_select == "inf":  # no between-contig variation (beta: tau = inf; logit-normal: sigma = 0)
-        cal_taus = (float("inf"),) if variation == "beta" else (0.0,)
     if do_calibrate:
         _log("calibration with pseudo-contigs")
         chunks_of = fragment_chunks(frags, chunk_size, chunk_index)
         cal = calibrate(L_chunks, chunk_bin, H, group_modtype, grid, frags, tabs["L_frag"], chunks_of,
                         p_cal, H_frag=tabs["H_frag"], allow_sharpening=allow_sharpening,
                         leave_out=contig_chunks(frags["contig"].to_numpy(), chunk_contig),
-                        taus=cal_taus, n_sites_frag=tabs["frag_sites"], exclude_foreign=calibration_exclusion,
-                        log=_log, features=features, tau_support=tau_support, **model_kw)
+                        taus=cal_taus, n_sites_frag=tabs["frag_sites"], log=_log, **model_kw)
         ffit, fit = cal["fragment_fit"], cal["fit"]
         names = dict(enumerate(bins))
         cal["lookalikes"] = cal["lookalikes"].select(
@@ -690,12 +602,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         warm = {"init_w": cal["model"].w, "init_pi": cal["model"].raw_pi}
         unknown_params = (cal["eta"], cal["lam"])
         params.update(unknown_eta=cal["eta"], unknown_lam=cal["lam"])
-        community_fit = cal["community"]
         del cal
         _log(f"calibrated: tau={'per-group' if np.ndim(tau) else f'{tau:g}'}, temperature={temperature:g}")
     else:
         warm, unknown_params = {}, (None, 1.0)
-        community_fit = None
         params["relatives_statistic"] = None
         _log("relatives statistic: not computed (no calibration)")
         params["calibration_guard"] = None
@@ -704,8 +614,6 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     temperature = 1.0 if temperature is None else temperature
 
     model = FittedModel(L_chunks, chunk_bin, H, group_modtype, grid, tau, **warm, **model_kw)
-    if core.relatives in ("per-bin", "slot"):   # the contigs' relative scores at the eta of the per-bin weights
-        unknown_params = (ETA_REL, 1.0)
     model.set_unknown_params(*unknown_params)
     # from here on the chunk tables are read only for the few mixed contigs of the regional step: kept in a temporary
     # file (memory-mapped, removed when the run ends) instead of memory, next to the model's own marginal copy
@@ -729,12 +637,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
 
     # score every contig against every bin; binned contigs leave-one-out, so their own bin's profile
     # is built without them
-    # (their Lp rows are the only ones the leave-one-out scores read: the rest is not kept, unless an option
-    # reads the tables of every contig afterwards: prior-matched rebuilds the relatives' scores from Lp and the
-    # leave-out terms when it refits the unknown model; the unbinned prior, the unlisted genome and the
-    # inclusion support read the unbinned contigs' rows)
-    refit_unknown = "prior-matched" in features
-    all_lp_rows = refit_unknown or unknown_prior == "unbinned" or unlisted_genome or inclusion_support != "none"
+    # (their Lp rows are the only ones the leave-one-out scores read: the rest is not kept, unless the unbinned
+    # prior reads the unbinned contigs' rows)
+    all_lp_rows = unknown_prior == "unbinned"
     sc = model.score(L_t, lp_rows=None if all_lp_rows else [i for i, c in enumerate(targets) if c in host_set])
     _log(f"scores: {len(targets)} contigs against {H} bins and an unbinned genome")
     if unknown_prior == "unbinned":
@@ -767,7 +672,6 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     diff = np.zeros(len(targets))
     llr_loo = np.zeros(len(chunk_bin))
     sole_contig = set()
-    loo: dict[int, tuple] = {}  # contig -> (own bin, per-group leave-out terms); filled for refit_unknown only
     bin_chunks = np.bincount(chunk_bin, minlength=H)
     own_chunks: dict[int, list[int]] = {}
     for u, c in enumerate(chunk_contig):
@@ -790,10 +694,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         rows = np.array([i for i, _, _ in batch], np.int64)
         bs = np.array([b for _, b, _ in batch], np.int64)
         profs = model.loo_profiles(bs, [own for _, _, own in batch])
-        A_loo = model.loo_rescore_many(sc, rows, bs, profs)
-        if refit_unknown:
-            for k, i in enumerate(rows):
-                loo[int(i)] = (int(bs[k]), A_loo[k])
+        model.loo_rescore_many(sc, rows, bs, profs)
         if gate_leave_out == "contig":
             # distance between the two 95% intervals: the contig's and that of its bin without the contig
             _, lo_b, hi_b, _ = grid.summarize(profs)
@@ -811,40 +712,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     else:
         with ThreadPoolExecutor(_n_threads()) as ex:
             list(ex.map(leave_out, batches))
-    loo = dict(sorted(loo.items()))  # in contig order, as the loop filled it
     _log(f"leave-one-out scores: {len(binned) - len(sole_contig)} binned contigs ({len(sole_contig)} sole contigs of their bin)")
 
     # bin refinement: contamination of binned contigs, inclusion of unbinned ones
     given = np.array([bin_idx[cb[c]] if c in cb else -1 for c in targets])
-    if ("deployed-unknown" in features and ffit is not None and fit is not None and fit["lam"] < 1
-            and community_fit is not None and user_temperature is None and p_unknown is None):
-        # The relatives model was chosen on the fragments at the reference prior; check it at the prior it would be
-        # deployed with. p_unknown is estimated exactly as refine() will (EM over the unbinned contigs that get a
-        # decision), once under each model, and both models are scored on the fragments at their own estimate.
-        ub = np.array([c not in host_set and cov_of.get(cid[c], 0.0) >= min_contig_coverage
-                       and lengths[c] >= min_contig_length for c in targets])
-        prior_u = (2.0, 2.0) if "em-priors" in features else (1.0, 1.0)
-        ttm = "temper-then-mix" in features
-
-        def deployed_p(f):
-            T = f["temperature"]
-            zu = unknown_logit(sc.R[ub] if f["lam"] < 1 else None, sc.Su_comm[ub], f["eta"], f["lam"], T, temper_then_mix=ttm)
-            return em_weight(logsumexp(sc.S[ub] / T, axis=1) - log_bins(H, T), zu, *prior_u)[0]
-        p_rel, p_com = deployed_p(fit), deployed_p(community_fit)
-        gain, se = ffit.deployed_gain((fit["temperature"], fit["eta"], fit["lam"]), p_rel,
-                                      (community_fit["temperature"], community_fit["eta"], 1.0), p_com)
-        keep = gain > 2 * se
-        _log(f"unknown model at its deployed prior: relatives (T={fit['temperature']:g}, eta={fit['eta']:g}, lam={fit['lam']:g}) "
-             f"p_unknown={p_rel:.3f} vs community only (T={community_fit['temperature']:g}) p_unknown={p_com:.3f}: "
-             f"log-loss gain {gain:.4f} +- {se:.4f} -> {'relatives' if keep else 'community only'}")
-        params["unknown_model_deployed_check"] = {"p_unknown_relatives": p_rel, "p_unknown_community": p_com,
-                                                  "gain": gain, "se": se, "kept_relatives": bool(keep)}
-        if not keep:
-            fit = dict(fit, temperature=community_fit["temperature"], eta=community_fit["eta"], lam=1.0, curve=None)
-            temperature = fit["temperature"]
-            model.set_unknown_params(fit["eta"], 1.0)
-            sc.Su = sc.Su_comm.copy()
-            params.update(temperature=temperature, unknown_eta=fit["eta"], unknown_lam=1.0)
     # expected methylation evidence (assignability) per contig, for its own bin (binned) or its best
     # bin (unbinned), and its coverage (median reads per motif site)
     best_bin = np.where(given >= 0, given, sc.S.argmax(1))
@@ -891,136 +762,37 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         diff[has] = np.where(n_sites_group[has] > 0, gap, 0.0).max(1)
     bin_ev = bin_evidence_table(bins, grid.summarize(model.log_prof), n_sites_group, given)
     unmeth_bins = (bin_ev["status"] == "no_methylation_detected").to_numpy()
-    new_path = bool(features & {"temper-then-mix", "sites-temperature", "prior-matched", "prior-averaged", "unit-temperature"})
-    new_path = new_path and core.decisions_default   # the core options carry temper-then-mix themselves
-    em_kw = dict(p_unknown_prior=(2.0, 2.0), eps_after_gate=True) if "em-priors" in features else {}
     if fit is None:  # no calibration: one temperature, the unknown model as set
         fit = {"temperature": float(temperature), "eta": model.eta, "lam": model.lam, "curve": None}
     # options of the decision rules that both calibration paths pass on
-    rule_kw = dict(eps_gated=eps_gated, empty_bins=bin_chunks == 0 if siteless_bin_guard else None,
-                   S_unlisted=model.unlisted_score(sc) if unlisted_genome else None)
-    if unlisted_genome and new_path:
-        raise ValueError("--unlisted-genome cannot be combined with the calibration features temper-then-mix, "
-                         "sites-temperature, prior-matched, prior-averaged or unit-temperature")
-    T_contig, Zu = temperature, None
-    relatives_weights = slot_model = None
+    rule_kw = dict(eps_gated=eps_gated, empty_bins=bin_chunks == 0 if siteless_bin_guard else None)
 
-    def decide(fit):
-        """Decisions under one calibration fit: the temperature (per contig when it depends on the number of
-        sites) and the unknown hypothesis' tempered score under the fit's unknown model."""
-        T = fit["curve"](n_sites) if fit.get("curve") is not None else fit["temperature"]
-        R = None
-        if fit["lam"] < 1 and fit["eta"]:
-            R = sc.R if fit["eta"] == (model.eta if model.eta else 0.05) else model.relatives(sc, fit["eta"], loo)
-        zu = unknown_logit(R, sc.Su_comm, fit["eta"], fit["lam"], T, temper_then_mix="temper-then-mix" in features)
-        r = refine(sc.S, None, given, testable, T, contamination_threshold, include_threshold,
-                   methylome_difference=diff, min_difference=min_methylome_difference,
-                   p_unknown=p_unknown, decidable=~low_cov & ~short, unmethylated_bins=unmeth_bins,
-                   include_threshold_unmethylated=include_threshold_unmethylated, Zu=zu, **em_kw, **rule_kw)
-        return r, T, zu
-
-    if not new_path:
-        # the one calibration function (calibrate.calibrate_decisions): at the default core options it is the
-        # refine() call of 0.11 on the calibrated temperature and unknown model
-        contigs = ContigScores(S=sc.S, Su_comm=sc.Su_comm, R={model.eta: sc.R} if model.eta else {}, given=given,
-                               testable=testable, decidable=~low_cov & ~short, n_sites=np.asarray(n_sites, float),
-                               Su=sc.Su, Su_eta_lam=(model.eta, model.lam))
-        rules = dict(contamination_threshold=contamination_threshold, include_threshold=include_threshold,
-                     methylome_difference=diff, min_difference=min_methylome_difference, p_unknown=p_unknown,
-                     unmethylated_bins=unmeth_bins, include_threshold_unmethylated=include_threshold_unmethylated,
-                     **em_kw, **rule_kw)
-        core_fit = dict(fit, user_temperature=user_temperature)
-        if core.relatives == "switch" and ((core_fit["lam"] < 1 and model.eta and core_fit["eta"] != model.eta)
-                                           or core_fit.get("curve") is not None):
-            raise ValueError("the calibration core path expects the unknown model the contigs were scored with")
-        res = calibrate_decisions(ffit, contigs, rules, core, fit=core_fit, log=_log)
-        ref = res.refinement
-        if not core.decisions_default:
-            temperature = res.T_contig
-            fit = {k: v for k, v in res.fit.items() if k not in ("user_temperature", "relatives_weights")}
-            params.update(temperature=float(np.median(np.atleast_1d(temperature))),
-                          temperature_by_sites=res.law.table() if res.law is not None else None,
-                          p_unknown_t1=res.p_unknown_t1, unknown_eta=fit["eta"], unknown_lam=fit["lam"])
-        if core.temper_then_mix and res.weights is None and res.fit["lam"] < 1:
-            T_contig = res.T_contig
-            Zu = unknown_logit(sc.R, sc.Su_comm, res.fit["eta"], res.fit["lam"], T_contig, temper_then_mix=True)
-        if res.slot is not None:
-            sm = res.slot
-            params["relatives_slot"] = {**sm.summary(), **res.slot_extra, "kappa_cv": sm.cv}
-            _write(pl.DataFrame({"bin": bins, "pi_relative": sm.pi}), out / "calibration" / "relatives_by_bin.tsv")
-            ph = slot_hidden_relative(contigs, sm, res.p_unknown_t1, res.T_contig, best_bin)
-            _write(pl.DataFrame({"contig": targets, "bin": [bins[b] for b in best_bin], "p_hidden_relative": ph}),
-                   out / "hidden_relative.tsv")
-            slot_model, T_rel = sm, res.T_contig
-        if res.weights is not None:
-            Zu = None   # the decisions' posterior below is rebuilt from the mixture
-            params["relatives_per_bin"] = res.weights.summary()
-            _write(pl.DataFrame({"bin": bins, "weight": res.weights.w, "H_weight": H * res.weights.w}),
-                   out / "calibration" / "relatives_by_bin.tsv")
-            ph = hidden_relative(contigs, res.weights, ref.p_unknown, res.T_contig, best_bin)
-            _write(pl.DataFrame({"contig": targets, "bin": [bins[b] for b in best_bin], "p_hidden_relative": ph}),
-                   out / "hidden_relative.tsv")
-            relatives_weights, T_rel = res.weights, res.T_contig
-        del contigs
-    else:
-        ref, T_contig, Zu = decide(fit)
-        if "prior-matched" in features and ffit is not None and p_unknown is None:
-            # the calibration prior must be the prior of the decisions: refit (T, eta, lam) at the estimated
-            # p_unknown and re-estimate, until the fit no longer changes (it lives on a grid, so it does, or cycles)
-            key = lambda f: (f["temperature"], f["eta"], f["lam"], None if f.get("curve") is None else tuple(f["curve"].log_T))
-            seen = [key(fit)]
-            for it in range(5):
-                new = ffit.fit(ref.p_unknown, log=_log)
-                if user_temperature is not None:
-                    new = dict(new, temperature=float(user_temperature), curve=None)
-                _log(f"calibration at the estimated p_unknown={ref.p_unknown:.3f}: temperature={new['temperature']:g}, "
-                     f"eta={new['eta']:g}, lam={new['lam']:g}")
-                if key(new) == key(fit):
-                    break
-                cycle = key(new) in seen
-                fit = new
-                seen.append(key(fit))
-                ref, T_contig, Zu = decide(fit)
-                if cycle:
-                    _log("calibration and p_unknown do not settle (cycle); keeping the last fit")
-                    break
-        temperature = fit["temperature"]
-        params.update(temperature=temperature, unknown_eta=fit["eta"], unknown_lam=fit["lam"],
-                      temperature_by_sites=fit["curve"].table() if fit.get("curve") is not None else None)
+    # the one calibration function (calibrate.calibrate_decisions): at the default core options of 0.11 it is the
+    # refine() call of 0.11 on the calibrated temperature and unknown model
+    contigs = ContigScores(S=sc.S, Su_comm=sc.Su_comm, R={model.eta: sc.R} if model.eta else {}, given=given,
+                           testable=testable, decidable=~low_cov & ~short, n_sites=np.asarray(n_sites, float),
+                           Su=sc.Su, Su_eta_lam=(model.eta, model.lam))
+    rules = dict(contamination_threshold=contamination_threshold, include_threshold=include_threshold,
+                 methylome_difference=diff, min_difference=min_methylome_difference, p_unknown=p_unknown,
+                 unmethylated_bins=unmeth_bins, include_threshold_unmethylated=include_threshold_unmethylated,
+                 **rule_kw)
+    core_fit = dict(fit, user_temperature=user_temperature)
+    if core.relatives == "switch" and ((core_fit["lam"] < 1 and model.eta and core_fit["eta"] != model.eta)
+                                       or core_fit.get("curve") is not None):
+        raise ValueError("the calibration core path expects the unknown model the contigs were scored with")
+    res = calibrate_decisions(ffit, contigs, rules, core, fit=core_fit, log=_log)
+    ref = res.refinement
+    if not core.decisions_default:
+        temperature = res.T_contig
+        fit = {k: v for k, v in res.fit.items() if k != "user_temperature"}
+        params.update(temperature=float(np.median(np.atleast_1d(temperature))),
+                      temperature_by_sites=res.law.table() if res.law is not None else None,
+                      p_unknown_t1=res.p_unknown_t1, unknown_eta=fit["eta"], unknown_lam=fit["lam"])
+    del contigs
     if core_late:
         # only the evidence: the coverage column stays the contig coverage computed above (all sites), as on the
         # 0.11 path (a3560c4 overwrote it with the evidence routine's own, NaN for a contig without motif sites)
         evidence, _ = methylation_evidence(temperature, per_contig=core.evidence_temperature == "contig")
-    if unlisted_genome:
-        sc.Su = ref.Su
-        params["unlisted_share"] = ref.unlisted_share
-        _log(f"unbinned genomes: {ref.unlisted_share:.3f} without any listed motif (unlisted), the rest community draws")
-    if inclusion_support == "methylated_groups":
-        # An inclusion must be supported by the motif groups its bin methylates: the posterior of the bin is
-        # recomputed from those groups alone and must reach the inclusion threshold too. Absence of methylation
-        # at the other listed motifs can speak against a bin (through the full posterior) but not for it, since
-        # a genome without a bin lacks them by construction (the list comes from the bins).
-        on = grid.summarize(model.log_prof)[1] >= 0.5
-        Tm = float(np.median(np.atleast_1d(temperature)))
-        pu = min(max(ref.p_unknown, 1e-6), 1 - 1e-6)
-        cand = np.flatnonzero(ref.include_bin >= 0)
-        support = np.zeros(len(targets))
-        for h in np.unique(ref.include_bin[cand]):
-            rows = cand[ref.include_bin[cand] == h]
-            ms = np.flatnonzero(on[h])
-            S_on = (summed_scores(sc.Lp[rows][:, ms], model.log_prof[:, ms]) if len(ms) else np.zeros((len(rows), H)))
-            n_alt = np.where(given[rows] >= 0, H - 1, H)
-            lg = np.concatenate([S_on / Tm + np.log((1 - pu) / n_alt)[:, None],
-                                 (sc.Au[rows][:, ms].sum(1) / Tm + np.log(pu))[:, None]], 1)
-            b_ = given[rows] >= 0
-            lg[np.flatnonzero(b_), given[rows][b_]] = -np.inf
-            support[rows] = np.exp(lg[:, h] - logsumexp(lg, axis=1))
-        thr_s = np.where(unmeth_bins[np.maximum(ref.include_bin, 0)], include_threshold_unmethylated, include_threshold)
-        weak = (ref.include_bin >= 0) & (support < thr_s)
-        _log(f"inclusion support: {int(weak.sum())} of {len(cand)} inclusions dropped (the bin's methylated motif groups "
-             f"alone do not support them)")
-        ref.include_bin[weak] = -1
-
     # long binned contigs: whole contig foreign, or partly the bin's and partly foreign along its length?
     # (chunk-level evidence from the robust host-profile fit; flags on mixed contigs are withdrawn and
     # their foreign segments reported)
@@ -1058,62 +830,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         ref.contaminant[mixed] = False
         ref.include_bin[mixed & (given >= 0)] = -1
         ref.candidate[mixed] = False
-        # long unbinned contigs: windows scored against every bin and the unknown genome; the candidate bin
-        # is the one expected to explain the most sequence (sum over windows of its posterior among bins and
-        # the unknown genome: a strongly methylated genome covering 40% of a chimera must not outvote a
-        # weakly methylated one covering 60%, which a summed score did on the chimera benchmark), and the three
-        # explanations (all windows the bin's / all unknown / a mixture along the contig) are weighed as
-        # for flags. Included when P(the bin explains the contig) x P(that bin among bins) reaches the
-        # inclusion threshold.
-        reg_inc = 0
-        if len(win):
-            ws = model.score(L_win)
-            T = float(np.median(np.atleast_1d(temperature)))
-            Sw, Suw = ws.S / T, ws.Su / T
-            by_win: dict[int, list[int]] = {}
-            for k in np.lexsort((win_no, win_contig)):
-                by_win.setdefault(int(win_contig[k]), []).append(int(k))
-            cand_u, llrs, h_star, p_bin = [], [], [], []
-            for u, ks in by_win.items():
-                i = tidx.get(u)
-                if i is None or given[i] >= 0 or len(ks) < 2 or ref.include_bin[i] >= 0 or low_cov[i] or short[i]:
-                    continue
-                pu = min(max(ref.p_unknown, 1e-3), 1 - 1e-3)
-                logits = np.concatenate([Sw[ks] + np.log1p(-pu) - log_bins(H, T), (Suw[ks] + np.log(pu))[:, None]], 1)
-                pw = np.exp(logits - logits.max(1, keepdims=True)); pw /= pw.sum(1, keepdims=True)
-                share = pw[:, :H].sum(0)                                        # expected windows per bin
-                h = int(share.argmax())
-                robust = np.maximum(Sw[ks], Suw[ks][:, None]).sum(0)
-                pb = np.exp(robust - robust.max()); pb /= pb.sum()
-                cand_u.append(i); h_star.append(h); p_bin.append(pb[h])
-                llrs.append(Suw[ks] - Sw[ks, h])
-            if cand_u and ref.p_unknown >= 1 - 1e-6:
-                # the model's own estimate says unbinned contigs have no bin here (simulated look-alikes):
-                # windows that each lean slightly toward a bin must not reopen that
-                _log("regional inclusion: p_unknown = 1, no unbinned contig has a bin; none included")
-                cand_u = []
-            if cand_u:
-                # prior weights tied to the model: p_unknown from the contig-level fit, the share of mixed
-                # contigs from the binned ones. Windows that can't tell the bin from an unknown genome
-                # (look-alike strains) then leave the decision to p_unknown, as at contig level; weights
-                # estimated from the long unbinned contigs alone let 'mixed' absorb them (simulated
-                # look-alikes: ~40 inclusions per scenario, 9 wrong).
-                pu = min(max(ref.p_unknown, 1e-6), 1 - 1e-6)
-                m = float(w_flag[2])
-                post_u, cpost, _ = regional_pattern(llrs, weights=((1 - pu) * (1 - m), pu * (1 - m), m))
-                for j, i in enumerate(cand_u):
-                    # a mixed contig counts toward the bin for the share of its windows the bin explains
-                    share_bin = float(np.mean(1 - cpost[j]))
-                    p_in = (post_u[j, 0] + post_u[j, 2] * share_bin) * p_bin[j]
-                    thr = include_threshold_unmethylated if unmeth_bins[h_star[j]] else include_threshold
-                    reg_p[i] = post_u[j]
-                    if p_in >= thr:
-                        ref.include_bin[i] = h_star[j]; ref.candidate[i] = True; reg_inc += 1
-                        u = cid[targets[i]]
-                        fk = [win_no[k] for k, pf in zip(by_win[u], cpost[j]) if pf >= 0.5 and post_u[j, 2] > post_u[j, 0]]
-                        segments[i] = ";".join(f"{c * chunk_size}-{min((c + 1) * chunk_size, lengths[targets[i]])}" for c in fk)
-            _log(f"regional inclusion: {len(cand_u)} long unbinned contigs scored in windows; {reg_inc} included")
-        # segment map: for contigs called mixed or included regionally, which bin (or an unknown genome)
+        # segment map: for contigs called mixed, which bin (or an unknown genome)
         # best explains each run of chunks along the contig, with its posterior. Reported only: nothing is
         # split, so a user can see whether a mixed contig joins two bins' sequences.
         seg_bins = [""] * len(targets)
@@ -1146,32 +863,15 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                 at += len(ks)
                 seg_bins[tidx[u]] = segment_map(None, chunk_no[ks], tidx[u],
                                                 SimpleNamespace(S=sc_all.S[rows], Su=sc_all.Su[rows]))
-        if len(win):
-            for u, ks in by_win.items():
-                i = tidx.get(u)
-                if i is not None and given[i] < 0 and ref.include_bin[i] >= 0 and segments[i]:
-                    seg_bins[i] = segment_map(L_win[ks], win_no[ks], i)
         regional = {"p": reg_p, "segments": segments, "mixed": mixed, "segment_bins": seg_bins}
         _log(f"regional: {len(long_u)} binned contigs with >= 2 chunks; {int(mixed.sum())} flags withdrawn as mixed "
              f"(partly the bin's, partly foreign along the contig)")
-    # a bin in which the flagged contigs hold at least max_flagged_share of the sequence has no identifiable
-    # majority genome: contamination is by definition the smaller part, so this is a merge of genomes (or a
-    # profile that settled on the wrong one), and removing "the contaminants" would remove a genome. No flag
-    # of such a bin is applied; the bin is reported (bin_evidence.tsv).
+    # the share of a bin's judged sequence its flagged contigs hold (bin_evidence.tsv; reporting only: the option
+    # --max-flagged-share, which withheld every flag of a bin above a share, was removed in 0.12)
     L_arr = np.array([lengths[c] for c in targets], dtype=float)
     judged = testable & ~low_cov & ~short
     flagged_share = flagged_share_per_bin(given, ref.contaminant, judged, L_arr, H)
-    # (only when asked for: at the default of 1 every flag is applied, as in 0.10. A share of exactly 1 is common
-    # on a metagenome, where one or two contigs of a bin have the coverage to be judged and are flagged.)
-    merged_bins = suspected_merges(flagged_share, max_flagged_share)
-    if merged_bins.any():
-        undo = ref.contaminant & merged_bins[np.maximum(given, 0)]
-        ref.contaminant[undo] = False
-        ref.include_bin[undo] = -1
-        ref.candidate[undo] = False
-        _log(f"WARNING: {int(merged_bins.sum())} bins look like a merge of genomes (flagged contigs hold >= "
-             f"{max_flagged_share:g} of the bin): {int(undo.sum())} flags not applied "
-             f"({', '.join(bins[b] for b in np.flatnonzero(merged_bins)[:10])})")
+    merged_bins = np.zeros(H, bool)   # (the warning merged_bin_suspected_flags_not_applied is never raised since 0.12)
     bin_ev = bin_ev.with_columns(
         pl.Series("robust_fit", np.where(unconverged, "not_converged", "converged")),
         pl.Series("flagged_share", flagged_share),
@@ -1207,20 +907,12 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     p_unknown = ref.p_unknown
     params.update(p_unknown=p_unknown, contamination_rate=ref.eps,
                   contamination_detection="skipped: one bin only" if H == 1 else "done")
-    if slot_model is not None:
-        Tv = np.broadcast_to(np.asarray(T_rel, float), (len(targets),))
-        S2 = sc.S + Tv[:, None] * np.log1p(-np.minimum(slot_model.pi, 1 - 1e-12))[None, :]
-        P = posterior(S2, None, p_unknown, Tv, Zu=slot_model.unknown_logit(sc.R, sc.Su_comm, Tv, p_unknown))
-        del S2
-    elif relatives_weights is not None:
-        P = posterior(sc.S, None, p_unknown, T_rel, Zu=relatives_weights.logit(sc.R, sc.Su_comm, T_rel))
-    else:
-        P = posterior(sc.S, sc.Su, p_unknown, temperature) if Zu is None else posterior(sc.S, None, p_unknown, T_contig, Zu=Zu)
+    P = posterior(sc.S, sc.Su, p_unknown, temperature)
     if ffit is not None:
         # how the deployed posteriors behave on the calibration fragments (true members scored without their
         # contig): false-flag rate per length, and reliability at the priors and temperature actually used
         dfit = dict(fit, eta=fit["eta"] if fit["eta"] else 0.05)
-        if not new_path and not isinstance(fit.get("curve"), SitesLaw):
+        if not isinstance(fit.get("curve"), SitesLaw):
             dfit = dict(dfit, temperature=float(np.median(np.atleast_1d(temperature))), curve=None)
         _write(pl.DataFrame(ffit.false_flags(dfit, p_unknown, ref.eps, threshold_given, min_methylome_difference)),
                out / "calibration" / "false_flag_rate.tsv")
