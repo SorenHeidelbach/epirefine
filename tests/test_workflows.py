@@ -82,3 +82,20 @@ def test_read_only_token_and_actions_pinned_by_commit():
         assert re.search(r"^permissions:\n  contents: read$", text, re.M), name
         uses = re.findall(r"uses: (\S+)", text)
         assert uses and all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", u) for u in uses), name
+
+
+def test_release_workflow_builds_main_and_checks_the_installed_command():
+    """release.yml builds and tests every platform on pushes to main (before a tag); every job that installs a wheel
+    or the sdist runs the `epirefine` command; the lowest pins are read with tomllib, not a regex; tests.yml runs the
+    Rust unit tests."""
+    text = (WF / "release.yml").read_text()
+    branches = re.search(r"^    branches: \[(.+)\]$", text, re.M).group(1)
+    assert '"main"' in branches
+    j = jobs("release.yml")
+    for job in ("test-wheels", "test-musl", "test-pure", "test-sdist"):
+        assert "epirefine --version" in j[job], job
+    assert "re.findall" not in j["test-wheels"] and "tomli" in j["test-wheels"]
+    t = jobs("tests.yml")
+    for job in ("test", "lowest-dependencies", "numpy-only"):
+        assert "epirefine --version" in t[job], job
+    assert "cargo test --manifest-path rust/Cargo.toml --release --locked" in t["build"]
