@@ -61,7 +61,29 @@ def _load():
         _kernels.cpu_path(), _kernels.features()  # every run records them: a build without them is refused here
     except (AttributeError, TypeError, ValueError) as e:
         return None, f"the compiled extension does not load: {type(e).__name__}: {e}"
+    if getattr(_kernels, BUILD_ATTR, None) is None:  # once per import: an extension module is never unloaded
+        try:
+            setattr(_kernels, BUILD_ATTR, _build_of(_kernels._core.__file__))
+        except (AttributeError, TypeError, OSError) as e:
+            return None, f"the compiled extension does not load: its module file cannot be read ({e})"
     return _kernels, None
+
+
+#: attribute of epirefine._kernels holding the build that this process loaded: its file, the file's stat and SHA-256
+BUILD_ATTR = "_loaded_build"
+
+
+def _stat_key(path) -> tuple:
+    st = os.stat(path)
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _build_of(path) -> dict:
+    """The compiled module file as loaded: its path, stat and SHA-256, read right after the import. The code in
+    memory is that file; a file replaced later (a rebuild in an editable install) is another build."""
+    path = str(path)
+    stat = _stat_key(path)
+    return {"file": path, "stat": stat, "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest()}
 
 
 def load():
@@ -84,11 +106,22 @@ def reset() -> None:
 
 
 def module_sha256(rs) -> str | None:
-    """SHA-256 of the compiled module file that is loaded (rs._core.__file__): identifies the build exactly."""
+    """SHA-256 of the compiled module this process loaded (rs._core.__file__, hashed once right after the import,
+    _load): identifies the build in memory exactly, also when the file was replaced since."""
+    build = getattr(rs, BUILD_ATTR, None)
+    return build["sha256"] if build else None
+
+
+def replaced(rs) -> bool:
+    """True when the compiled module file is no longer the one this process loaded (stat changed, or gone): worker
+    processes would load another build than the code in memory."""
+    build = getattr(rs, BUILD_ATTR, None)
+    if not build:
+        return True
     try:
-        return hashlib.sha256(Path(rs._core.__file__).read_bytes()).hexdigest()
-    except (AttributeError, TypeError, OSError):
-        return None
+        return _stat_key(build["file"]) != tuple(build["stat"])
+    except OSError:
+        return True
 
 
 def start_run() -> dict:
@@ -99,6 +132,12 @@ def start_run() -> dict:
     sha = module_sha256(rs) if rs is not None else None
     if rs is not None and sha is None:
         rs, why = None, "the compiled extension does not load: its module file cannot be read"
+    if rs is not None and replaced(rs):
+        _RUN = None
+        os.environ.pop(ENV_RUN, None)
+        raise RuntimeError(f"the compiled module {getattr(rs, BUILD_ATTR)['file']} was replaced after this process "
+                           f"loaded it (sha256 {sha}): its worker processes would run another build than its main "
+                           "process. Start the run in a new process.")
     _RUN = {"rs": rs, "reason": why, "sha256": sha}
     os.environ[ENV_RUN] = f"sha256:{sha}" if rs is not None else "numpy"
     _COUNTS.clear()

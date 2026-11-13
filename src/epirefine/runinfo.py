@@ -352,7 +352,7 @@ def kernels() -> dict:
         rec["features"] = sorted(rs.features())
     except Exception:
         rec["cpu_path"], rec["features"] = None, None
-    rec["module_sha256"] = _rs.module_sha256(rs)
+    rec["module_sha256"] = _rs.module_sha256(rs)  # of the build this process loaded (hashed at load, not now)
     return rec
 
 

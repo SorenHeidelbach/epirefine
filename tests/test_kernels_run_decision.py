@@ -122,3 +122,35 @@ def base_run_args(base_run) -> dict:
     from epirefine.runinfo import rerun_arguments
     p = json.loads((base_run.out / "params.json").read_text())
     return rerun_arguments(p, base_run.out)
+
+
+@needs_rs
+def test_module_hash_is_of_the_loaded_file_and_kept_from_load(tmp_path, monkeypatch):
+    """module_sha256 hashes the file the import loaded (rs._core.__file__), not the first _core* of its folder, and
+    keeps the hash of load time: a file replaced afterwards is another build than the one in memory."""
+    import hashlib
+    import shutil
+    rs = R.load()[0]
+    real = (tmp_path / "_core.real.abi3.so")
+    shutil.copyfile(rs._core.__file__, real)
+    (tmp_path / "_core.0.so").write_bytes(b"another build, first by name")
+    monkeypatch.delattr(rs, R.BUILD_ATTR)
+    monkeypatch.setattr(rs._core, "__file__", str(real))
+    R.reset()
+    assert R.load()[0] is rs
+    want = hashlib.sha256(real.read_bytes()).hexdigest()
+    assert R.module_sha256(rs) == want and not R.replaced(rs)
+    real.write_bytes(b"rebuilt")  # the file changes after the load: the recorded hash stays that of the loaded build
+    assert R.module_sha256(rs) == want and R.replaced(rs)
+
+
+@needs_rs
+def test_replaced_module_file_stops_the_run(monkeypatch):
+    """A process whose compiled module file changed since it loaded it would hand its workers another build: the
+    run does not start (before, start_run hashed the new file and handed that on)."""
+    monkeypatch.delenv("EPIREFINE_RS", raising=False)
+    rs = R.load()[0]
+    monkeypatch.setitem(getattr(rs, R.BUILD_ATTR), "stat", (0, 0, 0, 0))
+    with pytest.raises(RuntimeError, match="was replaced after this process loaded it"):
+        R.start_run()
+    assert R._RUN is None and R.ENV_RUN not in os.environ
