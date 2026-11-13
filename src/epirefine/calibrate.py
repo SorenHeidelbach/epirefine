@@ -110,6 +110,26 @@ def _relatives_statistic(gain: float, se: float, relatives_row: dict, community_
             "switch_choice": "relatives" if best_is_relatives and gain > 2 * se else "community only"}
 
 
+def calibration_guard(temperature, temps, n_pieces: int, n_test_b: int) -> dict:
+    """The guard for calibrations that carry no usable temperature (0.12; dev log proposal 2026-11-13 calib_guard).
+
+    It fires when the calibrated temperature is at the largest temperature of the grid (the cap, 20): no tempering
+    the grid allows predicted the calibration pieces better, so the fit says nothing about how far the contig
+    scores can be trusted. On development data the temperature is at most 5.9 on every normal run (monocultures,
+    ZymoOral, simulated look-alikes, ZymoFecal and its bin resamples, fecal_inhouse) and either at most 1.7 or
+    exactly 20 on the 690 stress-set-2 runs; it never lies in between, and the runs at 20 are those where one
+    calibration piece holds almost no sites or is confidently wrong, or where half of the methylation is knocked
+    out. The numbers of pieces are reported but do not trigger the guard: from a single piece the calibration
+    usually lands at the never-sharpen floor and the calls are right (stress set 2: 42 runs, 100% flag precision).
+    The fallback is no calls (the pipeline sets the decision thresholds beyond 1)."""
+    cap = float(max(temps))
+    T = float(np.max(np.atleast_1d(temperature)))
+    fired = T >= cap
+    return {"fired": bool(fired), "reason": f"temperature at the grid cap ({cap:g})" if fired else None,
+            "temperature": T, "cap": cap, "pieces": int(n_pieces), "test_b_pieces": int(n_test_b),
+            "fallback": "no calls" if fired else None}
+
+
 def clustered_se(dA, dB, cluster_a, cluster_b, n_boot: int = 400, seed: int = 0) -> float:
     """Standard error of mean(dA) + mean(dB) by a bootstrap that resamples whole clusters (the bins the fragments
     were cut from): the evidence for relatives is carried by sibling pairs of bins, a few of which hold most of

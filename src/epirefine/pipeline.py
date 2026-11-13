@@ -25,7 +25,7 @@ from . import runinfo
 from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, ETA_REL, ContigScores, CoreOptions, SitesLaw,
                         hidden_relative, slot_hidden_relative,
                         calibrate, calibrate_decisions, contig_chunks, fragment_chunks,
-                        fragments_per_bin, parse_features, select_fragments)
+                        calibration_guard, fragments_per_bin, parse_features, select_fragments)
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
@@ -669,6 +669,22 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         if temperature is not None:  # a temperature given by the user overrides the fit, and any curve
             fit = dict(fit, temperature=float(temperature), curve=None)
         temperature = cal["temperature"] if temperature is None else temperature
+        # the guard for calibrations without a usable temperature (calibrate.calibration_guard): on the default
+        # path only (the deprecated switch reproduces 0.11.1), and not when the user fixed the temperature
+        params["calibration_guard"] = None
+        threshold_given = contamination_threshold   # the false-flag report below stays at the threshold as given
+        if relatives != "switch" and user_temperature is None:
+            guard = params["calibration_guard"] = calibration_guard(
+                temperature, ffit.temps, int(ffit.kept.sum()), int((ffit.distinct & ffit.kept).sum()))
+            if guard["fired"]:
+                # fallback: no calls. Nothing reaches a threshold beyond 1, so no contig is flagged, included or
+                # moved; the posteriors are still written (at the cap, for inspection only)
+                contamination_threshold = include_threshold = include_threshold_unmethylated = float("inf")
+                _log(f"WARNING: calibration guard: the calibrated temperature is at the grid cap ({guard['cap']:g}; "
+                     f"{guard['pieces']} calibration pieces, {guard['test_b_pieces']} in test B): the calibration "
+                     f"gives no usable temperature, so no contig is flagged, included or moved in this run "
+                     f"(posteriors are written for inspection only); --temperature overrides this with an "
+                     f"uncalibrated temperature")
         params["fitted_temperature"] = cal["fitted_temperature"]
         params["n_fragments"] = frags.height
         warm = {"init_w": cal["model"].w, "init_pi": cal["model"].raw_pi}
@@ -682,6 +698,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         community_fit = None
         params["relatives_statistic"] = None
         _log("relatives statistic: not computed (no calibration)")
+        params["calibration_guard"] = None
     tabs = None
     tau = (100.0 if variation == "beta" else 0.3) if tau is None else tau
     temperature = 1.0 if temperature is None else temperature
@@ -1205,7 +1222,7 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         dfit = dict(fit, eta=fit["eta"] if fit["eta"] else 0.05)
         if not new_path and not isinstance(fit.get("curve"), SitesLaw):
             dfit = dict(dfit, temperature=float(np.median(np.atleast_1d(temperature))), curve=None)
-        _write(pl.DataFrame(ffit.false_flags(dfit, p_unknown, ref.eps, contamination_threshold, min_methylome_difference)),
+        _write(pl.DataFrame(ffit.false_flags(dfit, p_unknown, ref.eps, threshold_given, min_methylome_difference)),
                out / "calibration" / "false_flag_rate.tsv")
         _write(pl.DataFrame(ffit.deployed_reliability(dfit, p_unknown, ref.eps)), out / "calibration" / "reliability_deployed.tsv")
     write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff, redundancy,
