@@ -15,15 +15,13 @@ from helpers import INVARIANT_FILES, assert_same_outputs, copy_cache, run_pipeli
 
 
 def _kernels_available() -> bool:
-    try:
-        import epirefine_rs
-    except ImportError:
-        return False
-    return epirefine_rs.supports("model_kernels")
+    from epirefine import _rs
+    rs = _rs.load()[0]
+    return rs is not None and rs.supports("model_kernels")
 
 
 BACKENDS = ["numpy", pytest.param("kernels", marks=pytest.mark.skipif(not _kernels_available(),
-                                                                       reason="epirefine-rs not installed"))]
+                                                                       reason="no compiled kernels in this install"))]
 
 
 def _on_threads(monkeypatch, community, base_run, out, n: int, backend: str):

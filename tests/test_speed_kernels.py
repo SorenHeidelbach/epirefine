@@ -504,6 +504,7 @@ def test_threads_follow_cpu_affinity(monkeypatch):
 
 def test_prefetch_cache_reads_parts(tmp_path):
     import json
+    from pathlib import Path
     import epirefine.pipeline as P
     assert P._prefetch_cache(tmp_path) is None  # no manifest
     (tmp_path / "sites").mkdir()
@@ -511,6 +512,11 @@ def test_prefetch_cache_reads_parts(tmp_path):
         (tmp_path / "sites" / f"p{i}.parquet").write_bytes(b"x" * 1000)
     (tmp_path / "manifest.json").write_text(json.dumps({"parts": [f"elsewhere/sites/p{i}.parquet" for i in range(3)]}))
     th = P._prefetch_cache(tmp_path)
+    if not Path("/proc/meminfo").exists():
+        # By design: without /proc/meminfo (macOS) the free memory is unknown, so the optional prefetch (a speed-up
+        # only; nothing reads its result) is skipped and the run reads the cache from disk as before.
+        assert th is None
+        return
     th.join(10)
     assert not th.is_alive()
 

@@ -10,8 +10,25 @@ fi
 # run the tests in parallel when pytest-xdist is installed (dev extra); serially otherwise
 par=""
 if "$root/.venv/bin/python" -c "import xdist" 2>/dev/null; then par="-n ${EPIREFINE_TEST_JOBS:-8}"; fi
-if ! "$root/.venv/bin/python" -m pytest -q $par "$root/tests" > /tmp/epirefine-pre-commit.log 2>&1; then
-  tail -20 /tmp/epirefine-pre-commit.log >&2
+log=${EPIREFINE_PRECOMMIT_LOG:-/tmp/epirefine-pre-commit.log}
+# The compiled kernels. When this .venv can import the extension, the kernel tests must run against it:
+# EPIREFINE_EXPECT_KERNELS=1 turns a build that does not load into a failure, and a run in which kernel tests were
+# skipped as "no compiled kernels" fails below. When it cannot import it while rust/ is here, every kernel test
+# is skipped: say so loudly (a source tree without a build is allowed, but should not pass unnoticed).
+expect=""
+if "$root/.venv/bin/python" -c "import epirefine._kernels._core" 2>/dev/null; then
+  expect=1
+elif [ -d "$root/rust" ]; then
+  echo "pre-commit: WARNING: this .venv has no compiled extension (epirefine._kernels._core): every kernel test is" >&2
+  echo "pre-commit: WARNING: skipped. Build it with 'maturin develop --release' or 'uv pip install -e .'." >&2
+fi
+if ! EPIREFINE_EXPECT_KERNELS=${expect:-${EPIREFINE_EXPECT_KERNELS:-}} "$root/.venv/bin/python" -m pytest -q -rs $par "$root/tests" > "$log" 2>&1; then
+  tail -20 "$log" >&2
   echo "pre-commit: tests fail; fix them before committing." >&2
+  exit 1
+fi
+if [ -n "$expect" ] && grep -q "no compiled kernels in this install" "$log"; then
+  grep "no compiled kernels in this install" "$log" | head -5 >&2
+  echo "pre-commit: the compiled extension imports, but kernel tests were skipped as if it did not; fix the install." >&2
   exit 1
 fi

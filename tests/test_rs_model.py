@@ -1,6 +1,6 @@
-"""The optional compiled model kernels (package epirefine-rs, feature model_kernels): each returns what the numpy
+"""The compiled model kernels (epirefine._kernels, feature model_kernels): each returns what the numpy
 code returns to the last bits of exp, log and sums, a whole run takes the same decisions, and EPIREFINE_RS=0
-switches them off. Skipped when the package is not installed (or is a build without these kernels)."""
+switches them off. Skipped when the install has no compiled extension (or is a build without these kernels)."""
 import numpy as np
 import pytest
 
@@ -8,8 +8,8 @@ import epirefine.model as M
 from epirefine.grid import Grid
 from helpers import assert_same_outputs_to_rounding, copy_cache, run_pipeline
 
-rs = pytest.importorskip("epirefine_rs")
-pytestmark = pytest.mark.skipif(not rs.supports("model_kernels"), reason="epirefine-rs without model kernels")
+rs = pytest.importorskip("epirefine._kernels", reason="no compiled kernels in this install")
+pytestmark = pytest.mark.skipif(not rs.supports("model_kernels"), reason="compiled kernels without model kernels")
 
 
 def _both(monkeypatch, fn):
@@ -81,7 +81,7 @@ def test_run_takes_the_same_decisions(monkeypatch, community, base_run, tmp_path
 
 def test_cell_sums_returns_numpys_bits(monkeypatch):
     if not rs.supports("cell_sums"):
-        pytest.skip("epirefine-rs without cell_sums")
+        pytest.skip("compiled kernels without cell_sums")
     rng = np.random.default_rng(4)
     table = -rng.gamma(2.0, 3.0, (300, 64))
     r, w = rng.integers(0, 300, 150_000), rng.integers(1, 9, 150_000).astype(float)
@@ -93,7 +93,7 @@ def test_cell_sums_returns_numpys_bits(monkeypatch):
 def test_motif_grouping_scan_gives_the_same_records(monkeypatch, community):
     """build_records (the scan behind the motif groups) with the compiled scanner: the same table, row for row."""
     if not rs.supports("motif_scan"):
-        pytest.skip("epirefine-rs without the motif scan")
+        pytest.skip("compiled kernels without the motif scan")
     from epirefine import io as pio
     from epirefine.motifs import build_records
     args = community.args("unused")
@@ -110,7 +110,7 @@ def test_motif_grouping_scan_gives_the_same_records(monkeypatch, community):
 def test_summed_scores(monkeypatch, dtype):
     """The scoring sums with the kernel: equal to the numpy sums to rounding (the exponentials are numpy's in both)."""
     if not rs.supports("score_sums"):
-        pytest.skip("epirefine-rs without score_sums")
+        pytest.skip("compiled kernels without score_sums")
     rng = np.random.default_rng(6)
     grid = Grid(64)
     L, cb = _tables(rng, U=300, Mg=9), rng.integers(0, 5, 300)
@@ -127,7 +127,7 @@ def test_summed_scores(monkeypatch, dtype):
 def test_score_in_batches_is_score(monkeypatch):
     """Scoring in unit batches (kernel only) returns what scoring all units at once returns with the kernel."""
     if not rs.supports("score_sums"):
-        pytest.skip("epirefine-rs without score_sums")
+        pytest.skip("compiled kernels without score_sums")
     rng = np.random.default_rng(7)
     grid = Grid(64)
     L, cb = _tables(rng, U=200, Mg=9), rng.integers(0, 5, 200)

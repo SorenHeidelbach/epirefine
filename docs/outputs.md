@@ -189,7 +189,8 @@ in this sample deserve a second look; no threshold for it has been validated.
 ## `params.json`
 
 What the run was made with and what it fitted. Written when the run starts (`finished` is `false`) and completed at
-the end, so an interrupted run still shows its settings. The file is strict JSON: an infinite value is written as the
+the end, so an interrupted run still shows its settings; a run that stops with an error adds `finished: false`,
+`error` (its type and message) and the kernel counts so far (`kernels.ran`). The file is strict JSON: an infinite value is written as the
 string `"inf"` (a `tau` of `"inf"` means no variation between a contig and its bin), a missing one as `null`.
 `epirefine rerun --params params.json --out <dir>` repeats the run from this file (see `docs/usage.md`).
 
@@ -202,9 +203,16 @@ string `"inf"` (a `tau` of `"inf"` means no variation between a contig and its b
 - `commit` (`commit`, `source`: `git` with `dirty` true when tracked files differ from the commit, or the
   environment variable `EPIREFINE_COMMIT`, or a file `COMMIT` next to `src` as a snapshot made with `git archive`
   can carry; `null` for an installed release, whose `version` names it);
-- `libraries` (versions of `python`, `numpy`, `scipy`, `polars`, `epirefine_rs`);
-- `kernels` (`installed`, `used`, `EPIREFINE_RS`, `version`, `api`, `features`, `module_sha256` of the compiled
-  module, `installed_from`);
+- `libraries` (versions of `python`, `numpy`, `scipy`, `polars`);
+- `kernels` (`available`: the install has the compiled kernels; `used`: the run chose them (decided once at its
+  start, for the main process and every worker); `reason` the numpy code was chosen, or `null`; `EPIREFINE_RS`,
+  `EPIREFINE_RS_NO_SIMD`; for a compiled install also `commit` the module was built from, `cpu_path` (`avx2_fma` or
+  `generic`), `api`, `features` and `module_sha256` of the loaded compiled module; at the end of the run `ran`: per
+  kernel (`pileup_reader`, `motif_scan`, `npmle`, `bin_loglik`, `chunk_terms`, `cell_sums`, `score_sums`) the calls
+  that took the compiled code (`compiled`) and the calls that took the numpy code (`numpy`), the workers' included
+  (some options and small tables take the numpy code also when `used` is true), and `missing_features`);
+- `platform` (`system`, `release`, `machine`, `libc` and `libc_version`: the C library, whose maths functions set the
+  last bits of exp and log);
 - `threads` (`workers`, `cores` this process may use, `model_threads`, `polars_threads`, and the variables
   `omp_num_threads`, `openblas_num_threads`, `mkl_num_threads`, `polars_max_threads` as set, or `null`);
 - `seeds` (`seed`, `calibration_seed`, and `bootstrap`, the fixed seed of the resampling in the calibration tests);

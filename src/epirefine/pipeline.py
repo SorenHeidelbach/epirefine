@@ -288,6 +288,35 @@ def resolve_unknown_model(relatives, unknown_share, do_calibrate=True, log=print
     return relatives, unknown_share
 
 
+def _kernels_scope(f):
+    """Runs f and ends the run's kernels decision afterwards (epirefine._rs.end_run), also when the run fails, so
+    that a later run or call in this process decides afresh. A run that fails after writing its params.json gets
+    there the kernel counts so far, `finished: false` and the error (runinfo.record_failure)."""
+    import functools
+    import inspect
+    import time
+    sig = inspect.signature(f)
+
+    @functools.wraps(f)
+    def wrapped(*args, **kwargs):
+        from . import _rs
+        t0 = time.time()
+        try:
+            return f(*args, **kwargs)
+        except BaseException as e:
+            try:
+                params = Path(sig.bind(*args, **kwargs).arguments["out"]) / "params.json"
+                if params.is_file() and params.stat().st_mtime >= t0:  # written by this run, not an older one
+                    runinfo.record_failure(params, e)
+            except Exception:  # noqa: BLE001  (the run's own error is the one to report)
+                pass
+            raise
+        finally:
+            _rs.end_run()
+    return wrapped
+
+
+@_kernels_scope
 @_releases_cache_locks
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
         p_unknown=None, contamination_threshold=0.5, include_threshold=0.9, min_methylome_difference=0.4,
@@ -961,6 +990,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         "motifs": np.tile(group_label, nb), "phi_mean": mean.ravel(), "phi_lo95": lo.ravel(), "phi_hi95": hi.ravel(),
         "p_phi_gt_0.5": pp.ravel()}), out / "host_profiles.tsv")
     runinfo.write_params(out / "params.json", runinfo.finish(params))
+    from . import _rs
+    _log("kernels ran: " + (", ".join(f"{k} {v['compiled']} compiled / {v['numpy']} numpy" for k, v in _rs.ran().items())
+                            or "no kernel calls"))
     _log(f"done -> {out}; peak memory {runinfo.peak_rss_gb():.2f} GB (main process), "
          f"{runinfo.peak_rss_gb(children=True):.2f} GB (largest worker process)")
     return out

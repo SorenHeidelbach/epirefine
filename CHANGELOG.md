@@ -107,6 +107,17 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
   of two bins with a single calibration piece without usable sites (or a confidently wrong one) or with half of the
   methylation knocked out. On such a sample a fixed temperature (`--temperature`) can still give calls, but they
   are not calibrated: on one development stress run, `--temperature 1` placed 25 contigs, one of them wrongly.
+### Changed
+- **Compiled kernels by default (U5, D73).** The wheels for Linux (manylinux2014 x86_64 and aarch64, musllinux_1_2
+  x86_64) and macOS (arm64, x86_64) now carry the compiled kernels (pileup reader, motif scan, model kernels; the
+  Rust code is in `rust/`, the module `epirefine._kernels`), and EpiRefine uses them unless `EPIREFINE_RS=0`. They
+  were a separate, unpublished package (`epirefine-rs`) before; no new dependency is added. Every other platform
+  gets a pure wheel of the same version and runs the numpy code, which takes the same decisions (slower), with one
+  warning line. The log's third line and `params.json` (`kernels`: `available`, `used`, `reason`, `commit`,
+  `cpu_path`, and per kernel the calls on each path, `ran`) say which code ran; the choice is made once per run and
+  handed to the worker processes, and a worker that loads another build stops the run. A separately installed `epirefine_rs` is no longer used. Building from source
+  (the sdist, or an editable install) needs Rust and a C compiler. Byte identity against 0.12 development with the
+  separate kernels: see the branch's build log.
 
 ### Fixed
 - **Site-cache key.** The manifest now has a format number (2) and a content fingerprint of the assembly and the
@@ -137,7 +148,7 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
   the pieces are exactly those of 0.11.1 (tested against stored 0.11.1 draws, and on ZymoFecal's two motif tables
   against the groups of their site caches), so no decision changes. `params.json` records `calibration_seed`.
 - `params.json` records the code and where it ran: `commit` (from git, `EPIREFINE_COMMIT` or a `COMMIT` file),
-  `libraries`, `kernels` (installed, used, build hash), `threads` and `seeds`. `epirefine rerun --params
+  `libraries`, `kernels` (available, used, reason, build commit, CPU path, build hash), `threads` and `seeds`. `epirefine rerun --params
   params.json --out DIR` repeats a run from it (tested: same decisions).
 - Input checks with one-line errors: a contig listed in two bins (it was silently put in the last one), a
   contig-bin table with its columns swapped, a motif table without the needed columns (names the missing ones).
@@ -158,6 +169,13 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
 - `CITATION.cff` (version 0.12.0, no DOI yet).
 - A small synthetic example dataset, `tests/data/example_community` (1.6 MB; the golden-snapshot community of the
   tests), with a section in `getting-started.md` and a test that runs it end to end (about 5 s on one core).
+### Known limitations
+- `params.json` `kernels.ran` counts calls without a lock. On the usual (GIL) Python builds no count is lost; on a
+  free-threaded build (3.13t and later, which installs the pure wheel) concurrent counts from threads can be lost,
+  so the numbers may be low there. Decisions are not affected.
+- The site cache does not record which code built it (compiled reader or Python pass). The site rows are the same
+  integers on both paths, but a run that reuses a cache shows no pileup-reader calls in `kernels.ran`, and nothing
+  says which path built the cache.
 
 ## 0.11.1 (2026-11-12): the unknown-genome model no longer absorbs every unbinned contig
 

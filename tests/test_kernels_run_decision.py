@@ -1,0 +1,191 @@
+"""Kernels or numpy is decided once per run (epirefine._rs.start_run), handed to the worker processes, and checked
+there; and params.json records which code each kernel's calls took (kernels.ran), not only what was available."""
+import json
+import os
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
+
+import pytest
+
+from epirefine import _rs as R
+from helpers import copy_cache, run_pipeline
+
+HAVE_RS = R.load()[0] is not None
+needs_rs = pytest.mark.skipif(not HAVE_RS, reason="no compiled kernels in this install")
+
+
+def _in_worker():
+    """In a spawned worker: does this process use the compiled kernels (raises when it must stop the run)?"""
+    from epirefine import _rs
+    return _rs.kernels() is not None
+
+
+def _spawn(fn):
+    with ProcessPoolExecutor(1, mp_context=get_context("spawn")) as ex:
+        return ex.submit(fn).result()
+
+
+@needs_rs
+def test_decision_is_fixed_for_the_run(monkeypatch):
+    monkeypatch.delenv("EPIREFINE_RS", raising=False)
+    R.start_run()
+    try:
+        monkeypatch.setenv("EPIREFINE_RS", "0")  # changed during the run: the run keeps its decision
+        assert R.kernels() is not None and R.summary().startswith("kernels: compiled")
+    finally:
+        R.end_run()
+    assert R.kernels() is None  # after the run, EPIREFINE_RS counts again
+
+
+def test_numpy_decision_is_fixed_for_the_run(monkeypatch):
+    monkeypatch.setenv("EPIREFINE_RS", "0")
+    R.start_run()
+    try:
+        monkeypatch.delenv("EPIREFINE_RS")
+        assert R.kernels() is None and R.reason() == R.SWITCHED_OFF
+    finally:
+        R.end_run()
+
+
+@needs_rs
+def test_import_is_kept_once_per_process(monkeypatch):
+    """A build removed (or replaced) after the first import does not change the code of this process."""
+    import sys
+    monkeypatch.delenv("EPIREFINE_RS", raising=False)
+    rs = R.load()[0]
+    monkeypatch.setitem(sys.modules, "epirefine._kernels", None)
+    assert R.load()[0] is rs and R.kernels() is rs
+
+
+@needs_rs
+def test_workers_follow_the_main_process(monkeypatch):
+    monkeypatch.delenv("EPIREFINE_RS", raising=False)
+    R.start_run()
+    try:
+        assert os.environ[R.ENV_RUN] == f"sha256:{R.module_sha256(R.load()[0])}"
+        assert _spawn(_in_worker) is True
+    finally:
+        R.end_run()
+    monkeypatch.setenv("EPIREFINE_RS", "0")
+    R.start_run()
+    try:
+        monkeypatch.delenv("EPIREFINE_RS")  # a worker that would load the kernels on its own still runs numpy
+        assert os.environ[R.ENV_RUN] == "numpy" and _spawn(_in_worker) is False
+    finally:
+        R.end_run()
+
+
+def test_worker_with_another_build_stops_the_run(monkeypatch):
+    """A worker that cannot load the build the run started with (another file, or none) raises: the run stops
+    instead of mixing two builds or the two code paths."""
+    monkeypatch.delenv("EPIREFINE_RS", raising=False)
+    monkeypatch.setenv(R.ENV_RUN, "sha256:" + "0" * 64)
+    with pytest.raises(RuntimeError, match="worker process"):
+        _spawn(_in_worker)
+
+
+def test_counts_of_workers_are_added():
+    R.count("cell_sums", True)
+    R.add_counts({"cell_sums": [2, 3], "pileup_reader": [1, 0]})
+    assert R.ran() == {"cell_sums": {"compiled": 4, "numpy": 2}, "pileup_reader": {"compiled": 0, "numpy": 1}}
+    assert R.take_counts() is None  # the main process keeps its counts
+
+
+def _ran(run) -> dict:
+    return json.loads((run.out / "params.json").read_text())["kernels"]["ran"]
+
+
+def test_params_record_which_code_ran(base_run):
+    """kernels.ran: the calls of each kernel by path, the worker processes' included (the pileup pass and the unit
+    tables run in workers)."""
+    ran = _ran(base_run)
+    assert {"pileup_reader", "cell_sums", "bin_loglik", "npmle"} <= set(ran)
+    used = json.loads((base_run.out / "params.json").read_text())["kernels"]["used"]
+    if used:
+        assert ran["pileup_reader"]["compiled"] >= 1 and ran["cell_sums"]["compiled"] >= 1
+    else:
+        assert all(v["compiled"] == 0 for v in ran.values())
+    assert "kernels ran: " in base_run.log
+
+
+def test_numpy_run_records_numpy(base_run, tmp_path, monkeypatch):
+    """With EPIREFINE_RS=0 the record says numpy for every call (before, `used` only said what was available)."""
+    monkeypatch.setenv("EPIREFINE_RS", "0")
+    out = copy_cache(base_run, tmp_path / "out")
+    run = run_pipeline(**{**base_run_args(base_run), "out": out, "cache_dir": out / "cache"})
+    k = json.loads((run.out / "params.json").read_text())["kernels"]
+    assert k["used"] is False and k["ran"] and all(v["compiled"] == 0 for v in k["ran"].values())
+    assert sum(v["numpy"] for v in k["ran"].values()) > 0
+
+
+def base_run_args(base_run) -> dict:
+    from epirefine.runinfo import rerun_arguments
+    p = json.loads((base_run.out / "params.json").read_text())
+    return rerun_arguments(p, base_run.out)
+
+
+@needs_rs
+def test_module_hash_is_of_the_loaded_file_and_kept_from_load(tmp_path, monkeypatch):
+    """module_sha256 hashes the file the import loaded (rs._core.__file__), not the first _core* of its folder, and
+    keeps the hash of load time: a file replaced afterwards is another build than the one in memory."""
+    import hashlib
+    import shutil
+    rs = R.load()[0]
+    real = (tmp_path / "_core.real.abi3.so")
+    shutil.copyfile(rs._core.__file__, real)
+    (tmp_path / "_core.0.so").write_bytes(b"another build, first by name")
+    monkeypatch.delattr(rs, R.BUILD_ATTR)
+    monkeypatch.setattr(rs._core, "__file__", str(real))
+    R.reset()
+    assert R.load()[0] is rs
+    want = hashlib.sha256(real.read_bytes()).hexdigest()
+    assert R.module_sha256(rs) == want and not R.replaced(rs)
+    real.write_bytes(b"rebuilt")  # the file changes after the load: the recorded hash stays that of the loaded build
+    assert R.module_sha256(rs) == want and R.replaced(rs)
+
+
+@needs_rs
+def test_replaced_module_file_stops_the_run(monkeypatch):
+    """A process whose compiled module file changed since it loaded it would hand its workers another build: the
+    run does not start (before, start_run hashed the new file and handed that on)."""
+    monkeypatch.delenv("EPIREFINE_RS", raising=False)
+    rs = R.load()[0]
+    monkeypatch.setitem(getattr(rs, R.BUILD_ATTR), "stat", (0, 0, 0, 0))
+    with pytest.raises(RuntimeError, match="was replaced after this process loaded it"):
+        R.start_run()
+    assert R._RUN is None and R.ENV_RUN not in os.environ
+
+
+def test_failed_run_records_its_counts_and_clears_the_decision(community, tmp_path, monkeypatch):
+    """A run that stops after its pileup pass (here: the unit tables raise) leaves in params.json the counts so far,
+    finished false and the error; and the decision of the run is gone afterwards, in this same test (the autouse
+    reset would hide a missing clear)."""
+    import epirefine.pipeline as P
+
+    def boom(*a, **k):
+        raise RuntimeError("unit tables failed")
+    monkeypatch.setattr(P, "unit_tables", boom)
+    out = tmp_path / "out"
+    with pytest.raises(RuntimeError, match="unit tables failed"):
+        run_pipeline(**community.args(out))
+    assert R._RUN is None and R.ENV_RUN not in os.environ
+    p = json.loads((out / "params.json").read_text())
+    assert p["finished"] is False and p["error"] == "RuntimeError: unit tables failed"
+    ran = p["kernels"]["ran"]
+    assert sum(ran["pileup_reader"].values()) >= 1  # the pileup pass ran in workers before the stop
+    if p["kernels"]["used"]:
+        assert ran["pileup_reader"]["compiled"] >= 1
+
+
+def test_run_failing_before_its_record_clears_the_decision(community, tmp_path, monkeypatch):
+    """A run that stops right after begin (the decision is made, params.json not yet written) also leaves no
+    decision behind, and writes no params.json."""
+    from epirefine import runinfo
+
+    def bad(args):
+        raise ValueError("bad input")
+    monkeypatch.setattr(runinfo, "check_inputs", bad)
+    with pytest.raises(ValueError, match="bad input"):
+        run_pipeline(**community.args(tmp_path / "out"))
+    assert R._RUN is None and R.ENV_RUN not in os.environ
+    assert not (tmp_path / "out" / "params.json").exists()
