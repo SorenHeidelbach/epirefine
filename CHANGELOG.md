@@ -46,7 +46,8 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   calibration pieces and of test-B pieces, `fallback`). `--temperature` bypasses it. It is checked on the default
   path only (not with the deprecated `--relatives switch`). Measured (development data): it fires on none of the
   normal development runs (temperature at most 5.9 on the monoculture training set, ZymoOral, the simulated
-  look-alikes, ZymoFecal and its 600 bin resamples, fecal_inhouse) and on 3 of the 690 stress-set-2 runs (every
+  look-alikes, ZymoFecal and its 600 bin resamples, fecal_inhouse) and on 3 of the 653 stress-set-2 runs that
+  finish (every
   other one has a temperature of at most 1.7), all three of which made no call under option E anyway; decisions
   are unchanged everywhere. The number of calibration pieces does not trigger it: from a single piece the
   calibration usually lands at temperature 1.08 and the calls are right.
