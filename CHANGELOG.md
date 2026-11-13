@@ -9,7 +9,10 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
 that lost on the development benchmarks are removed from the command line (below). Decisions on metagenomes differ
 from 0.11.1. This is a release candidate: not tagged, not published.
 
-**Benchmark effect (all numbers development data, Nanomotif 1.3.0 motif table).**
+**Benchmark effect (all numbers development data; Nanomotif 1.3.0 motif table on ZymoFecal).**
+- Monoculture training suite (`benchmarks/results.tsv`, mono_train_1..6, its standard motif tables): contaminants
+  found 94.81% and flag precision 100% (both as 0.11.1), contigs put back 89.30% -> 89.55%, wrongly placed 2.0 per
+  scenario (as 0.11.1), completeness after 98.29% -> 98.33%.
 - ZymoFecal, calibration seed 1: 147 flags and 589 inclusions, against 147 flags and 503 inclusions in 0.11.1; no
   collapse (sentinel), Hi-C agreement of flags and inclusions unchanged in rate.
 - Confirmation data (looked at once, for the final candidate against the 0.11.1-equivalent baseline, release/0.12
