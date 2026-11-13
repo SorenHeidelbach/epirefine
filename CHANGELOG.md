@@ -178,6 +178,9 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
 - `CITATION.cff` (version 0.12.0rc1 in this release candidate; no DOI yet).
 - A small synthetic example dataset, `tests/data/example_community` (1.6 MB; the golden-snapshot community of the
   tests), with a section in `getting-started.md` and a test that runs it end to end (about 5 s on one core).
+- README and docs checked against the release candidate: install text (kernels in the wheels, pure fallback, no
+  Bioconda package yet), Nanomotif 1.3.0 as the motif source, versions named for every quoted number, the
+  confirmation and stress limitations in the FAQ, `docs/development/scalability.md` section 8 on the kernels.
 
 ### Known limitations
 - **Unbinned genomes with a bin's methylation.** Contigs from a genome that has no bin but has the same, or nearly
