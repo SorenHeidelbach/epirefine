@@ -86,7 +86,7 @@ def _decisions(out):
 
 def test_without_relatives_the_feature_changes_nothing(small_community, tmp_path):
     """Calibration chooses the community-only model on the small community: decisions identical to legacy."""
-    run_community(small_community, tmp_path / "legacy", seed=3, calibration="legacy")
+    run_community(small_community, tmp_path / "legacy", seed=3, calibration="legacy", relatives="switch")
     run_community(small_community, tmp_path / "dep", seed=3, calibration="deployed-unknown")
     assert _decisions(tmp_path / "legacy").equals(_decisions(tmp_path / "dep"))
     p = json.loads((tmp_path / "dep" / "params.json").read_text())
@@ -111,7 +111,9 @@ def forced_relatives(monkeypatch):
 
 
 def test_a_collapsing_relatives_model_is_replaced_by_community_only(small_community, tmp_path, forced_relatives):
-    run_community(small_community, tmp_path / "legacy", seed=3, calibration="legacy")
+    # the collapse needs the unknown-model switch of 0.11 (since 0.12 a deprecated option: option E forces
+    # community only, so the default run cannot collapse this way)
+    run_community(small_community, tmp_path / "legacy", seed=3, calibration="legacy", relatives="switch")
     p_leg = json.loads((tmp_path / "legacy" / "params.json").read_text())
     assert p_leg["p_unknown"] > 0.99                       # the collapse, as on ZymoFecal
     assert (_decisions(tmp_path / "legacy")["status"] == "included").sum() == 0

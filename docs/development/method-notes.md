@@ -644,7 +644,7 @@ common-tau, em-priors); `coherent,-name` leaves one out.
 | `conservative-temperature` | Among $T \ge 1$, the largest $T$ whose objective is within 2 SE of the best (paired differences, bootstrap over source contigs). The fragments are easier to place than real unbinned contigs, so where they cannot tell two temperatures apart the flatter one is used. |
 | `sites-temperature` | $T$ may rise with a unit's number of sites: the best $T \ge 1$ per fragment length, made non-decreasing (pool adjacent violators), interpolated in log sites, constant outside the calibrated range; used only when it beats one temperature by more than 2 SE. |
 | `common-tau` | $\tau$ values (and the per-group choice) are compared on the fragments every $\tau$ fit keeps; each fit otherwise drops the fragments its own robust weights call foreign, which favours large $\tau$. |
-| `bin-parsimony` | The parsimony test of the unknown model (relatives, $\lambda < 1$, kept only when they beat community-only by 2 SE) takes its standard error from a bootstrap over bins instead of over single fragments. The evidence for relatives comes from sibling pairs of bins and a few bins hold most of it (ZymoFecal with the Nanomotif 1.3.0 motifs: 5 of 213 bins hold 44% of the test-B gain), so fragments are not independent: the gain 0.142 is 2.9 SE over fragments but 1.8 SE over bins, and the relatives model it used to select sent $p_\text{unknown}$ to 1 (no inclusions). On the simulated look-alikes, where every bin has an unbinned sibling, the gain stays at 5 SE over bins. Default since 0.11.1. |
+| `bin-parsimony` | The parsimony test of the unknown model (relatives, $\lambda < 1$, kept only when they beat community-only by 2 SE) takes its standard error from a bootstrap over bins instead of over single fragments. The evidence for relatives comes from sibling pairs of bins and a few bins hold most of it (ZymoFecal with the Nanomotif 1.3.0 motifs: 5 of 213 bins hold 44% of the test-B gain), so fragments are not independent: the gain 0.142 is 2.9 SE over fragments but 1.8 SE over bins, and the relatives model it used to select sent $p_\text{unknown}$ to 1 (no inclusions). On the simulated look-alikes, where every bin has an unbinned sibling, the gain stays at 5 SE over bins. Default since 0.11.1; since 0.12 the test only reports (§7.7). |
 | `tempered-bin-prior` | The uniform prior over the $H$ bins is tempered with the evidence: a bin's logit is $S_h/T + \log(1-p_\text{unknown}) - \log(H)/T$ instead of $\ldots - \log H$, in calibration and in the decisions. Without it the log odds of "unknown" against "some bin" gain $\log(H)(1 - 1/T)$ from the temperature alone and the EM estimate of $p_\text{unknown}$ rises with $T$ (ZymoFecal, community-only: 0.41 at $T = 1$, 0.69 at 5.02, 0.94 at 10; simulated look-alikes with relatives: 1.00 against a true share of 0.44-0.46). Option; result-changing (more inclusions). |
 | `deployed-unknown` | Checks the choice of the unknown model at the prior it is deployed with. The fit compares the model with relatives ($\lambda < 1$) and the community-only model ($\lambda = 1$, each at its best $T$) at the reference prior 0.1, but decisions use the $p_\text{unknown}$ that the EM finds on the unbinned contigs, and that estimate depends on the model: a relative of bin $h$ fits every contig that fits $h$, so where the relatives' likelihood ratio unknown : bins exceeds $1 - f$ ($f$ the share of unbinned contigs that fit no bin) the EM runs to $p_\text{unknown} = 1$ and nothing can be placed. With this feature, after the contigs are scored, $p_\text{unknown}$ is estimated under each of the two models, both are scored on the calibration fragments (tests A and B weighted 1 : 1) at their own estimate, and the relatives model is kept only if it is better by more than 2 SE (paired bootstrap over source contigs; D28's convention). Otherwise the community-only model and its temperature are used. No effect when the fit already chose $\lambda = 1$. Logged, and written to `params.json` (`unknown_model_deployed_check`). |
 | `em-priors` | $p_\text{unknown}$ gets a Beta(2, 2) prior (a flat prior runs to 0 or 1 with a handful of unbinned contigs); the contamination rate counts only contigs that pass the methylome-difference gate (the gate inside the E-step). |
@@ -653,6 +653,49 @@ Written in every mode: `calibration/false_flag_rate.tsv`, the share of member fr
 their contig) that the deployed rule would flag, per fragment length, with and without the fragments the
 robust profiles exclude; and `calibration/reliability_deployed.tsv`, the reliability of the fragments'
 posteriors at the priors and temperature actually used for decisions.
+
+### 7.7 The unknown model since 0.12 (option E)
+
+*Code: `pipeline.resolve_unknown_model`, `pipeline.run` (the calibration block and the decision block),
+`calibrate.calibrate` (the relatives test), `calibrate.calibrate_decisions`, `calibrate._relatives_statistic`.*
+
+"Unknown" (§4.8) can be described two ways: a draw from the community ($\lambda = 1$), or a mixture of that draw
+and a relative of each bin ($\lambda < 1$, mixing weight $1-\lambda$ spread over the $H$ bins, relatives at
+distance $\eta$). Up to 0.11.1 the calibration chose between them per sample (the best row of the temperature
+fit, kept with relatives only when it beat the best community-only row by 2 SE, the SE resampled over bins since
+`bin-parsimony`). That choice is removed. Every run now:
+
+1. fits the temperature grid as in §7.4 for both unknown models and, as before, computes the relatives test:
+   the gain in mean log loss of the best relatives row over the best community-only row, and its SE over bins
+   (computed also when community only fits best; the gain is then $\le 0$);
+2. uses the best community-only row (its $T$ and $\eta$, $\lambda = 1$), whatever the test says; the test is
+   written as `relatives_statistic` and one log line, with what the 2-SE rule would have chosen
+   (`unknown_model_forced` when that would have been the relatives);
+3. estimates $p_\text{unknown}$ by the EM over the decided unbinned contigs at $T = 1$ (`--unknown-share t1`):
+   bins weighted $(1-p)/H$ against the community draw, both untempered. At the deployed temperature the
+   untempered $1/H$ prior gives "unknown" $\log(H)(1 - 1/T)$ of extra log odds, so the estimate rose with $T$
+   (ZymoFecal, development: 0.41 at $T = 1$, 0.69 at 5.02);
+4. makes the decisions (§8.2, `refine.refine`) with that fixed $p_\text{unknown}$ at the calibrated $T$;
+5. computes the methylation evidence (§8.3) after the decisions, at the same $T$, and sets
+   `no_methylation_evidence` on contigs that are still `kept` or `unbinned` when evidence / $T$ is below
+   `--min-evidence`. This status is written last: flags, inclusions and the refined bins do not depend on it.
+
+**Why.** The choice flipped under resampling of the calibration: on the three ZymoFecal tuning sets of pieces the
+switch chose relatives in 20%, 13.5% and 2.5% of 200 bin resamples, and every replayable flip ended with no or
+almost no inclusion (the relatives model absorbs the unbinned contigs, $p_\text{unknown} \to 1$). With the switch
+removed and the share at $T = 1$, 200 of 200 resamples kept the model and stayed within 20% of the full-data
+inclusions on each set; the remaining spread is one step of the temperature grid (dev log D61-D63, development
+data).
+
+**What it costs.** The relatives model existed for genomes without a bin that copy a bin's methylation. Without
+it, contigs from such a genome are placed into the sister bin when their methylation matches (simulated
+look-alikes, development: 112 placements over three sets, all from exact or near copies of a bin's methylome).
+On such a sample the temperature also rises, because the pieces of a held-out bin are confidently scored to the
+sister bin in test B (look-alikes: $T$ 3.7-4.3 against 1.26 with relatives), and since the evidence check divides
+by $T$ more short contigs get no call (about 12-35% of the contigs there; the share is steep in $T$). The relatives
+statistic is the warning: near 0 or below, the pieces give no sign of unbinned relatives; above about 2 they do.
+`--relatives switch` (deprecated) restores the path of 0.11.1 for comparison, with $p_\text{unknown}$ at the
+deployed temperature unless `--unknown-share` is given.
 
 ---
 
@@ -942,6 +985,11 @@ Planned fixes, in order of preference:
 - semi-supervised fitting, where $f_0$ and $f_1$ are fitted on sites from bins whose host-level
   $\phi$ is clearly low or high (iterated with the host profiles);
 - a lower bound on $\kappa_1$ (e.g. ≥ 5) with $\mu_1$ shrunk harder to the modification-type value.
+
+**Unbinned genomes with a bin's methylation (since 0.12, §7.7):** contigs from a genome without a bin whose
+methylation equals, or nearly equals, a bin's are placed into that bin, and on such samples the temperature rises,
+so more short contigs get no call (`no_methylation_evidence`; never a change of bin). The relatives statistic in
+`params.json` flags such samples; methylation alone cannot separate the two genomes.
 
 **Calibration blind spots:**
 - Pseudo-plasmids are chromosomal, so plasmid-specific effects are calibrated only through $\delta$

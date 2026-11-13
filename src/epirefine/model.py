@@ -939,7 +939,7 @@ class FittedModel:
 
     def __init__(self, L_chunks, chunk_bin, n_bins, group_modtype, grid: Grid, tau, prior_lam=5.0,
                  prior_floor=0.02, contam_eps=0.05, robust_iters=None, init_w=None, init_pi=None,
-                 robust_fit="alternating", robust_damping=0.5, robust_tol=1e-3, lp_out=None):
+                 robust_fit="alternating", robust_damping=0.5, robust_tol=1e-3, lp_out=None, prior_start="warm"):
         """robust_fit: how the chunk weights w = 1 - P(chunk foreign to its bin) and the bin profiles are
         brought into agreement.
 
@@ -953,7 +953,16 @@ class FittedModel:
         chunks fit it first and the fit settles with the minority down-weighted.
         robust_delta[u] is the last change of each chunk's weight (bins whose chunks still move did not
         converge: see robust_unconverged()).
+
+        prior_start: "warm" (up to 0.11): every population-prior fit (NPMLE) starts from the previous solution
+        (init_pi, then the previous robust round's). A multiplicative EM step cannot put mass back on grid cells a
+        warm start drove to ~0: warm-started fits miss the optimum (KKT > 0.1 in 434 of 449 fits on 15 development
+        scenarios, against 0 of 15 cold fits; dev log model_diagnostics.md section 1). "cold": every NPMLE fit starts
+        from the uniform; init_pi is ignored (init_w, the chunk weights, still applies).
         """
+        if prior_start not in ("warm", "cold"):
+            raise ValueError(f"unknown prior_start {prior_start!r}")
+        cold = prior_start == "cold"
         self.grid, self.tau, self.n_bins = grid, tau, n_bins
         self.T = transition_spec(grid, tau)
         self.Lp_chunks = marginalize_unit(L_chunks, self.T, out=lp_out)
@@ -965,14 +974,14 @@ class FittedModel:
         alpha = robust_damping if robust_fit == "damped" else 1.0
         if robust_iters is None:
             robust_iters = 50 if robust_fit == "damped" else 4
-        raw = init_pi
+        raw = None if cold else init_pi
         self.robust_delta = np.zeros(len(chunk_bin))
         self.robust_rounds = 0
 
         def fit_profiles(raw):
             self.ell = bin_loglik(self.Lp_chunks, chunk_bin, n_bins, self.w)
             self.log_pi, raw = fit_population_prior(self.ell, group_modtype, prior_lam, prior_floor,
-                                                    init=raw, return_raw=True)
+                                                    init=None if cold else raw, return_raw=True)
             self.log_prof = host_profiles(self.ell, self.log_pi)
             return raw
 

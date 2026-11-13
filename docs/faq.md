@@ -62,7 +62,8 @@ EpiRefine declines rather than guesses. A contig gets no decision (`low_coverage
 `no_methylation_evidence`) when it has fewer than 5 reads per motif site, is shorter than 1 kb, or carries too few
 informative motif sites to tell bins apart. On a complex fecal sample (ZymoFecal, a development sample) that was
 76% of the contigs and 31% of the assembled sequence, mostly short, low-coverage contigs. Binned contigs without a
-decision stay in their bin.
+decision stay in their bin. On samples with an unbinned genome that shares a bin's methylation, the share of
+`no_methylation_evidence` can be much larger (see [known limitations](#known-limitations)).
 
 You can lower `--min-contig-coverage`, `--min-contig-length` or `--min-evidence`, but decisions there are much less
 reliable: on that sample, Hi-C confirmed about a quarter of the flags below 5x coverage (12 of 46, 26%, 95% interval
@@ -75,8 +76,8 @@ An unbinned contig is included only when one bin has probability ≥ 0.9. That f
 - the contig has no decision (see above; check its `status`);
 - several bins methylate the same motifs, so `credible_set_95` lists more than one;
 - its genome has no bin, so "no bin" is the most probable answer (`p_unknown` high). That is expected for contigs of
-  unbinned genomes, but when `p_unknown` is near 1 and nothing at all is included, see
-  [known limitations](#known-limitations);
+  unbinned genomes. (Up to 0.11.1 a "relatives" model could push `p_unknown` to 1 so that nothing at all was
+  included; since 0.12 that model is no longer used, see [known limitations](#known-limitations));
 - it would be `redundant`: its sequence is already in the bin.
 
 `include_contigs.tsv` lists the candidates with probability ≥ 0.5, which shows how close the near misses were.
@@ -132,24 +133,37 @@ inclusion threshold, the 5x cut-off), so it is not an independent check. Things 
 
 ## Known limitations
 
-- **With some motif tables nothing is included.** EpiRefine describes a genome without a bin either as a draw from
-  the whole community or as a relative of the binned genomes, and chooses between the two during calibration. With
-  some motif tables it chooses the relatives, which then absorb every unbinned contig: the estimated share of
-  unbinned contigs from genomes without a bin (`p_unknown`) becomes 1, and no contig is included or moved; flags
-  are still made. On a fecal development sample this happened with a Nanomotif 1.3.0 motif table but not with a
-  1.1.3 table of the same bins (0 against 485 inclusions). It shows in the log as
+- **Unbinned genomes with a bin's methylation are placed into that bin.** Since 0.12 EpiRefine models a genome
+  without a bin as a random draw from the community, on every run. Contigs from an unbinned genome that has the
+  same, or nearly the same, methylation as a binned genome (a strain or a close sister that methylates the same
+  motifs) look like members of that bin, and are placed into it. Methylation alone cannot tell the two apart. On
+  simulated development sets built this way ("look-alikes"), 112 contigs of unbinned genomes went into a sister
+  genome's bin over three sets (precision of the placements 67-81%); all were exact or near copies of the bin's
+  methylation (differing only in a phase-variable motif, or in a motif with at most 2 sites on the contig). The
+  relatives statistic in the log and in `params.json` (`relatives_statistic`, see below) warns of such a sample.
+- **On such samples more short contigs get no call.** The calibration pieces of a bin with an unbinned
+  same-methylome sister are confidently scored to the wrong genome, so the calibrated temperature rises (look-alikes:
+  3.7-4.3, against 1.3 under 0.11.1). The evidence check is `expected_evidence` = evidence / T below
+  `--min-evidence` (3), so more short contigs get the status `no_methylation_evidence`: about 12-35% of the contigs,
+  depending on where the temperature lands (look-alike set s1: 245, 396 and 619 no calls of 1,849 contigs at T 3.7,
+  4.3 and 5.0; development data). On the fecal development sample the temperature did not change (5.0) and
+  neither did the no calls. A no call never changes a bin: the status is written last, and flags, inclusions and
+  the refined bins do not depend on it.
+- **The relatives statistic.** Up to 0.11.1 EpiRefine chose between the community model and a "relatives" model
+  (a genome without a bin resembles one of the bins) by a test on the calibration pieces, and the relatives model
+  could take every unbinned contig ("nothing is included"). The test is still run and reported, but decides
+  nothing:
 
   ```
-  unknown model: relatives (eta=0.05, lam=0.9) vs community only: log-loss gain 0.1418 +- 0.0459 -> relatives
-  refinement: p_unknown=1.000, contamination rate=0.302; 150 of 9129 testable binned contigs flagged, 0 of 25600 unbinned included, 0 contaminants moved to another bin
+  relatives statistic: 1.85 (log-loss gain of relatives over community only 0.1418 +- 0.0767 over bins; the 2-SE switch of 0.11 would choose community only; report only, the switch is removed)
   ```
 
-  and in `params.json` as `p_unknown` near 1 with `unknown_lam` below 1. A run in this state has no usable
-  inclusion result. Since version 0.11.1 the relatives model is kept only when its gain is significant over bins, not
-over single calibration pieces, and the sample above then chooses the community-only model (about 500 inclusions).
-The choice still rests on a narrow margin there (0.9-1.9 standard errors over bins against a limit of 2, on five
-sets of calibration pieces), so check these two log lines on every sample; `--calibration legacy` gives the earlier rule. See the
-  [changelog](https://github.com/SorenHeidelbach/epirefine/blob/main/CHANGELOG.md).
+  (the example is from the fecal development sample, calibration seed 1). `statistic` is the mean gain in log loss per calibration piece of the best model with relatives over the best
+  community-only model, divided by its standard error (resampled over bins). Near 0 or below: nothing in the
+  pieces points to unbinned relatives. Above about 2 (the old switch's limit): some bins have pieces that an
+  unbinned genome with the same methylation would explain; expect the placements and no calls described above for
+  those bins. On development data it was 0.4-1.9 on a fecal sample and 4.4-5.4 on the simulated look-alikes.
+  `--relatives switch` restores the switch of 0.11.1 for comparison (deprecated).
 - **Bins merged from two genomes that differ in one motif are not detected.** On development sets built by merging
   two isolates' bins, a second genome that differed in several motifs had all its contigs flagged up to at least 40%
   of the bin; one that differed in a single motif was mostly missed (at most half of its contigs flagged at any

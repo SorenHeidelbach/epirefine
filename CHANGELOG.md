@@ -5,7 +5,54 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
 
 ## Unreleased (0.12)
 
+### Changed
+- **Method: the unknown-model switch is removed (new default, "option E").** Up to 0.11.1 EpiRefine chose, during
+  calibration, between two models of a genome without a bin: a random draw from the community, or a relative of
+  one of the bins, the latter kept when it beat the former by 2 standard errors over bins. That choice sat on a
+  knife edge: on a fecal development sample (ZymoFecal, Nanomotif 1.3.0 motifs) the statistic was 0.4-1.9 SE on
+  five sets of calibration pieces, and when the bins of the calibration were resampled it chose the relatives in
+  2.5-20% of 200 resamples, every time with no or almost no inclusion (gate R4: 129-165 of 200 resamples kept the
+  outcome). Now every run uses the community model (`--relatives community-only`, the default) and estimates the
+  share of unbinned contigs from genomes without a bin at temperature 1 (`--unknown-share t1`, the default), where
+  it does not rise with the temperature. With both, 200 of 200 resamples kept the outcome on each of the three
+  development calibration sets (dev log D61-D63). The methylation-evidence check (`--min-evidence`) divides by the
+  temperature of this community-only fit.
+  Measured (development data): on ZymoFecal (calibration seeds 1-3) flags are unchanged (147), inclusions rise
+  from 503 to 589 with the Hi-C agreement unchanged in rate, and the estimated unknown share falls from 0.69 to
+  0.41; on the monoculture training set and ZymoOral every flag is unchanged and 2-3 more contigs per seed return to
+  their own bin. On the simulated look-alikes (unbinned genomes that copy a bin's methylation) the change puts
+  back 31% of the unbinned contigs of binned genomes (0.11.1: 0%), but also places 112 contigs of unbinned
+  genomes into the bin of a same-methylome sister genome, and leaves 14-21% of contigs with no call: see Known
+  limitations below and the FAQ.
+- **Relatives statistic on every run.** The test the switch used is still computed and reported as a number, with
+  no threshold: one log line (`relatives statistic: ...`) and `params.json` `relatives_statistic` (gain, standard
+  error, their ratio `statistic`, and what the 0.11 switch would have chosen). Large positive values mean some
+  calibration pieces are explained better by an unbinned relative of a bin than by a random community genome
+  (development data: 4.4-5.4 on the simulated look-alikes, 0.4-1.9 on ZymoFecal). When the switch would have
+  chosen the relatives, `params.json` also holds `unknown_model_forced`.
+- `--relatives switch` (hidden, deprecated, for comparison only) restores the switch of 0.11.1 and, unless
+  `--unknown-share` is given, its share estimate at the deployed temperature: it reproduces 0.11.1. Runs with an
+  option that only works on that path (`--no-calibrate`, `--unlisted-genome`, `--regional-inclusion`, the
+  calibration features `sites-temperature`, `prior-matched`, `prior-averaged`, `unit-temperature`,
+  `deployed-unknown`) use it when `--relatives` is not given, and say so in the log. `params.json` records the
+  `relatives` and `unknown_share` actually used; `epirefine rerun` of a `params.json` written before 0.12 uses the
+  switch.
+
+### Known limitations (new in 0.12)
+- **Unbinned genomes with a bin's methylation.** Contigs from a genome that has no bin but has the same, or nearly
+  the same, methylation as a binned genome (a strain or close sister that methylates the same motifs) are placed
+  into that genome's bin. Methylation cannot tell the two apart; with the switch of 0.11.1 such samples usually
+  got no inclusions at all. On such samples the temperature also rises (simulated look-alikes: 3.7-4.3 against 1.3
+  under 0.11.1), and because the evidence check is evidence / T < `--min-evidence`, more short contigs get no call
+  (about 12-35% of the contigs, depending on where the temperature lands: look-alike set s1 has 245, 396 and 619 no
+  calls at T 3.7, 4.3 and 5.0 of its 1,849 contigs; development data). A no call never changes a bin: the status is
+  written last, and flags, inclusions and the refined bins do not depend on it. A large relatives statistic warns
+  of such a sample.
+
 ### Fixed
+- On the decision path of the calibration-core options, the `coverage` column of `contig_decisions.tsv` held the
+  evidence routine's value (empty for a contig without motif sites) instead of the contig's coverage. Decisions
+  did not read it.
 - **Site-cache key.** The manifest now has a format number (2) and a content fingerprint of the assembly and the
   pileup (SHA-256 of three 1 MiB blocks: start, middle, end; files up to 16 MiB whole). A pileup replaced by one of
   the same size and modification time was reused with the old sites; it is now rebuilt (the strict expected failure
