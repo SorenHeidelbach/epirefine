@@ -29,6 +29,7 @@ import polars as pl
 
 from ._rs import kernels as _rs_kernels
 from .model import _cores
+from .runinfo import note_worker_peaks
 from .motifs import Motif, MotifMatcher, _CODE, canonical_index, group_sizes
 
 MOD_CODE = {"a": 0, "m": 1, "21839": 2, "h": 3}
@@ -616,6 +617,7 @@ def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: l
                 results.append(f.result())
                 if (i + 1) % max(1, len(futs) // 10) == 0:
                     log(f"  pileup pass: {i + 1}/{len(futs)} ranges done")
+            note_worker_peaks()
     finally:
         if env_before is None:
             os.environ.pop("POLARS_MAX_THREADS", None)
@@ -781,6 +783,7 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
                     if i % max(1, len(parts) // 5) == 0:
                         log(f"  unit tables: {i}/{len(parts)} parts")
                     del r
+            note_worker_peaks()
     finally:
         for k, v in env.items():
             if v is None:

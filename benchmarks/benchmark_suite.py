@@ -255,7 +255,9 @@ def main():
     hist = pl.read_csv(hist_path, separator="\t") if hist_path.exists() else None
     prov = pl.DataFrame([{"group": g, **group_provenance([r for r in rows if r["group"] == g])}
                          for g in summ["group"].to_list()], schema={"group": pl.Utf8, **{c: pl.Utf8 for c in PROVENANCE}})
-    summ = summ.join(prov, on="group", how="left", maintain_order="left")
+    # left join in the order of summ: a row index and a sort, not join(maintain_order=...), which polars 1.2
+    # (the lowest version pyproject.toml allows) does not have
+    summ = summ.with_row_index("_row").join(prov, on="group", how="left").sort("_row").drop("_row")
     summ = summ.select("date", "version", "commit", "group", "scenarios", *cols, "jobs", "note", *PROVENANCE)
     for r in summ.iter_rows(named=True):
         if r["run_version"] and r["run_version"] != ver:

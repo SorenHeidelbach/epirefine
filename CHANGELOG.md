@@ -25,6 +25,17 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
   `epirefine cache upgrade` adds the fingerprints, reading only the blocks.
 - **Lock on the cache directory.** Two runs no longer write one cache at once: a run that rebuilds the cache holds
   an exclusive lock, runs that read it a shared one, so readers do not wait for each other.
+- **Tests and the benchmark suite at the lowest allowed dependency versions.** The thread test of `host_profiles`
+  compares with the package's own logsumexp (scipy before 1.15 differs in the last bits, up to 5.7e-14); the
+  benchmark suite's summary keeps the left order without `join(maintain_order=...)`, which polars 1.2.1 lacks; the
+  batch test compares the log terms with an absolute tolerance of 1e-12 (two batch shapes differ by up to 4.4e-16
+  in 7 of 73,728 cells; runs use one fixed batch size). Test and tooling changes only: the small suites are
+  byte-identical (345 of 345 tables, development data).
+- **Worker peak memory.** `peak_rss_worker_gb` in `params.json` (and the last log line) reported the main
+  process's peak at the moment the first worker pool started (a spawned worker inherits that high-water mark):
+  13.4 GB on ZymoFecal at 12 workers (development) was never a worker's size. Each worker pool now reads its live
+  workers' own peak (VmHWM) before it closes, and the largest is reported. Only run fields of `params.json`
+  change; decisions and every output table are untouched.
 
 ### Added
 - `--calibration-seed` (default: the value of `--seed`): draws the calibration pieces and nothing else. The

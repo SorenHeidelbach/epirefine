@@ -113,8 +113,11 @@ def _map(fn, jobs, workers):
         return [fn(j) for j in jobs]
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
+    from .runinfo import note_worker_peaks
     with ProcessPoolExecutor(min(workers, len(jobs)), mp_context=get_context("spawn")) as ex:
-        return list(ex.map(fn, jobs, chunksize=max(1, len(jobs) // (4 * workers))))
+        out = list(ex.map(fn, jobs, chunksize=max(1, len(jobs) // (4 * workers))))
+        note_worker_peaks()
+    return out
 
 
 def fit_detection(sites: pl.DataFrame, group_modtype: dict[int, str],
