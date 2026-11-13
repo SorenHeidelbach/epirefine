@@ -55,6 +55,14 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
 - `epirefine cache check`: says whether a run with given inputs would reuse a cache ("reused") or rebuild it
   ("would rebuild", with the reason), without the pass over the pileup.
 
+### Known limitations
+- `params.json` `kernels.ran` counts calls without a lock. On the usual (GIL) Python builds no count is lost; on a
+  free-threaded build (3.13t and later, which installs the pure wheel) concurrent counts from threads can be lost,
+  so the numbers may be low there. Decisions are not affected.
+- The site cache does not record which code built it (compiled reader or Python pass). The site rows are the same
+  integers on both paths, but a run that reuses a cache shows no pileup-reader calls in `kernels.ran`, and nothing
+  says which path built the cache.
+
 ## 0.11.1 (2026-11-12): the unknown-genome model no longer absorbs every unbinned contig
 
 0.11.0 was never published; this is the first published version of the 0.11 series.
