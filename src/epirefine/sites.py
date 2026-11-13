@@ -736,39 +736,58 @@ def _unit_part(part: str, cfg: dict) -> dict:
 
 
 TARGETS_DISK_MIN_BYTES = 256 << 20  # contig tables from this size on are written to a file as the parts arrive
-DISK_FLUSH_BYTES = 256 << 20  # written bytes between two writebacks that drop the file's pages from memory
+DISK_FLUSH_BYTES = 256 << 20  # written bytes between two background writebacks that drop the file's pages from memory
+PREFETCH_THREADS = 8  # parallel sequential readers that bring the file back into the page cache (one stream: 48 MB/s, 8: about 450 MB/s on the test server)
+PREFETCH_BLOCK = 8 << 20
 
 
-def drop_pages(fd: int, sync: bool = True) -> None:
-    """Write a file's dirty pages to disk and drop its pages from the page cache, so that they are no longer
-    charged to the process's memory (cgroup). A no-op where posix_fadvise does not exist (macOS)."""
+def drop_pages(fd: int, sync: bool = True, offset: int = 0, length: int = 0) -> None:
+    """Write a file's dirty pages to disk and drop its pages (offset, length; 0 = to the end) from the page cache,
+    so that they are no longer charged to the process's memory (cgroup). A no-op where posix_fadvise does not
+    exist (macOS)."""
     if not hasattr(os, "posix_fadvise"):
         return
     if sync:
         (os.fdatasync if hasattr(os, "fdatasync") else os.fsync)(fd)
-    os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    os.posix_fadvise(fd, offset, length, os.POSIX_FADV_DONTNEED)
 
 
 class RowFile:
-    """A float32 table [U, M, G] in an unlinked temporary file: written row-wise as unit-table parts arrive and
-    read back in row slices.
+    """A float32 table [U, M, G] in an unlinked temporary file: written as unit-table parts arrive and read back in
+    row slices.
 
-    The contig tables (L_t, 5.9 GB on ZymoFecal) are built during the unit tables but read only after the
+    The contig tables (L_t, 5.9 GiB on ZymoFecal) are built during the unit tables but read only after the
     calibration (scores and per-group summaries, both in row batches). Held in memory they sat under the two
-    peaks of the run; in this file only the batch being read is in memory. Reads go through pread into fresh
-    arrays, not a memory map: mapped file pages would count in the process's resident memory once touched.
+    peaks of the run. Here:
+
+    - Rows are appended in the order they arrive (one sequential stream; an index maps each row to its place).
+      Writing them at their own row offsets instead made the writes, and on this kind of disk the later
+      sequential reads, scattered: the parts' rows interleave across the whole table.
+    - Every DISK_FLUSH_BYTES a background thread writes the new pages back and drops them from the page cache,
+      so the main process never waits for the disk while it collects results.
+    - prefetch() (at the final fit) reads the file back into the page cache with PREFETCH_THREADS sequential
+      readers in the background; reads then copy from the cache with pread into fresh arrays (not a memory map,
+      whose touched pages would count as the main process's resident memory). The pages stay cached until
+      close(): the table is read twice (scores, then per-group summaries).
+
     Rows never written read as zeros, as in the np.zeros table they replace.
     """
 
     def __init__(self, directory, shape, dtype=np.float32):
         import tempfile
+        import threading
         self.shape, self.dtype = tuple(int(x) for x in shape), np.dtype(dtype)
         self.ndim = len(self.shape)
         self._row = int(np.prod(self.shape[1:], dtype=np.int64)) * self.dtype.itemsize
         self._fh = tempfile.TemporaryFile(dir=directory)
         self._fd = self._fh.fileno()
-        os.ftruncate(self._fd, self.shape[0] * self._row)
-        self._dirty = 0
+        self._where = np.full(self.shape[0], -1, np.int64)  # row -> its slot in the file (-1: never written)
+        self._end = 0           # bytes appended
+        self._flushed = 0       # bytes written back and dropped (by the flusher)
+        self._lock = threading.Lock()
+        self._flusher = None    # the running background writeback, if any
+        self._stop = threading.Event()
+        self._readers: list = []
 
     @property
     def nbytes(self) -> int:
@@ -777,44 +796,83 @@ class RowFile:
     def __len__(self) -> int:
         return self.shape[0]
 
+    def _pwrite(self, buf: memoryview, off: int) -> None:
+        while len(buf):
+            n = os.pwrite(self._fd, buf, off)
+            buf, off = buf[n:], off + n
+
+    def _writeback(self, upto: int) -> None:
+        """Background: write back and drop the pages of [flushed, upto)."""
+        try:
+            drop_pages(self._fd, True, self._flushed, upto - self._flushed)
+            self._flushed = upto
+        except OSError as e:  # the main thread raises it at its next write
+            self._error = e
+
+    _error = None
+
     def write_rows(self, ids: np.ndarray, rows: np.ndarray) -> None:
-        """rows[i] goes to row ids[i]; ids ascending (np.unique), written as runs of consecutive rows."""
+        """rows[i] is row ids[i]; appended to the file as one block."""
+        import threading
+        if self._error is not None:
+            raise self._error
         rows = np.ascontiguousarray(rows, dtype=self.dtype)
-        cut = np.flatnonzero(np.diff(ids) != 1) + 1
-        for a, b in zip(np.r_[0, cut], np.r_[cut, len(ids)]):
-            buf, off = memoryview(rows[a:b].reshape(-1).view(np.uint8)), int(ids[a]) * self._row
-            while len(buf):
-                n = os.pwrite(self._fd, buf, off)
-                buf, off = buf[n:], off + n
-        self._dirty += rows.nbytes
-        if self._dirty >= DISK_FLUSH_BYTES:
-            drop_pages(self._fd)
-            self._dirty = 0
+        start = self._end
+        self._pwrite(memoryview(rows.reshape(-1).view(np.uint8)), start)
+        self._where[ids] = start // self._row + np.arange(len(ids))
+        self._end = start + rows.nbytes
+        if self._end - self._flushed >= DISK_FLUSH_BYTES and (self._flusher is None or not self._flusher.is_alive()):
+            self._flusher = threading.Thread(target=self._writeback, args=(self._end,), daemon=True)
+            self._flusher.start()
 
     def finish(self) -> "RowFile":
-        drop_pages(self._fd)
-        self._dirty = 0
+        if self._flusher is not None:
+            self._flusher.join()
+        if self._error is not None:
+            raise self._error
+        drop_pages(self._fd, True, self._flushed, 0)
+        self._flushed = self._end
         return self
 
-    def willneed(self) -> None:
-        """Ask the kernel to read the file ahead (before the rows are read back)."""
-        if hasattr(os, "posix_fadvise"):
-            os.posix_fadvise(self._fd, 0, 0, os.POSIX_FADV_WILLNEED)
+    def prefetch(self) -> None:
+        """Read the file back into the page cache in the background (sequential blocks, PREFETCH_THREADS readers)."""
+        import threading
+        if self._readers or not self._end:
+            return
+        blocks = list(range(0, self._end, PREFETCH_BLOCK))
+
+        def read(k):
+            buf = bytearray(PREFETCH_BLOCK)
+            for off in blocks[k::PREFETCH_THREADS]:
+                if self._stop.is_set():
+                    return
+                try:
+                    os.preadv(self._fd, [buf], off)
+                except OSError:
+                    return
+        self._readers = [threading.Thread(target=read, args=(k,), daemon=True) for k in range(PREFETCH_THREADS)]
+        for t in self._readers:
+            t.start()
 
     def __getitem__(self, key):
         if not isinstance(key, slice) or key.step not in (None, 1):
             raise TypeError("RowFile reads row slices only")
         a, b, _ = key.indices(self.shape[0])
         b = max(a, b)
-        out = np.empty((b - a,) + self.shape[1:], self.dtype)
-        buf, off = memoryview(out.reshape(-1).view(np.uint8)), a * self._row
-        while len(buf):
-            n = os.preadv(self._fd, [buf], off)
-            if n == 0:
-                raise OSError(f"short read from the contig-table file at byte {off}")
-            buf, off = buf[n:], off + n
-        if hasattr(os, "posix_fadvise") and b > a:  # rows are read once: do not keep them in the page cache
-            os.posix_fadvise(self._fd, a * self._row, (b - a) * self._row, os.POSIX_FADV_DONTNEED)
+        out = np.zeros((b - a,) + self.shape[1:], self.dtype)
+        where = self._where[a:b]
+        rows = np.flatnonzero(where >= 0)
+        if len(rows):  # runs of rows that lie next to each other in the file: one read each
+            cut = np.flatnonzero((np.diff(rows) != 1) | (np.diff(where[rows]) != 1)) + 1
+            flat = out.reshape(len(out), -1)
+            for i, j in zip(np.r_[0, cut], np.r_[cut, len(rows)]):
+                buf = memoryview(flat[rows[i]:rows[j - 1] + 1].reshape(-1).view(np.uint8))
+                off = int(where[rows[i]]) * self._row
+                while len(buf):
+                    n = os.preadv(self._fd, [buf], off)
+                    if n == 0:
+                        raise OSError(f"short read from the contig-table file at byte {off}")
+                    buf, off = buf[n:], off + n
         return out
 
     def __array__(self, dtype=None, copy=None):
@@ -822,6 +880,11 @@ class RowFile:
         return a if dtype is None else a.astype(dtype)
 
     def close(self) -> None:
+        self._stop.set()
+        for t in self._readers:
+            t.join()
+        if self._flusher is not None:
+            self._flusher.join()
         self._fh.close()
 
 

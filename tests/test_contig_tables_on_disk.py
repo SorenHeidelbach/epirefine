@@ -13,15 +13,15 @@ def test_rowfile_round_trip(tmp_path, monkeypatch):
     ref = np.zeros((40, 5, 7), np.float32)
     f = sites.RowFile(tmp_path, ref.shape)
     assert not list(tmp_path.iterdir())  # unlinked temporary file
-    for ids in (np.array([0, 1, 2, 7]), np.array([3, 9, 10, 11, 30]), np.array([39])):  # runs and single rows
-        rows = rng.random((len(ids), 5, 7)).astype(np.float32)
+    for ids in (np.array([3, 9, 10, 11, 30]), np.array([0, 1, 2, 7]), np.array([39]), np.array([12, 13])):
+        rows = rng.random((len(ids), 5, 7)).astype(np.float32)  # parts arrive out of row order
         f.write_rows(ids, rows)
         ref[ids] = rows
     f.finish()
-    f.willneed()
+    f.prefetch()
     assert f.shape == ref.shape and len(f) == 40 and f.nbytes == ref.nbytes and f.dtype == np.float32
     assert np.array_equal(np.asarray(f), ref)  # rows never written read as zeros
-    for sl in (slice(0, 8), slice(5, 6), slice(35, 100), slice(12, 12)):
+    for sl in (slice(0, 8), slice(5, 6), slice(35, 100), slice(12, 12), slice(8, 14), slice(None)):
         assert np.array_equal(f[sl], ref[sl])
     with pytest.raises(TypeError):
         f[[1, 2]]

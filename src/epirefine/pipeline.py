@@ -577,8 +577,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     tau = (100.0 if variation == "beta" else 0.3) if tau is None else tau
     temperature = 1.0 if temperature is None else temperature
 
-    if isinstance(L_t, RowFile):  # read next (scores): the system reads the file ahead during the final fit
-        L_t.willneed()
+    if isinstance(L_t, RowFile):  # read next (scores): read back into the page cache during the final fit
+        L_t.prefetch()
     model = FittedModel(L_chunks, chunk_bin, H, group_modtype, grid, tau, **warm, **model_kw)
     model.set_unknown_params(*unknown_params)
     # from here on the chunk tables are read only for the few mixed contigs of the regional step: kept in a temporary
