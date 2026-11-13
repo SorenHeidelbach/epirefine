@@ -272,8 +272,9 @@ def cell_sums(table, r, w, starts, threads: int | None = 1) -> np.ndarray:
     (ascending; a cell ends where the next starts, the last at len(r)). float64 [cells, G]: the bits of
     `np.add.reduceat(table[r] * w[:, None], starts, axis=0)` without the [rows, G] array (feature "cell_sums")."""
     table = np.ascontiguousarray(table, dtype=np.float64)
-    out = _core.cell_sums(table, _i64(r), np.ascontiguousarray(w, dtype=np.float64), _i64(starts), _threads(threads))
-    return out.reshape(-1, table.shape[1])
+    starts = _i64(starts)
+    out = _core.cell_sums(table, _i64(r), np.ascontiguousarray(w, dtype=np.float64), starts, _threads(threads))
+    return out.reshape(len(starts), table.shape[1])
 
 
 def score_sums(e, am, eb, bm, le1: float = 0.0, le0=None, threads: int | None = None):

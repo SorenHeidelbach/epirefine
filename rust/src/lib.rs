@@ -304,6 +304,12 @@ fn check(ok: bool, what: &str) -> PyResult<()> {
     if ok { Ok(()) } else { Err(PyValueError::new_err(format!("shape mismatch: {what}"))) }
 }
 
+/// A grid of no points has no meaning (and would divide by zero below): a ValueError, not a panic. pyo3 turns a
+/// panic into PanicException, a BaseException that `except Exception` does not catch.
+fn no_empty_grid(g: usize) -> PyResult<()> {
+    if g == 0 { Err(PyValueError::new_err("the methylation grid has no points (G = 0)")) } else { Ok(()) }
+}
+
 /// ell[h, m, g] = sum over the chunks of bin h of w * lp (float64, flat [H * M * G]).
 #[pyfunction]
 fn bin_loglik<'py>(py: Python<'py>, lp: PyReadonlyArray3<'py, f32>, chunk_bin: PyReadonlyArray1<'py, i64>,
@@ -314,6 +320,9 @@ fn bin_loglik<'py>(py: Python<'py>, lp: PyReadonlyArray3<'py, f32>, chunk_bin: P
     if cb.iter().any(|&b| b < 0 || b as usize >= n_bins) {
         return Err(PyValueError::new_err("chunk_bin out of range"));
     }
+    if m * g == 0 {  // no groups or no grid: nothing to add (as numpy's zeros)
+        return Ok(Vec::<f64>::new().into_pyarray_bound(py));
+    }
     Ok(py.allow_threads(|| model::bin_loglik(t, m * g, cb, w, n_bins, threads)).into_pyarray_bound(py))
 }
 
@@ -321,9 +330,13 @@ fn bin_loglik<'py>(py: Python<'py>, lp: PyReadonlyArray3<'py, f32>, chunk_bin: P
 #[pyfunction]
 fn community_terms<'py>(py: Python<'py>, lp: PyReadonlyArray3<'py, f32>, log_pi: PyReadonlyArray2<'py, f64>,
                         threads: usize) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    let (t, _, m, g) = table(&lp)?;
+    let (t, u, m, g) = table(&lp)?;
     let pi = log_pi.as_slice().map_err(|_| PyValueError::new_err("log_pi must be contiguous"))?;
     check(pi.len() == m * g, "log_pi")?;
+    if m == 0 {  // a sum over no groups
+        return Ok(vec![0.0f64; u].into_pyarray_bound(py));
+    }
+    no_empty_grid(g)?;
     Ok(py.allow_threads(|| model::community_terms(t, m, g, pi, threads)).into_pyarray_bound(py))
 }
 
@@ -338,6 +351,11 @@ fn leave_chunk_out_terms<'py>(py: Python<'py>, lp: PyReadonlyArray3<'py, f32>, c
     let el = ell.as_slice().map_err(|_| PyValueError::new_err("ell must be contiguous"))?;
     let pi = log_pi.as_slice().map_err(|_| PyValueError::new_err("log_pi must be contiguous"))?;
     check(cb.len() == u && w.len() == u, "chunk_bin, w")?;
+    if m == 0 {  // a sum over no groups
+        check(pi.is_empty() && el.is_empty(), "ell, log_pi")?;
+        return Ok(vec![0.0f64; u].into_pyarray_bound(py));
+    }
+    no_empty_grid(g)?;
     check(pi.len() == m * g && el.len() % (m * g).max(1) == 0, "ell, log_pi")?;
     let h = el.len() / (m * g).max(1);
     if cb.iter().any(|&b| b < 0 || b as usize >= h) {
@@ -367,6 +385,9 @@ fn cell_sums<'py>(py: Python<'py>, table: PyReadonlyArray2<'py, f64>, r: PyReado
     let t = table.as_slice().map_err(|_| PyValueError::new_err("table must be contiguous"))?;
     let (r, w, st) = (slice(&r, "r")?, slice(&w, "w")?, slice(&starts, "starts")?);
     check(r.len() == w.len(), "r, w")?;
+    if g == 0 {  // cells of no columns
+        return Ok(Vec::<f64>::new().into_pyarray_bound(py));
+    }
     if r.iter().any(|&x| x < 0 || x as usize >= p) {
         return Err(PyValueError::new_err("row index out of range"));
     }
@@ -399,6 +420,9 @@ fn score_sums<'py>(py: Python<'py>, e: PyReadonlyArray3<'py, f64>, am: PyReadonl
         }
         None => None,
     };
+    if h == 0 {  // scores against no bins
+        return Ok((Vec::<f64>::new().into_pyarray_bound(py), Vec::<f64>::new().into_pyarray_bound(py)));
+    }
     let (s, r) = py.allow_threads(|| model::score_sums(es, ams, u, m, g, ebs, bms, h, l0.map(|x| (le1, x)), threads));
     Ok((s.into_pyarray_bound(py), r.into_pyarray_bound(py)))
 }
