@@ -72,3 +72,13 @@ def test_build_tools_are_pinned_and_the_lock_file_is_used():
     j = jobs("release.yml")
     assert "maturin-version: ${{ env.MATURIN_VERSION }}" in j["wheels"] and "rust-toolchain: ${{ env.RUST_TOOLCHAIN }}" in j["wheels"]
     assert "bundle_licenses.py --check" in j["licences"] and "cargo fetch --locked" in j["licences"]
+
+
+def test_read_only_token_and_actions_pinned_by_commit():
+    """Both workflows give the token read rights unless a job asks for more, and every action is pinned to a full
+    commit SHA (a moved tag cannot change what builds the published files)."""
+    for name in ("release.yml", "tests.yml"):
+        text = (WF / name).read_text()
+        assert re.search(r"^permissions:\n  contents: read$", text, re.M), name
+        uses = re.findall(r"uses: (\S+)", text)
+        assert uses and all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", u) for u in uses), name
