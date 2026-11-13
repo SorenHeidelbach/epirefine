@@ -8,7 +8,7 @@ abstract: >-
   EpiRefine flags binned contigs whose DNA methylation contradicts their bin and places unbinned contigs
   into the bin their methylation fits, with calibrated probabilities. Inputs are an assembly, a contig-bin
   table, a modkit pileup and a motif table (for example from Nanomotif).
-version: 0.12.0
+version: 0.12.0rc1
 authors:
   - family-names: Heidelbach
     given-names: Søren
