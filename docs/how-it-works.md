@@ -84,7 +84,7 @@ methylation varies a little along a genome). EpiRefine calibrates it on the samp
 from binned contigs, scores each as if it were unbinned (with the piece removed from its bin), and also with its bin
 removed, where the right answer is "no bin". It then chooses the **temperature**, a single factor that divides all
 evidence, that makes these known answers come out with honest probabilities on average. On a fecal development
-sample (with a Nanomotif 1.1.3 motif table) the temperature was 5.0, so 100 nats of raw evidence count as 20. The
+sample the temperature was 5.0 (Nanomotif 1.1.3 motif table; 5.02 with the 1.3.0 table and version 0.12), so 100 nats of raw evidence count as 20. The
 temperature that would fit each piece length alone rises with length (there from 2.7 at 2 kb to 14.7 at 500 kb), so
 one temperature leaves very long contigs overconfident. The temperature is chosen from a grid of 31 values between
 0.2 and 20, each about 17% above the one before, and is never below 1 (the pieces are easier to place than real
@@ -141,7 +141,7 @@ stretches are reported (`foreign_segments`). Nothing is split.
 ## Limits
 
 - **Coverage and length.** Decisions need about 5 reads per motif site and enough sites; on a complex fecal sample
-  76% of the contigs and 31% of the sequence got no decision, including half of the unbinned plasmids and most
+  (version 0.8.0) 76% of the contigs and 31% of the sequence got no decision, including half of the unbinned plasmids and most
   binned plasmids and viruses.
 - **Genomes with the same methylation**, such as very close strains, cannot be told apart. When both have bins,
   EpiRefine keeps several bins in the credible set or leaves the contig where it is. When only one has a bin, the
@@ -160,7 +160,7 @@ stretches are reported (`foreign_segments`). Nothing is split.
 - **Results depend on the motif table**: extra motifs that no bin methylates lowered how many contigs were put back
   (measured with 0.11; see the [FAQ](faq.md#must-the-motifs-come-from-nanomotif)).
 - **Motif groups are treated as independent.** One enzyme whose sites spread over several partly methylated groups
-  can count more than once. On the fecal sample, dropping such groups entirely reversed or weakened below 3 nats
+  can count more than once. On the fecal sample (version 0.8.0), dropping such groups entirely reversed or weakened below 3 nats
   the evidence of 2 of 101 flags and 17 of 485 inclusions, none of them contradicted by Hi-C.
 
 The statistical details, with formulas and the reasoning behind each choice, are in the developer notes
