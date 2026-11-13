@@ -226,3 +226,77 @@ def test_table_file_closed_when_the_run_fails(community, base_run, tmp_path, mon
     assert len(closed) == 1 and closed[0]._fh.closed
     assert not P._OPEN_TABLES
 
+
+@pytest.mark.parametrize("kernels", [True, False])
+def test_score_in_batches_on_a_rowfile(tmp_path, monkeypatch, kernels):
+    """FittedModel.score on a RowFile of more than SCORE_BATCH rows (the path of every large sample: scored in
+    row batches read from the file) returns what it returns on the array, bit for bit; also with every unit's
+    rows kept (lp_rows None: the table is read whole) and with the numpy code (EPIREFINE_RS=0)."""
+    import epirefine.model as M
+    from epirefine import sites
+    from epirefine.grid import Grid
+    if kernels:
+        if M._rs("score_sums") is None:
+            pytest.skip("epirefine-rs without score_sums")
+    else:
+        monkeypatch.setenv("EPIREFINE_RS", "0")
+        monkeypatch.setattr(M, "ROWS_MIN", 1)  # without the kernel only the row form is scored in batches
+    rng = np.random.default_rng(11)
+
+    def tables(U, Mg=6, G=64):
+        L = -rng.gamma(2.0, 40.0, (U, Mg, G))
+        L[rng.random((U, Mg)) < 0.2] = 0.0
+        return L.astype(np.float32)
+    grid = Grid(64)
+    L, cb = tables(150), rng.integers(0, 4, 150)
+    m = M.FittedModel(L, cb, 4, ["a"] * 6, grid, 100.0)
+    m.set_unknown_params(0.05, 0.9)
+    U = M.FittedModel.SCORE_BATCH + 300
+    Lt = tables(U)
+    Lt[rng.random(U) < 0.1] = 0.0  # rows never written read as zeros
+    f = sites.RowFile(tmp_path, Lt.shape)
+    order = rng.permutation(np.flatnonzero(Lt.any(axis=(1, 2))))
+    for ids in np.array_split(order, 7):  # parts arrive out of row order
+        f.write_rows(ids, Lt[ids])
+    f.finish()
+    f.prefetch()
+    batched = []
+    real = M.FittedModel._score_in_batches
+    monkeypatch.setattr(M.FittedModel, "_score_in_batches", lambda self, *a: (batched.append(1), real(self, *a))[1])
+    rows = np.sort(rng.choice(U, 900, replace=False))
+    for lp_rows in (rows, None):
+        ref, got = m.score(Lt, lp_rows=lp_rows), m.score(f, lp_rows=lp_rows)
+        for fld in ("S", "Su", "Au", "Lp", "Su_comm", "R", "lp_rows"):
+            a, b = getattr(ref, fld), getattr(got, fld)
+            assert (a is None and b is None) or np.array_equal(a, b), fld
+    assert batched == [1, 1]  # the list of kept rows took the batched path (on the array and on the file)
+    f.close()
+
+
+@pytest.mark.parametrize("numpy_only", [False, True])
+def test_disk_path_whole_table_options(community, base_run, tmp_path, monkeypatch, numpy_only):
+    """The disk path with options that read the whole contig table at scoring (the unbinned prior: lp_rows None),
+    with gate_unweighted on a down-weighted group, with and without the compiled kernels: the in-memory outputs."""
+    import epirefine.pipeline as P
+    from epirefine import sites
+    if numpy_only:
+        monkeypatch.setenv("EPIREFINE_RS", "0")
+    real = P.redundancy_weights
+
+    def halved(*a, **k):
+        w, tab = real(*a, **k)
+        w = w.copy()
+        w[0] = 0.5
+        return w, tab
+    monkeypatch.setattr(P, "redundancy_weights", halved)
+    opts = dict(unknown_prior="unbinned", gate_unweighted=True)
+    mem = run_pipeline(**community.args(copy_cache(base_run, tmp_path / "mem")), **opts)
+    assert "1 groups in" in mem.log and "unbinned-genome prior" in mem.log
+    monkeypatch.setattr(sites, "TARGETS_DISK_MIN_BYTES", 0)
+    monkeypatch.setattr(sites, "DISK_FLUSH_BYTES", 1)
+    made = []
+    real_init = sites.RowFile.__init__
+    monkeypatch.setattr(sites.RowFile, "__init__", lambda self, *a, **k: (made.append(1), real_init(self, *a, **k))[1])
+    disk = run_pipeline(**community.args(copy_cache(base_run, tmp_path / "disk")), **opts)
+    assert made == [1]
+    assert differing_files(mem.out, disk.out) == []
