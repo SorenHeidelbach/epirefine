@@ -421,10 +421,17 @@ fn cpu_path() -> &'static str {
     model::cpu_path()
 }
 
+/// Interface version of this extension (see the module init).
+const API: u32 = 1;
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // the commit the build came from (build.rs); None for a build from an sdist without its commit
     m.add("__commit__", option_env!("EPIREFINE_RS_COMMIT"))?;
+    // the interface version of the functions below, checked by epirefine._rs against the version its Python code
+    // was written for: raised when a function changes meaning or signature, so that a stale build (an editable
+    // install that was not rebuilt) is refused instead of run
+    m.add("API", API)?;
     m.add_class::<MotifScanner>()?;
     m.add_class::<PileupReader>()?;
     m.add_function(wrap_pyfunction!(site_records, m)?)?;

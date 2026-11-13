@@ -23,17 +23,24 @@ def switched_off() -> bool:
 
 def load():
     """(module, None) when the compiled kernels load and offer the interface this code needs, else (None, reason).
-    Does not look at EPIREFINE_RS."""
+    Does not look at EPIREFINE_RS. The interface number is the one the compiled extension exports (`_core.API`), so
+    a build older than this Python code is refused; a build that lacks a function this code calls at load (an
+    AttributeError or TypeError) counts as one that does not load."""
     try:
         _kernels = importlib.import_module("epirefine._kernels")  # by name: honours sys.modules, as tests rely on
     except ModuleNotFoundError as e:
         if e.name in ("epirefine._kernels._core", "epirefine._kernels"):
             return None, "no compiled extension in this install (pure wheel, or a source tree without a build)"
         return None, f"the compiled extension does not load: {e}"
-    except ImportError as e:  # a build for another platform or Python, a missing shared library
-        return None, f"the compiled extension does not load: {e}"
-    if not _kernels.supports(f"api>={REQUIRED_API}"):
-        return None, f"the compiled extension has interface {getattr(_kernels, 'API', '?')}, this code needs {REQUIRED_API}"
+    except (ImportError, AttributeError, TypeError) as e:  # a build for another platform or Python, a missing
+        return None, f"the compiled extension does not load: {e}"  # shared library, an incomplete build
+    try:
+        api = int(getattr(_kernels._core, "API", 0))
+        if api < REQUIRED_API:
+            return None, f"the compiled extension has interface {api}, this code needs {REQUIRED_API} (a stale build?)"
+        _kernels.cpu_path(), _kernels.features()  # every run records them: a build without them is refused here
+    except (AttributeError, TypeError, ValueError) as e:
+        return None, f"the compiled extension does not load: {type(e).__name__}: {e}"
     return _kernels, None
 
 
@@ -60,7 +67,7 @@ def summary() -> str:
     rs = kernels()
     if rs is None:
         return f"kernels: numpy ({reason()})"
-    return f"kernels: compiled ({rs.cpu_path()}; built from {rs.__commit__ or 'an sdist'})"
+    return f"kernels: compiled ({rs.cpu_path()}; built from {getattr(rs, '__commit__', None) or 'an sdist'})"
 
 
 def notice() -> str | None:

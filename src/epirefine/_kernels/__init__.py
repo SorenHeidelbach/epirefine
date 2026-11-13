@@ -34,9 +34,11 @@ __all__ = ["PileupReader", "MotifScanner", "site_records", "bin_loglik", "cell_s
 #: columns of a batch, in order, with their dtypes (EpiRefine's SITE_SCHEMA)
 SITE_COLUMNS = (("contig", np.int32), ("group", np.int32), ("pos", np.int64), ("n", np.int32), ("k", np.int32))
 
-#: interface version of this module; raised when a function changes meaning, so that EpiRefine's Python code can
-#: require what it was written for (supports("api>=1")); a stale build in an editable install fails that check
-API = 1
+#: interface version of the compiled extension (exported by `_core` itself, rust/src/lib.rs); raised when a function
+#: changes meaning or signature, so that EpiRefine's Python code can require what it was written for
+#: (epirefine._rs.REQUIRED_API). It comes from the build, not from this file: a stale build in an editable install
+#: reports its own, older number and is refused. A build from before the number was exported reports 0.
+API = int(getattr(_core, "API", 0))
 
 
 def features() -> list[str]:

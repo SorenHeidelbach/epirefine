@@ -87,6 +87,42 @@ def test_old_interface_is_refused(monkeypatch):
     assert R.kernels() is None and R.reason().startswith(f"the compiled extension has interface {rs.API}")
 
 
+def test_interface_number_comes_from_the_build():
+    """The interface number is exported by the compiled extension, not by a Python file of the same tree (that
+    compared the code with itself: a stale build passed)."""
+    rs = R.load()[0]
+    if rs is None:
+        pytest.skip("no compiled kernels in this install")
+    assert isinstance(rs._core.API, int) and rs.API == rs._core.API >= R.REQUIRED_API
+
+
+def test_stale_build_is_refused(monkeypatch):
+    """A build older than the Python code (its _core reports a lower interface number, or none) runs numpy."""
+    rs = R.load()[0]
+    if rs is None:
+        pytest.skip("no compiled kernels in this install")
+    monkeypatch.delenv("EPIREFINE_RS", raising=False)
+    monkeypatch.setattr(rs._core, "API", R.REQUIRED_API - 1)
+    assert R.kernels() is None and R.reason().startswith(f"the compiled extension has interface {R.REQUIRED_API - 1}")
+    monkeypatch.delattr(rs._core, "API")
+    assert R.kernels() is None and R.reason().startswith("the compiled extension has interface 0")
+
+
+def test_build_without_cpu_path_does_not_load(monkeypatch):
+    """A _core without a function the run record needs (cpu_path) falls back to numpy; the log head and params.json
+    are still written (summary() and runinfo.kernels() used to raise AttributeError)."""
+    rs = R.load()[0]
+    if rs is None:
+        pytest.skip("no compiled kernels in this install")
+    monkeypatch.delenv("EPIREFINE_RS", raising=False)
+    monkeypatch.delattr(rs._core, "cpu_path")
+    why = R.reason()
+    assert R.kernels() is None and why.startswith("the compiled extension does not load: AttributeError")
+    assert R.summary() == f"kernels: numpy ({why})"
+    k = runinfo.kernels()
+    assert k["available"] is False and k["used"] is False and k["reason"] == why
+
+
 def _args():
     from inspect import signature
     from epirefine.pipeline import run
