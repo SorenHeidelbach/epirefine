@@ -356,6 +356,17 @@ def kernels() -> dict:
     return rec
 
 
+def platform_record() -> dict:
+    """The operating system, CPU architecture and C library the run used: the last bits of exp and log (in numpy and
+    in the kernels) come from the platform's maths library, which differs between glibc, musl and macOS."""
+    import platform
+    libc, libc_version = platform.libc_ver()
+    if not libc and sys.platform == "darwin":
+        libc, libc_version = "macOS libSystem", platform.mac_ver()[0]
+    return {"system": platform.system(), "release": platform.release(), "machine": platform.machine(),
+            "libc": libc or None, "libc_version": libc_version or None}
+
+
 THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "POLARS_MAX_THREADS")
 
 
@@ -370,6 +381,7 @@ def environment(args: dict) -> dict:
         "libraries": {"python": sys.version.split()[0], "numpy": numpy.__version__, "scipy": scipy.__version__,
                       "polars": polars.__version__},
         "kernels": kernels(),
+        "platform": platform_record(),
         "threads": {"workers": n_workers(args["workers"]), "cores": _cores(), "model_threads": _n_threads(),
                     "polars_threads": polars.thread_pool_size(),
                     **{v.lower(): os.environ.get(v) for v in THREAD_VARS}},

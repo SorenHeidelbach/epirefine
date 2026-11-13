@@ -37,6 +37,11 @@ def test_params_record_code_libraries_kernels_threads_seeds(base_run):
         assert not k["available"] and not k["used"] and k["reason"].startswith("no compiled extension")
     from epirefine.model import _rs
     assert k["used"] == (_rs() is not None) and (k["reason"] is None) == k["used"]
+    import platform
+    pf = p["platform"]  # the C library decides the last bits of exp and log (B6 review)
+    assert pf["system"] == platform.system() and pf["machine"] == platform.machine()
+    if platform.system() == "Linux" and platform.libc_ver()[0]:
+        assert (pf["libc"], pf["libc_version"]) == platform.libc_ver()
     t = p["threads"]
     assert t["workers"] == 1 and t["cores"] >= 1 and t["model_threads"] >= 1 and "openblas_num_threads" in t
     assert p["seeds"] == {"seed": 1, "calibration_seed": 1, "bootstrap": 0}

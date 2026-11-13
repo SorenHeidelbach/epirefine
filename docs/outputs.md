@@ -136,7 +136,8 @@ outputs can read EpiRefine's.
     built from, `cpu_path` (`avx2_fma` or `generic`), `api`, `features` and `module_sha256` of the loaded compiled
     module; at the end of the run `ran`: per kernel the calls that took the compiled code and the calls that took
     the numpy code, the workers' included (some options and small tables take the numpy code also when `used` is
-    true), and `missing_features`), `threads` (`workers`, `cores` this process
+    true), and `missing_features`), `platform` (`system`, `release`, `machine`, `libc` and `libc_version`: the C
+    library, whose maths functions set the last bits of exp and log), `threads` (`workers`, `cores` this process
     may use, `model_threads`, `polars_threads`, and the variables `omp_num_threads`, `openblas_num_threads`,
     `mkl_num_threads`, `polars_max_threads` as set, or `null`), `seeds` (`seed`, `calibration_seed`, and `bootstrap`,
     the fixed seed of the resampling in the calibration tests).
