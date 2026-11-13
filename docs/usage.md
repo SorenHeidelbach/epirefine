@@ -37,7 +37,7 @@ agreement is not an independent check of them. Most users only set the inputs, `
 
 | Option | Default | What it does |
 |---|---|---|
-| `--min-contig-coverage` | 5 | Contigs with a median below this many reads per motif site get no decision (status `low_coverage`). On a fecal development sample, Hi-C confirmed about a quarter of the flags below 5x (12 of 46). 0 judges all. |
+| `--min-contig-coverage` | 5 | Contigs whose coverage (the median of the valid calls per motif site, both strands summed at sites of palindromic motifs; see [outputs.md](outputs.md#coverage-and-5x)) is below this get no decision (status `low_coverage`). On a fecal development sample, Hi-C confirmed about a quarter of the flags below 5x (12 of 46). 0 judges all. |
 | `--min-contig-length` | 1000 | Shorter contigs get no decision (status `too_short`). 0 judges all. |
 | `--min-evidence` | 3.0 | Contigs whose expected methylation evidence (in nats) is below this get status `no_methylation_evidence`: they carry too little methylation to tell bins apart. |
 | `--min-cov` | 1 | Motif sites with fewer reads than this are ignored. |
@@ -89,6 +89,9 @@ estimates. Leave them unset unless you are testing the model.
 | `--gate-leave-out`, `--gate-unweighted`, `--eps-gated` | `none`, off, off | Variants of the methylome-difference requirement: against the bin's 95% interval without the contig; contig intervals from unweighted sites; contamination rate from contigs that pass it. |
 | `--siteless-bin-guard` | off | Include nothing into a bin without a single motif site. |
 | `--grid-size` | 64 | Points on the grid of methylated fractions. |
+| `--two-state-warning` | 0.2 | Share at which `bin_evidence.tsv` warns about a bin with two methylation states, or with a large flagged share (reporting only). |
+
+`epirefine --version` prints the version (also the first line of every log and `version` in `params.json`).
 
 Removed in 0.12 (they lost on the development benchmarks; see `CHANGELOG.md`): `--calibration`, `--robust-fit`,
 `--max-flagged-share`, `--tau-support`, `--unlisted-genome`, `--inclusion-support`, `--regional-inclusion`,

@@ -30,8 +30,9 @@ Nanomotif's `bin-motifs.tsv` is the usual source. Motifs missing from the list c
 motifs are all missing looks unmethylated. Extra motifs that no bin methylates are not harmless: on the development
 benchmarks, adding motifs from another sample's motif table left flag precision at 99.5% or more but lowered the
 share of removed contigs put back on the training communities from 89.3% to 77.1% (100 added motifs), 40.4% (400) and
-6.7% (all 715), because the calibration then chose a model that keeps unbinned contigs out of the bins (see
-[known limitations](#known-limitations)).
+6.7% (all 715), because the calibration then chose a model that keeps unbinned contigs out of the bins. That was
+measured with 0.11; since 0.12 that model choice is removed (see [known limitations](#known-limitations)), and the
+effect of extra motifs has not been measured again.
 
 ### Does it matter which binner I used?
 
@@ -62,7 +63,7 @@ EpiRefine declines rather than guesses. A contig gets no decision (`low_coverage
 `no_methylation_evidence`) when it has fewer than 5 reads per motif site, is shorter than 1 kb, or carries too few
 informative motif sites to tell bins apart. On a complex fecal sample (ZymoFecal, a development sample) that was
 76% of the contigs and 31% of the assembled sequence, mostly short, low-coverage contigs. Binned contigs without a
-decision stay in their bin. On samples with an unbinned genome that shares a bin's methylation, the share of
+decision stay in their bin: a no call never changes a bin. On samples with an unbinned genome that shares a bin's methylation, the share of
 `no_methylation_evidence` can be much larger (see [known limitations](#known-limitations)).
 
 You can lower `--min-contig-coverage`, `--min-contig-length` or `--min-evidence`, but decisions there are much less
@@ -115,8 +116,9 @@ contig does not, or the reverse. `best_alternative` says which bin, or `unknown`
 
 ### Should I trust every flag?
 
-Most flags are right, but not all. On held-out benchmark communities with known truth (monoculture isolates not used
-during development), 311 of 316 flags (98.4%) were true contaminants; on the development benchmarks every flag was.
+Most flags are right, but not all. On the monoculture test and validation communities with known truth (spent: they
+were looked at during development, so they are no longer an unseen evaluation; version 0.10.1), 311 of 316 flags
+(98.4%) were true contaminants; on the development benchmarks every flag was.
 On a fecal sample with Hi-C (ZymoFecal, version 0.8.0 with a Nanomotif 1.1.3 motif table), 7 of 8 flags (88%, 95%
 interval 53-98%) and 23 of 24 inclusions (96%, 80-99%) that Hi-C could check at ≥ 10x agreed with it; with the
 Nanomotif 1.3.0 table and version 0.11.1 it is 7 of 8 flags and 24 of 26 inclusions. Hi-C could check only these 8 of
@@ -124,7 +126,7 @@ the 139 flagged contigs and 24 of the 485 inclusions, the flag figure moves betw
 the Hi-C reference (the inclusion figure stays at 92-100%), and the same sample was used to choose several defaults (the 0.4 methylome difference, the 0.9
 inclusion threshold, the 5x cut-off), so it is not an independent check. Things to keep in mind:
 
-- **A high `p_contaminant` is no guarantee**: the 5 wrong flags on the held-out communities all had `p_contaminant`
+- **A high `p_contaminant` is no guarantee**: the 5 wrong flags on the test and validation communities (spent) all had `p_contaminant`
   ≥ 0.9999. Sorting by `p_contaminant` shows the least certain flags first, but wrong flags are not only among them.
 - **Very long contigs**: evidence grows with length faster than one temperature corrects, so long contigs are
   overconfident (on the fecal sample, the temperature that would fit each piece length alone rose from 2.7 at 2 kb
@@ -179,6 +181,11 @@ inclusion threshold, the 5x cut-off), so it is not an independent check. Things 
   unbinned genome with the same methylation would explain; expect the placements and no calls described above for
   those bins. On development data it was 0.4-1.9 on a fecal sample and 4.4-5.4 on the simulated look-alikes.
   `--relatives switch` restores the switch of 0.11.1 for comparison (deprecated).
+- **The temperature moves in steps.** It is chosen from a grid of 31 values from 0.2 to 20, each about 17% above
+  the one before. The number of inclusions can move with one step: on the fecal development sample, when the bins
+  of the calibration were resampled, about one resample in six landed one step away from the full fit, and its
+  inclusions moved by about 17%. A finer search was tried and is not in 0.12. Running a few values of
+  `--calibration-seed` shows how much a sample's inclusions depend on it.
 - **Bins merged from two genomes that differ in one motif are not detected.** On development sets built by merging
   two isolates' bins, a second genome that differed in several motifs had all its contigs flagged up to at least 40%
   of the bin; one that differed in a single motif was mostly missed (at most half of its contigs flagged at any

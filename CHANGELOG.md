@@ -146,6 +146,19 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
 - `epirefine cache check`: says whether a run with given inputs would reuse a cache ("reused") or rebuild it
   ("would rebuild", with the reason), without the pass over the pileup.
 
+### Documentation
+- The docs describe the released model (option E with the calibration guard): the method notes
+  (`docs/development/method-notes.md`) are rewritten for bin refinement and the code of 0.12 (the unknown genome,
+  the 31-point temperature grid and its step as a stated limitation, the evidence check and what a no call means,
+  the look-alike limitation, the relatives statistic, the guard); `how-it-works.md`, the FAQ and the README follow.
+  `outputs.md` documents every output file, every column (the eleven calibration tables included) and every
+  `params.json` key the code writes, and defines "5x" as the code computes it (median valid calls per motif site,
+  both strands summed at two-strand sites); `usage.md` lists every option of `--help`; `tests/test_docs.py` keeps
+  both complete. The README and FAQ call the monoculture test and validation communities spent, not held-out.
+- `CITATION.cff` (version 0.12.0, no DOI yet).
+- A small synthetic example dataset, `tests/data/example_community` (1.6 MB; the golden-snapshot community of the
+  tests), with a section in `getting-started.md` and a test that runs it end to end (about 5 s on one core).
+
 ## 0.11.1 (2026-11-12): the unknown-genome model no longer absorbs every unbinned contig
 
 0.11.0 was never published; this is the first published version of the 0.11 series.
