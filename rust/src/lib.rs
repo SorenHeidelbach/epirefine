@@ -1,5 +1,6 @@
-//! Optional compiled kernels for EpiRefine: the pileup reader and the motif scan.
-//! The Python package `epirefine_rs` wraps this module; see its docstrings for the interface.
+//! The compiled kernels of EpiRefine: the pileup reader, the motif scan and the model kernels, built by maturin into
+//! the extension `epirefine._kernels._core` of the platform wheels (D73). The Python package `epirefine._kernels`
+//! wraps this module; see its docstrings for the interface. EpiRefine's numpy code is the reference and fallback.
 mod error;
 mod input;
 mod model;
@@ -47,7 +48,7 @@ fn record_arrays(py: Python<'_>, r: Records) -> RecordArrays<'_> {
 }
 
 /// Motif matcher: the records of `epirefine.motifs.MotifMatcher`, in the same order.
-#[pyclass(module = "epirefine_rs._core")]
+#[pyclass(module = "epirefine._kernels._core")]
 struct MotifScanner {
     scanner: Scanner,
 }
@@ -178,7 +179,7 @@ impl Inner {
 }
 
 /// One range of a pileup -> site rows (contig, group, pos, n, k), in batches of whole contigs.
-#[pyclass(module = "epirefine_rs._core")]
+#[pyclass(module = "epirefine._kernels._core")]
 struct PileupReader {
     inner: Inner,
     codes: Option<Py<PyArray1<u8>>>,
