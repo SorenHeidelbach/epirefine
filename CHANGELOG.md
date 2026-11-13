@@ -109,9 +109,6 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
   are not calibrated: on one development stress run, `--temperature 1` placed 25 contigs, one of them wrongly.
 
 ### Fixed
-- On the decision path of the calibration-core options, the `coverage` column of `contig_decisions.tsv` held the
-  evidence routine's value (empty for a contig without motif sites) instead of the contig's coverage. Decisions
-  did not read it.
 - **Site-cache key.** The manifest now has a format number (2) and a content fingerprint of the assembly and the
   pileup (SHA-256 of three 1 MiB blocks: start, middle, end; files up to 16 MiB whole). A pileup replaced by one of
   the same size and modification time was reused with the old sites; it is now rebuilt (the strict expected failure
