@@ -49,7 +49,16 @@ def test_pure_wheel_refuses_other_binaries(tmp_path, extra):
         pw.pure_wheel(_compiled(tmp_path / "epirefine-1.0-cp310-abi3-manylinux_2_17_x86_64.whl", extra), tmp_path / "o")
 
 
-def test_pure_wheel_wants_one_abi3_tag(tmp_path):
+def test_pure_wheel_of_a_wheel_with_two_platform_tags(tmp_path):
+    """maturin's manylinux2014 wheels name the build twice (manylinux2014 and manylinux_2_17): that is one build."""
+    pw = _module()
+    wheel = WHEEL + "Tag: cp310-abi3-manylinux2014_x86_64\n"
+    src = _compiled(tmp_path / "epirefine-1.0-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", wheel=wheel)
+    with zipfile.ZipFile(pw.pure_wheel(src, tmp_path / "o")) as z:
+        assert [ln for ln in z.read(f"{DI}/WHEEL").decode().splitlines() if ln.startswith("Tag:")] == ["Tag: py3-none-any"]
+
+
+def test_pure_wheel_wants_abi3_tags(tmp_path):
     pw = _module()
     wheel = WHEEL.replace("cp310-abi3", "cp312-cp312")
     with pytest.raises(SystemExit, match="abi3"):

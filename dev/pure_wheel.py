@@ -48,8 +48,9 @@ def pure_wheel(src: Path, out_dir: Path) -> Path:
                  if not DROP.match(i.filename) and i.filename not in (f"{dist_info}/RECORD", f"{dist_info}/WHEEL")]
         wheel = z.read(f"{dist_info}/WHEEL").decode()
     tags = [ln for ln in wheel.splitlines() if ln.startswith("Tag:")]
-    if len(tags) != 1 or "-abi3-" not in tags[0]:
-        sys.exit(f"{src.name}: expected one abi3 Tag in WHEEL, found {tags}")
+    # a manylinux2014 wheel carries two tags of the same build (manylinux2014 and manylinux_2_17): all must be abi3
+    if not tags or not all("-abi3-" in t for t in tags):
+        sys.exit(f"{src.name}: expected abi3 Tag lines in WHEEL, found {tags}")
     binaries = [i.filename for i, data in files if BINARY_NAME.search(i.filename) or data.startswith(BINARY_MAGIC)]
     if binaries:
         sys.exit(f"{src.name}: compiled files besides the extension would go into the pure wheel: {binaries}")
