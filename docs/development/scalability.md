@@ -266,3 +266,22 @@ re-measured.
 - The caller fit (8 min) is limited by the 3 pooled mod-type fits.
 - Report caps (item 20) are not done: on human gut, `motif_fit.tsv` is 530 MB, too big to embed in
   the HTML report.
+
+## 7. Large tables on disk (0.12)
+
+Two tables of the main process are large and read only in row batches late in the run:
+
+- **Contig tables** (`L_t`, contigs x groups x grid, float32; 5.9 GiB on ZymoFecal). Built in the unit tables and
+  read only after the calibration (scores and per-group summaries). From 256 MiB on they are written to an
+  unlinked temporary file in the output directory as each part's rows arrive (group weights multiplied in there),
+  with the pages written back and dropped from the page cache every 256 MiB, and read back with `pread` in row
+  batches (not a memory map, whose touched pages would count as resident memory of the main process). The kernel
+  is asked to read the file ahead during the final fit. They no longer sit under the unit-table and calibration
+  peaks.
+- **Host chunk tables** (`L_chunks`, 5.1 GiB on ZymoFecal). After the final fit only rows of a few mixed contigs
+  are read: the table moves to a memory-mapped temporary file, written back and dropped from the page cache (the
+  page cache is charged to the run's cgroup like any other memory).
+
+Both files are removed when the run ends, also when it fails. A run needs free space in the output directory for
+both (about 12 GB on ZymoFecal). Where a file cannot be written, the tables stay in memory. Outputs are
+byte-identical either way (tests force the disk path on the synthetic community, with 1 and 3 workers).
