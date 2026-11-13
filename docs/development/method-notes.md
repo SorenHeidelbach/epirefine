@@ -573,7 +573,9 @@ of the grid (20). If so, it makes **no call**: the contamination and inclusion t
 run, so no contig is flagged, included or moved, and the posteriors are written at the cap for inspection only. One
 log line (`WARNING: calibration guard: ...`) and `params.json` `calibration_guard` (`fired`, `reason`,
 `temperature`, `cap`, `pieces`, `test_b_pieces`, `fallback`) say so; on every other calibrated run
-`calibration_guard.fired` is false.
+`calibration_guard.fired` is false. `include_contigs.tsv` then lists no candidate. With `--temperature-law sites` the decisions use the
+law's temperature, so the guard is checked on the law instead (`calibrate.calibration_guard_law`): it fires when the
+law's temperature at 1,000 sites is at the upper bound of its search (100).
 
 **Why the cap and not the number of pieces.** A temperature at the boundary of the search means no tempering the
 grid allows predicted the pieces better: the loss is flat in $T$ (pieces without usable sites) or still falling at

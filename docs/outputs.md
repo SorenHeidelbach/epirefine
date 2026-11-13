@@ -93,6 +93,7 @@ outputs can read EpiRefine's.
   threshold but was not added because the bin already holds its sequence). This lists candidates, not decisions:
   inclusion is applied at 0.9 (0.95 for a bin without detected methylation), so some `medium_confidence` rows are
   applied and the contigs actually added are those with status `included` or `moved` in `contig_decisions.tsv`.
+  When the calibration guard fires (`params.json` `calibration_guard.fired`), the file has its header and no row.
 - **`decontaminated_contig_bin.tsv`**: `contig`, `bin`: the input bins minus the flagged contigs.
 
 ## Bins and motifs
@@ -160,10 +161,11 @@ without its source contig (**test A**, the right answer is its bin), and against
 told from its nearest competitor ("distinct": the bin has no look-alike and the piece's expected log Bayes factor
 for its bin over the nearest other bin is at least 3). Pieces that overlap a 50 kb chunk the robust fit calls foreign
 to its bin are left out of the calibration (`foreign_excluded`). Lengths are in bp. `fragments.tsv`, `summary.tsv`,
-`reliability.tsv` and `assignability.tsv` are computed at the temperature and with the model of a genome without a
-bin that the calibration's own fit chose; that is the model in use except on runs where `params.json` holds
-`unknown_model_forced` (the forced community-only model then has its own temperature, `temperature` in
-`params.json`). `false_flag_rate.tsv` and `reliability_deployed.tsv` always use the settings of the decisions.
+`reliability.tsv`, `temperature_by_length.tsv` and `assignability.tsv` are computed at the temperature and with the
+model of a genome without a bin that the decisions use: the community-only fit, also on runs where `params.json`
+holds `unknown_model_forced` (the 0.11 switch would have chosen relatives; with the deprecated `--relatives switch`
+they describe the switch's choice). `false_flag_rate.tsv` and `reliability_deployed.tsv` use the settings of the
+decisions.
 
 | Table | One row per | Columns |
 |---|---|---|
@@ -256,7 +258,9 @@ calibration-core options: `tau_select`, `npmle_start`, `temperature_law`, `evide
 - `calibration_guard` (since 0.12): `fired` (true when the calibrated temperature is at the cap of the grid; the run
   then makes no call), `reason`, `temperature`, `cap` (20), `pieces` (calibration pieces used), `test_b_pieces`
   (pieces in test B) and `fallback` (`"no calls"` when fired); `null` without calibration, with `--temperature` or
-  with the deprecated `--relatives switch`. See the FAQ, "Known limitations".
+  with the deprecated `--relatives switch`. With `--temperature-law sites` the guard reads the law, whose temperature
+  the decisions use: `fired` when the law's temperature at 1,000 sites is at the upper bound of its search,
+  `temperature` is that value and `cap` 100. See the FAQ, "Known limitations".
 
 **Keys written only with non-default options.**
 
