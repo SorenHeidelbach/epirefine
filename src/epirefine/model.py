@@ -859,25 +859,13 @@ def score_units(Lp: np.ndarray, log_prof: np.ndarray) -> np.ndarray:
     return summed_scores(Lp, log_prof)
 
 
-# Calibration feature tempered-bin-prior (calibrate.FEATURES): set by pipeline.run for the length of a run.
-_TEMPERED_BIN_PRIOR = False
-
-
-def set_tempered_bin_prior(on: bool) -> bool:
-    """Switches the form of the prior over bins in every posterior; returns the previous setting."""
-    global _TEMPERED_BIN_PRIOR
-    old, _TEMPERED_BIN_PRIOR = _TEMPERED_BIN_PRIOR, bool(on)
-    return old
-
-
 def log_bins(n, temperature=1.0):
     """log of the number n of candidate bins as it enters a posterior: the uniform prior over bins costs each bin
-    log n. The evidence is tempered (S / T) and, by default (0.10), this cost is not, so the log odds of 'unknown'
-    against 'some bin' gain log(n) (1 - 1 / T) from the temperature alone and the estimated p_unknown rises with T
-    (ZymoFecal, community-only: 0.41 at T 1, 0.69 at T 5.02, 0.94 at T 10). With tempered-bin-prior the cost is
-    log(n) / T: the mixture over bins is tempered as a whole, as the relatives' mixture already is."""
-    ln = np.log(n)
-    return ln / temperature if _TEMPERED_BIN_PRIOR else ln
+    log n. The evidence is tempered (S / T) and this cost is not, so the log odds of 'unknown' against 'some bin'
+    gain log(n) (1 - 1 / T) from the temperature alone and an unknown share estimated at the deployed temperature
+    rises with T (ZymoFecal, community-only: 0.41 at T 1, 0.69 at T 5.02, 0.94 at T 10); since 0.12 the share is
+    estimated at T = 1 (option E). temperature is accepted for the callers' symmetry and does not enter."""
+    return np.log(n)
 
 
 def posterior(S_hosts: np.ndarray, S_unknown: np.ndarray | None, p_unknown: float, temperature=1.0,
@@ -891,7 +879,7 @@ def posterior(S_hosts: np.ndarray, S_unknown: np.ndarray | None, p_unknown: floa
     U, H = S_hosts.shape
     T = np.asarray(temperature, float)
     Tb = T[:, None] if T.ndim else T
-    lp_bin = np.log1p(-p_unknown) - log_bins(H, Tb) if _TEMPERED_BIN_PRIOR else np.log((1 - p_unknown) / H)
+    lp_bin = np.log((1 - p_unknown) / H)
     # one [U, H + 1] array, updated in place
     if Zu is None:
         logits = np.concatenate([S_hosts, S_unknown[:, None]], 1)
@@ -938,50 +926,35 @@ class FittedModel:
     """Host profiles and population prior for a given tau; scores arbitrary units."""
 
     def __init__(self, L_chunks, chunk_bin, n_bins, group_modtype, grid: Grid, tau, prior_lam=5.0,
-                 prior_floor=0.02, contam_eps=0.05, robust_iters=None, init_w=None, init_pi=None,
-                 robust_fit="alternating", robust_damping=0.5, robust_tol=1e-3, lp_out=None, prior_start="warm"):
-        """robust_fit: how the chunk weights w = 1 - P(chunk foreign to its bin) and the bin profiles are
-        brought into agreement.
-
-        "alternating" (the scheme up to 0.10.x): w <- 1 - r(w) for a fixed 4 rounds. Where a bin holds two
-        methylomes in comparable shares the pooled profile sits between them and fits no chunk, so every
-        chunk is called foreign, the next profile is the prior, every chunk is a member again, and so on:
-        a 2-cycle that the fixed round count ends in the pooled state (no chunk down-weighted).
-        "damped": w <- w + damping * ((1 - r(w)) - w), until no weight moves by more than robust_tol
-        (at most robust_iters rounds). The same fixed points, but the step is too short to jump over
-        them; from the pooled start all weights shrink together, the profile widens, the majority's
-        chunks fit it first and the fit settles with the minority down-weighted.
+                 prior_floor=0.02, contam_eps=0.05, robust_iters=4, init_w=None, init_pi=None,
+                 robust_tol=1e-3, lp_out=None):
+        """The chunk weights w = 1 - P(chunk foreign to its bin) and the bin profiles are brought into agreement
+        by alternating: w <- 1 - r(w) for a fixed robust_iters rounds (4), stopping early when no weight moves by
+        more than robust_tol. Where a bin holds two methylomes in comparable shares the pooled profile sits
+        between them and fits no chunk, so every chunk is called foreign, the next profile is the prior, every
+        chunk is a member again, and so on: a 2-cycle that the fixed round count ends in the pooled state (no
+        chunk down-weighted). (A damped iteration, --robust-fit damped up to 0.11, settled such bins with the
+        minority down-weighted but changed no flag or inclusion on any development set; removed in 0.12.)
         robust_delta[u] is the last change of each chunk's weight (bins whose chunks still move did not
         converge: see robust_unconverged()).
 
-        prior_start: "warm" (up to 0.11): every population-prior fit (NPMLE) starts from the previous solution
-        (init_pi, then the previous robust round's). A multiplicative EM step cannot put mass back on grid cells a
-        warm start drove to ~0: warm-started fits miss the optimum (KKT > 0.1 in 434 of 449 fits on 15 development
-        scenarios, against 0 of 15 cold fits; dev log model_diagnostics.md section 1). "cold": every NPMLE fit starts
-        from the uniform; init_pi is ignored (init_w, the chunk weights, still applies).
+        Every population-prior fit (NPMLE) starts from the previous solution (init_pi, then the previous robust
+        round's).
         """
-        if prior_start not in ("warm", "cold"):
-            raise ValueError(f"unknown prior_start {prior_start!r}")
-        cold = prior_start == "cold"
         self.grid, self.tau, self.n_bins = grid, tau, n_bins
         self.T = transition_spec(grid, tau)
         self.Lp_chunks = marginalize_unit(L_chunks, self.T, out=lp_out)
         self.chunk_bin = chunk_bin
         self._s_out = None
         self.w = np.ones(len(chunk_bin)) if init_w is None else init_w.copy()
-        if robust_fit not in ("damped", "alternating"):
-            raise ValueError(f"unknown robust_fit {robust_fit!r}")
-        alpha = robust_damping if robust_fit == "damped" else 1.0
-        if robust_iters is None:
-            robust_iters = 50 if robust_fit == "damped" else 4
-        raw = None if cold else init_pi
+        raw = init_pi
         self.robust_delta = np.zeros(len(chunk_bin))
         self.robust_rounds = 0
 
         def fit_profiles(raw):
             self.ell = bin_loglik(self.Lp_chunks, chunk_bin, n_bins, self.w)
             self.log_pi, raw = fit_population_prior(self.ell, group_modtype, prior_lam, prior_floor,
-                                                    init=None if cold else raw, return_raw=True)
+                                                    init=raw, return_raw=True)
             self.log_prof = host_profiles(self.ell, self.log_pi)
             return raw
 
@@ -989,13 +962,9 @@ class FittedModel:
             raw = fit_profiles(raw)
             if it == robust_iters or contam_eps <= 0:
                 break
-            if robust_fit == "damped":
-                self._s_out = None  # the community term follows the refitted population prior
             target = 1.0 - self._outlier_responsibility(contam_eps)
-            # convergence is judged on the full step, so a damped fit does not stop early
             self.robust_delta = np.abs(target - self.w)
-            # (alternating: the target itself, as in 0.10; w + 1.0 * (target - w) can differ from it in the last bit)
-            self.w = target if alpha == 1.0 else self.w + alpha * (target - self.w)
+            self.w = target
             self.robust_rounds = it + 1
             if self.robust_delta.max() < robust_tol:  # warm-started fits (e.g. the next tau) often need one or two rounds
                 raw = fit_profiles(raw)
@@ -1194,18 +1163,6 @@ class FittedModel:
             off[s:s + batch] = logsumexp(Lp + l_off[None], -1)
             on[s:s + batch] = logsumexp(Lp + l_on[None], -1)
         return off, on, q
-
-    def unlisted_score(self, sc: Scores, batch: int = 2000) -> np.ndarray:
-        """log P(unit | a genome with none of the listed motifs): every group's level drawn from the part of
-        the population prior below 0.5 (the levels of bins that do not methylate the group)."""
-        if sc.lp_rows is not None:
-            raise ValueError("needs the Lp rows of every unit: score with lp_rows=None")
-        off = np.where(self.grid.x[None, :] < 0.5, self.log_pi, -np.inf)
-        off = off - logsumexp(off, axis=-1, keepdims=True)
-        out = np.empty(len(sc.Lp))
-        for s in range(0, len(out), batch):
-            out[s:s + batch] = logsumexp(sc.Lp[s:s + batch].astype(np.float64) + off[None], -1).sum(-1)
-        return out
 
     def host_terms(self, sc: Scores, rows: np.ndarray, hosts: np.ndarray | None = None,
                    log_prof: np.ndarray | None = None, batch: int = 1000) -> np.ndarray:

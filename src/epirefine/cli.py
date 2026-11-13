@@ -105,9 +105,6 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--no-regional-model", action="store_true",
                    help="judge long binned contigs only as a whole (default: a contig that is partly its bin's and partly "
                         "foreign along its length is reported as mixed, with its foreign segments, instead of flagged)")
-    g.add_argument("--regional-inclusion", action="store_true",
-                   help="also include long unbinned contigs scored in windows of --chunk-size (a bin explaining most "
-                        "of the contig); experimental, no measured benefit; needs the regional model")
     g.add_argument("--chunk-size", type=int, default=50_000, help="binned contigs are split into chunks of this size (bp)")
 
     g = r.add_argument_group("model and calibration")
@@ -123,14 +120,6 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--no-calibrate", action="store_true",
                    help="skip the calibration on pieces cut from the bins: probabilities are then uncalibrated "
                         "(temperature 1 and a fixed variation parameter unless --temperature / --tau are given)")
-    g.add_argument("--calibration", default="default",
-                   help="calibration design: 'default' (as in 0.10, plus bin-parsimony: an unknown model with "
-                        "relatives must beat the community-only one by 2 SE taken over bins; since 0.11.1), "
-                        "'legacy' (exactly as in 0.10 and 0.11.0), 'consistent' (temper-then-mix, common-tau, "
-                        "em-priors), 'coherent' (the full proposed design), or a comma-separated list of features "
-                        "(temper-then-mix, prior-averaged, prior-matched, conservative-temperature, full-test-b, "
-                        "unit-temperature, sites-temperature, common-tau, em-priors, bin-parsimony, tempered-bin-prior, deployed-unknown; '-name' removes one). "
-                        "See docs/development/method-notes.md")
     g.add_argument("--frag-lengths", type=lambda s: tuple(int(x) for x in s.split(",")), default=DEFAULT_LENGTHS,
                    help="lengths (bp, comma-separated) of the pieces cut from binned contigs for calibration; at "
                         "least one binned contig must be as long as the shortest")
@@ -157,14 +146,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also write motif_fit.tsv: each contig's methylated fraction per motif group next to its bin's")
 
     g = r.add_argument_group("rule variants",
-                             "alternative designs of single rules; every default is the behaviour of 0.10")
-    g.add_argument("--robust-fit", choices=["damped", "alternating"], default="alternating",
-                   help="how chunk weights and bin profiles are iterated: damped steps to convergence, or the fixed four "
-                        "alternating rounds of 0.10.x (which end in the pooled profile when a bin holds two methylomes)")
-    g.add_argument("--max-flagged-share", type=float, default=1.0,
-                   help="below 1: no flag of a bin is applied when its flagged contigs hold at least this share of the "
-                        "bin's judged sequence (the bin is reported as a suspected merge of genomes); 1 = off, every "
-                        "flag is applied")
+                             "alternative designs of single rules, not yet judged; every default is the behaviour of 0.10 "
+                             "(the variants that lost were removed in 0.12)")
     g.add_argument("--regional-leave-out", choices=["contig", "chunk"], default="chunk",
                    help="bin profile the chunks of a long contig are compared with in the regional model: without the "
                         "whole contig (as for the contig's own score) or without the chunk only (0.10.x)")
@@ -179,18 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="contig intervals of the methylome-difference gate from unweighted site likelihoods")
     g.add_argument("--eps-gated", action="store_true",
                    help="estimate the contamination rate only from contigs that pass the methylome-difference gate")
-    g.add_argument("--unlisted-genome", action="store_true",
-                   help="unbinned genomes are community draws or genomes with none of the listed motifs (weights estimated)")
-    g.add_argument("--inclusion-support", choices=["methylated_groups", "none"], default="none",
-                   help="an inclusion must also reach the threshold on the motif groups its bin methylates alone")
     g.add_argument("--unknown-prior", choices=["unbinned", "bins"], default="bins",
                    help="an unbinned genome's state in each motif group is drawn at the frequency seen among the unbinned "
                         "contigs, or among the bins (0.10.x)")
     g.add_argument("--unknown-prior-strength", type=float, default=5.0,
                    help="with --unknown-prior unbinned: pseudo-contigs at the bins' frequency per motif group")
-    g.add_argument("--tau-support", choices=["leave_bin_out", "all"], default="all",
-                   help="a motif group gets between-contig variation (finite tau) only if the calibration fragments support "
-                        "it without the bin that gains most, or on all fragments (0.10.x)")
     g.add_argument("--two-state-warning", type=float, default=0.2,
                    help="warn about a bin when, in some motif group, the smaller of two methylation states among its "
                         "chunks holds at least this share, or its flagged contigs hold at least this share of the "
@@ -203,18 +179,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="include nothing into a bin without a single motif site (such a bin has no profile; its "
                         "posterior is its prior share)")
 
-    g = r.add_argument_group("calibration core (experimental)",
-                             "options of the calibration redesign (mission WP3); --relatives and --unknown-share default to option E "
-                             "(community only, unknown share at T = 1, since 0.12), the others to the behaviour of 0.11.1")
-    g.add_argument("--tau-select", choices=["per-group", "inf"], default="per-group",
-                   help="between-contig variation: a tau per motif group chosen on the calibration pieces, or none "
-                        "(tau = inf fitted inside the calibration; no tau scan)")
-    g.add_argument("--npmle-start", choices=["warm", "cold"], default="warm",
-                   help="population-prior fits start from the previous fit's solution (warm) or from the uniform (cold)")
+    g = r.add_argument_group("calibration core",
+                             "--relatives and --unknown-share default to option E (community only, unknown share at T = 1, "
+                             "since 0.12); --temperature-law and --evidence-temperature are experimental and default to "
+                             "the behaviour of 0.11.1")
     g.add_argument("--unknown-share", choices=["deployed", "t1"], default=None,
                    help="the share of unbinned contigs from genomes without a bin: estimated at T = 1 and used with the "
                         "untempered bin prior (t1, the default since 0.12), or at the calibrated temperature (deployed, "
-                        "0.11; it then rises with the temperature; the default with --relatives switch or per-bin)")
+                        "0.11; it then rises with the temperature; the default with --relatives switch)")
     g.add_argument("--temperature-law", choices=["grid", "sites"], default="grid",
                    help="one temperature from a grid (grid), or a temperature that grows smoothly with a contig's number "
                         "of motif sites, log T = a + b log(sites / 1000) with b in [0, 1] and T >= 1.082 (sites)")
@@ -222,22 +194,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="temperature of the methylation-evidence cut-off (--min-evidence): the median over contigs, or each "
                         "contig's own (only differs with --temperature-law sites)")
     # 'switch' (the unknown-model switch of 0.11.1) is accepted but not listed: deprecated, kept for ablation only
-    g.add_argument("--relatives", choices=["community-only", "per-bin", "slot", "switch"], default=None,
-                   metavar="{community-only,per-bin,slot}",
+    g.add_argument("--relatives", choices=["community-only", "switch"], default=None,
+                   metavar="{community-only}",
                    help="model of genomes without a bin: community only on every run, the relatives test reported as "
-                        "a number (community-only, the default since 0.12; params.json relatives_statistic), or one "
-                        "mixture with a relatives weight per bin fitted on the calibration pieces (per-bin; also writes "
-                        "hidden_relative.tsv: the probability that an unbinned relative of the bin explains each contig, "
-                        "report only), or the slot model (slot: each bin's slot holds its own genome or an unbinned "
-                        "relative, a weight per bin fitted with the temperature; needs --unknown-share t1)")
-    g.add_argument("--slot-objective", choices=["legacy", "averaged"], default="legacy",
-                   help="calibration objective of the slot model: prior 0.1, host-present and host-absent pieces 1 : 1 (legacy), or "
-                        "averaged over priors 0.1 ... 0.9, the host-absent pieces scored with a proper prior (averaged)")
-    g.add_argument("--slot-test-b", choices=["decidable", "all"], default="decidable",
-                   help="pieces in the slot model's host-absent test: the decidable ones, or all kept pieces")
-    g.add_argument("--slot-kappa", type=float, default=None,
-                   help="shrinkage of the slot model's per-bin weights (default: by cross-validation)")
-    g.add_argument("--calibration-exclusion", choices=["on", "off"], default="on", help=argparse.SUPPRESS)
+                        "a number (community-only, the default since 0.12; params.json relatives_statistic)")
 
     rr = sub.add_parser("rerun", formatter_class=_Help,
                         help="repeat a run from its params.json: the same inputs (recorded paths) and options, into "
@@ -320,26 +280,24 @@ def main(argv=None):
                 a.assembly, a.pileup, a.contig_bin, a.motifs, a.out, min_cov=a.min_cov, chunk_size=a.chunk_size,
                 grid_size=a.grid_size, p_unknown=a.p_unknown, contamination_threshold=a.contamination_threshold,
                 include_threshold=a.include_threshold, min_methylome_difference=a.min_methylome_difference,
-                max_redundancy=a.max_redundancy, min_evidence=a.min_evidence, min_contig_coverage=a.min_contig_coverage, min_contig_length=a.min_contig_length, motif_noise_filter=not a.no_motif_noise_filter, group_weights=not a.no_group_weights, regional_model=not a.no_regional_model, regional_inclusion=a.regional_inclusion, include_threshold_unmethylated=a.include_threshold_unmethylated, do_calibrate=not a.no_calibrate, frag_lengths=a.frag_lengths,
-                frags_per_bin=a.frags_per_bin, frag_budget=a.frag_budget, tau=a.tau, temperature=a.temperature,
-                contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening, calibration=a.calibration,
-                min_jaccard=a.min_jaccard,
-                variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6, workers=a.workers,
-                cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed, calibration_seed=a.calibration_seed, shared_sites=a.shared_sites,
+                max_redundancy=a.max_redundancy, min_evidence=a.min_evidence, min_contig_coverage=a.min_contig_coverage,
+                min_contig_length=a.min_contig_length, motif_noise_filter=not a.no_motif_noise_filter,
+                group_weights=not a.no_group_weights, regional_model=not a.no_regional_model,
+                include_threshold_unmethylated=a.include_threshold_unmethylated, do_calibrate=not a.no_calibrate,
+                frag_lengths=a.frag_lengths, frags_per_bin=a.frags_per_bin, frag_budget=a.frag_budget, tau=a.tau,
+                temperature=a.temperature, contam_eps=a.contam_eps, allow_sharpening=a.allow_sharpening,
+                min_jaccard=a.min_jaccard, variation=a.variation, group_sample_bp=a.group_sample_mb * 1e6,
+                workers=a.workers, cache_dir=a.cache_dir, write_motif_fit=a.motif_fit, seed=a.seed,
+                calibration_seed=a.calibration_seed, shared_sites=a.shared_sites,
                 complement_pairs=a.complement_pairs, strand_sites=a.strand_sites,
                 noise_max_off_share=a.noise_max_off_share,
                 two_state_warning=a.two_state_warning, siteless_bin_guard=a.siteless_bin_guard,
-                robust_fit=a.robust_fit,
-                max_flagged_share=a.max_flagged_share, regional_leave_out=a.regional_leave_out,
+                regional_leave_out=a.regional_leave_out,
                 regional_withdraw=a.regional_withdraw, regional_tempered=a.regional_tempered,
                 gate_leave_out=a.gate_leave_out, gate_unweighted=a.gate_unweighted, eps_gated=a.eps_gated,
-                redundancy_order=a.redundancy_order, unlisted_genome=a.unlisted_genome,
-                inclusion_support=a.inclusion_support, tau_support=a.tau_support, unknown_prior=a.unknown_prior,
-                unknown_prior_strength=a.unknown_prior_strength,
-                tau_select=a.tau_select, npmle_start=a.npmle_start, unknown_share=a.unknown_share,
-                temperature_law=a.temperature_law, evidence_temperature=a.evidence_temperature, relatives=a.relatives,
-                slot_objective=a.slot_objective, slot_test_b=a.slot_test_b, slot_kappa=a.slot_kappa,
-                calibration_exclusion=a.calibration_exclusion == "on")
+                redundancy_order=a.redundancy_order, unknown_prior=a.unknown_prior,
+                unknown_prior_strength=a.unknown_prior_strength, unknown_share=a.unknown_share,
+                temperature_law=a.temperature_law, evidence_temperature=a.evidence_temperature, relatives=a.relatives)
         except InputError as e:
             # a problem with the inputs or options: the message says what; no traceback needed
             log(f"ERROR: {e}")
