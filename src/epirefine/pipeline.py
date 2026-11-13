@@ -33,7 +33,7 @@ from .redundancy import inclusion_redundancy
 from .refine import (bin_evidence_table, em_weight, flagged_share_per_bin, refine, regional_pattern, suspected_merges,
                      withdraw_as_mixed,
                      write_outputs)
-from .sites import EncodedAssembly, RowFile, TableFileError, drop_pages, extract_sites, same_pairs, unit_tables
+from .sites import EncodedAssembly, RowFile, drop_pages, table_file_error, extract_sites, same_pairs, unit_tables
 from . import sitecache
 
 
@@ -272,15 +272,18 @@ class _SpillWriteback:
     def _run(self):
         try:
             drop_pages(self.fh.fileno())
-        except OSError as e:
+        except Exception as e:  # any error, so that check() cannot pass after a failure
             self.error = e
 
     def check(self) -> None:
         self._thread.join()
         if self.error is not None:
-            raise TableFileError(f"the chunk tables' temporary file in {self.directory} could not be written to disk "
-                                 f"({self.error}); it needs about {self.nbytes / 1e9:.1f} GB of free space there. "
-                                 f"The run stops: the file cannot be read back safely")
+            raise table_file_error("chunk tables'", self.directory, self.nbytes, self.error)
+
+    def failed(self) -> BaseException | None:
+        """The write-back's error, once it has ended (for a file that was never read: the outputs stand)."""
+        self._thread.join()
+        return self.error
 
 
 def _spill(a: np.ndarray, directory, writebacks: list | None = None) -> np.ndarray:
@@ -541,6 +544,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                        chunk_offset=chunk_offset, chunk_size=chunk_size, n_chunks=n_chunks_all, target_of=target_of,
                        n_targets=len(targets), frags=frags, workers=workers, log=_log, targets_dir=out,
                        target_weight=group_w.astype(np.float32) if group_weights and (group_w < 1).any() else None)
+    if isinstance(tabs["L_t"], RowFile):  # closed (removed) also if the run fails from here on
+        _OPEN_TABLES.append(tabs["L_t"])
     # (the contig tables L_t got their weights row by row as the parts arrived, in unit_tables)
     if group_weights and (group_w < 1).any():
         wf = group_w.astype(np.float32)[None, :, None]
@@ -556,8 +561,6 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     del L_all
     chunk_bin, chunk_contig, chunk_no = chunk_bin_all[keep], chunk_contig[keep], chunk_no[keep]
     L_t, n_sites, n_sites_group = tabs["L_t"], tabs["n_sites_t"], tabs["n_sites_group_t"]
-    if isinstance(L_t, RowFile):
-        _OPEN_TABLES.append(L_t)
     _log(f"{len(keep)} host chunks of {chunk_size} bp; tables {L_chunks.nbytes / 1e9:.1f} GB (chunks), "
          f"{L_t.nbytes / 1e9:.1f} GB (contigs)")
 
@@ -1083,6 +1086,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                   evidence=evidence, min_evidence=min_evidence, coverage=coverage, low_coverage=low_cov, too_short=short,
                   regional=regional)
     _write(bin_ev, out / "bin_evidence.tsv")
+    for w in spill_sync:  # never read (no mixed contig): the outputs stand, but the folder had a write error
+        if w.failed() is not None:
+            _log(f"WARNING: the chunk tables' temporary file in {out} could not be written to disk ({w.error}); "
+                 f"it was not needed for the results")
     _log(f"refinement: p_unknown={p_unknown:.3f}, contamination rate={ref.eps:.3f}; "
          f"{int(ref.contaminant.sum())} of {int(testable.sum())} testable binned contigs flagged, "
          f"{int(((ref.include_bin >= 0) & (given < 0)).sum())} of {int((given < 0).sum())} unbinned included, "

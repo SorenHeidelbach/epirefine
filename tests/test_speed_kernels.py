@@ -476,13 +476,15 @@ def test_spill_writeback_in_the_background(tmp_path, monkeypatch):
     wb[0].check()
     assert synced == [True] and np.array_equal(m, a)
 
-    def fail(fd, *args):
-        raise OSError(errno.EIO, "Input/output error")
-    monkeypatch.setattr(P, "drop_pages", fail)
-    wb = []
-    P._spill(a, tmp_path, wb)
-    with pytest.raises(TableFileError, match="free space"):
-        wb[0].check()
+    for err in (OSError(errno.EDQUOT, "Disk quota exceeded"), ValueError("not an OSError")):
+        def fail(fd, *args):
+            raise err
+        monkeypatch.setattr(P, "drop_pages", fail)
+        wb = []
+        P._spill(a, tmp_path, wb)
+        with pytest.raises(TableFileError):  # any error, also one that is not an OSError
+            wb[0].check()
+
 
 def test_spilled_chunk_tables_same_outputs(community, base_run, tmp_path, monkeypatch):
     """A run whose chunk tables go to a temporary file after the final fit writes the same tables."""

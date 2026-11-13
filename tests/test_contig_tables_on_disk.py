@@ -99,9 +99,6 @@ def test_rowfile_writeback_error_is_fatal(tmp_path, monkeypatch):
             f.write_rows(np.array([k]), rows)
             f._flusher.join()
     assert k == 2 and not read
-    with pytest.raises(sites.TableFileError):
-        f.recover()  # no read-back after a failed write-back, also not through recover()
-    assert not read
     f.close()
     g = sites.RowFile(tmp_path, (6, 2, 3))  # the write-back in finish() fails
     monkeypatch.setattr(sites, "DISK_FLUSH_BYTES", 1 << 30)
@@ -127,30 +124,134 @@ def test_writeback_error_stops_the_run(community, base_run, tmp_path, monkeypatc
     assert not [p for p in out.iterdir() if p.name.startswith("tmp")]
 
 
-def test_rowfile_recover_after_failed_write(tmp_path, monkeypatch):
-    """A failed pwrite leaves the earlier blocks: recover() returns them (syncing the file first); a failed sync
-    there stops with TableFileError."""
+def test_rowfile_failed_write(tmp_path, monkeypatch):
+    """A pwrite that fails before any row was written raises OSError (the caller keeps the table in memory); once
+    rows were written, TableFileError (the earlier rows may be lost with it: never read back)."""
     import errno
-    import os
     from epirefine import sites
-    rng = np.random.default_rng(5)
-    ref = np.zeros((10, 2, 3), np.float32)
-    f = sites.RowFile(tmp_path, ref.shape)
-    for ids in (np.array([4, 1]), np.array([7])):
-        rows = rng.random((len(ids), 2, 3)).astype(np.float32)
-        f.write_rows(ids, rows)
-        ref[ids] = rows
 
     def full(*a):
         raise OSError(errno.ENOSPC, "No space left on device")
+    f = sites.RowFile(tmp_path, (10, 2, 3))
+    real = f._pwrite
     monkeypatch.setattr(f, "_pwrite", full)
-    with pytest.raises(OSError):
-        f.write_rows(np.array([0, 9]), rng.random((2, 2, 3)).astype(np.float32))
-    assert np.array_equal(f.recover(), ref)
-    monkeypatch.setattr(os, "fdatasync" if hasattr(os, "fdatasync") else "fsync", lambda fd: full())
-    with pytest.raises(sites.TableFileError):
-        f.recover()
+    with pytest.raises(OSError) as first:
+        f.write_rows(np.array([4]), np.ones((1, 2, 3), np.float32))
+    assert not isinstance(first.value, sites.TableFileError)
+    monkeypatch.setattr(f, "_pwrite", real)
+    f.write_rows(np.array([4]), np.ones((1, 2, 3), np.float32))
+    monkeypatch.setattr(f, "_pwrite", full)
+    with pytest.raises(sites.TableFileError, match="free space"):
+        f.write_rows(np.array([7]), np.ones((1, 2, 3), np.float32))
     f.close()
+
+
+def _unit_tables_with_parts(sites, monkeypatch, tmp_path, blocks):
+    """sites.unit_tables on finished target blocks (a stand-in executor returns them as the parts' results)."""
+    from concurrent.futures import Future
+    results = iter([{"targets": {"ids": ids, "L": L, "n_sites": np.ones(len(ids), np.int64),
+                                 "n_sites_group": (ids, np.zeros(len(ids), int), np.ones(len(ids), np.int32))}}
+                    for ids, L in blocks])
+
+    class Ex:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def submit(self, fn, *a):
+            f = Future()
+            f.set_result(next(results))
+            return f
+
+        def shutdown(self, wait=True, cancel_futures=False):
+            pass
+    monkeypatch.setattr(sites, "ProcessPoolExecutor", Ex)
+    U, M, G = 60, blocks[0][1].shape[1], blocks[0][1].shape[2]
+    logs = []
+    res = sites.unit_tables([str(i) for i in range(len(blocks))], n_groups=M, det={}, grid_size=G, min_cov=1,
+                            chunk_offset=np.zeros(1, np.int64), chunk_size=1, n_chunks=0,
+                            target_of=np.zeros(1, np.int64), n_targets=U, frags=None, workers=1,
+                            log=logs.append, targets_dir=tmp_path)
+    return res, logs
+
+
+def test_write_reporting_lost_rows_stops(tmp_path, monkeypatch):
+    """NFS: a pwrite can report (and so use up) an earlier failed write-back whose pages were lost; a sync after it
+    returns no error and the hole reads as zeros. unit_tables must stop, not read the file back (mode D of the
+    second review check: 18 true rows came back as zeros with only a warning)."""
+    import errno
+    import os
+    from epirefine import sites
+    monkeypatch.setattr(sites, "TARGETS_DISK_MIN_BYTES", 0)
+    monkeypatch.setattr(sites, "DISK_FLUSH_BYTES", 1 << 40)  # no write-back of our own has run yet
+    rng = np.random.default_rng(1)
+    blocks = [(ids, (rng.random((len(ids), 3, 8)) + 0.1).astype(np.float32))
+              for ids in np.array_split(rng.permutation(60)[:50], 6)]
+    real, calls = sites.RowFile._pwrite, []
+
+    def pw(self, buf, off):
+        calls.append(off)
+        if len(calls) == 3:
+            os.pwrite(self._fd, bytes(self._end), 0)  # the earlier pages lost: a hole
+            raise OSError(errno.EDQUOT, "Disk quota exceeded")
+        return real(self, buf, off)
+    monkeypatch.setattr(sites.RowFile, "_pwrite", pw)
+    read = []
+    real_get = sites.RowFile.__getitem__
+    monkeypatch.setattr(sites.RowFile, "__getitem__", lambda self, k: (read.append(k), real_get(self, k))[1])
+    with pytest.raises(sites.TableFileError, match="free space"):
+        _unit_tables_with_parts(sites, monkeypatch, tmp_path, blocks)
+    assert len(calls) == 3 and not read
+    assert not list(tmp_path.iterdir())
+
+
+def test_first_write_fails_table_in_memory(tmp_path, monkeypatch):
+    """The first block cannot be written: nothing is in the file, the table is kept in memory (one warning), equal
+    to the table built in memory."""
+    import errno
+    from epirefine import sites
+    monkeypatch.setattr(sites, "TARGETS_DISK_MIN_BYTES", 0)
+    rng = np.random.default_rng(2)
+    blocks = [(ids, rng.random((len(ids), 3, 8)).astype(np.float32))
+              for ids in np.array_split(rng.permutation(60)[:50], 4)]
+    truth = np.zeros((60, 3, 8), np.float32)
+    for ids, L in blocks:
+        truth[ids] = L
+
+    def full(*a):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    monkeypatch.setattr(sites.RowFile, "_pwrite", full)
+    res, logs = _unit_tables_with_parts(sites, monkeypatch, tmp_path, blocks)
+    assert isinstance(res["L_t"], np.ndarray) and np.array_equal(res["L_t"], truth)
+    assert [m for m in logs if "WARNING" in m] == [logs[0]] and "kept in memory" in logs[0]
+    assert not list(tmp_path.iterdir())
+
+
+def test_error_text_names_space_only_for_space_errors():
+    import errno
+    from epirefine import sites
+    e = sites.table_file_error("contig tables'", "/out", 6e9, OSError(errno.EIO, "Input/output error"))
+    assert "free space" not in str(e) and "/out" in str(e)
+    for no in (errno.ENOSPC, errno.EDQUOT):
+        assert "6.0 GB of free space" in str(sites.table_file_error("x", "/out", 6e9, OSError(no, "full")))
+
+
+def test_drop_pages_syncs_without_fadvise(tmp_path, monkeypatch):
+    """Where posix_fadvise is missing (macOS) drop_pages still syncs: the sync is what reports a failed write-back."""
+    import os
+    from epirefine import sites
+    monkeypatch.delattr(os, "posix_fadvise", raising=False)
+    synced = []
+    name = "fdatasync" if hasattr(os, "fdatasync") else "fsync"
+    monkeypatch.setattr(os, name, lambda fd: synced.append(fd))
+    with open(tmp_path / "f", "wb") as fh:
+        sites.drop_pages(fh.fileno())
+        assert synced == [fh.fileno()]
 
 
 def test_rowfile_checks_blocks(tmp_path):
@@ -171,8 +272,8 @@ def test_rowfile_checks_blocks(tmp_path):
 
 @pytest.mark.parametrize("how", ["no file", "write fails"])
 def test_fall_backs_to_memory(community, base_run, tmp_path, monkeypatch, how):
-    """The two fall-backs (the file cannot be made; a write to it fails) keep the table in memory and give the
-    reference outputs; the warning comes after the table is back in memory."""
+    """The two fall-backs (the file cannot be made; its first write fails) keep the table in memory and give the
+    reference outputs."""
     import errno
     from epirefine import sites
     monkeypatch.setattr(sites, "TARGETS_DISK_MIN_BYTES", 0)
@@ -182,32 +283,10 @@ def test_fall_backs_to_memory(community, base_run, tmp_path, monkeypatch, how):
     if how == "no file":
         monkeypatch.setattr(sites.RowFile, "__init__", fail)
     else:
-        monkeypatch.setattr(sites.RowFile, "_pwrite", fail)
-        recovered = []
-        real = sites.RowFile.recover
-        monkeypatch.setattr(sites.RowFile, "recover", lambda self: (recovered.append(1), real(self))[1])
+        monkeypatch.setattr(sites.RowFile, "_pwrite", fail)  # the first write: nothing in the file yet
     run = run_pipeline(**community.args(copy_cache(base_run, tmp_path / "out")))
-    assert ("contig tables kept in memory" if how == "no file" else "contig tables moved back to memory") in run.log
-    if how == "write fails":
-        assert recovered == [1]
+    assert "contig tables kept in memory" in run.log
     assert differing_files(base_run.out, run.out) == []
-
-
-def test_failed_read_back_stops_without_warning(community, base_run, tmp_path, monkeypatch, capsys):
-    """When reading the table back after a failed write fails too, the run stops, and the log does not claim the
-    table was moved back to memory."""
-    import errno
-    from epirefine import sites
-    from epirefine.pipeline import run
-    monkeypatch.setattr(sites, "TARGETS_DISK_MIN_BYTES", 0)
-
-    def fail(*a, **k):
-        raise OSError(errno.EIO, "Input/output error")
-    monkeypatch.setattr(sites.RowFile, "_pwrite", fail)
-    monkeypatch.setattr(sites.RowFile, "__getitem__", fail)
-    with pytest.raises(sites.TableFileError):
-        run(**community.args(copy_cache(base_run, tmp_path / "out")), workers=1)
-    assert "moved back to memory" not in capsys.readouterr().out
 
 
 def test_table_file_closed_when_the_run_fails(community, base_run, tmp_path, monkeypatch):
@@ -300,3 +379,18 @@ def test_disk_path_whole_table_options(community, base_run, tmp_path, monkeypatc
     disk = run_pipeline(**community.args(copy_cache(base_run, tmp_path / "disk")), **opts)
     assert made == [1]
     assert differing_files(mem.out, disk.out) == []
+
+
+def test_failed_spill_never_read_warns(community, base_run, tmp_path, monkeypatch):
+    """A chunk-table write-back that fails while nothing reads the file (no mixed contig in the synthetic community):
+    the outputs stand, and one warning says the folder had a write error."""
+    import errno
+    import epirefine.pipeline as P
+    monkeypatch.setattr(P, "SPILL_MIN_BYTES", 1)
+
+    def fail(fd, *args):
+        raise OSError(errno.EIO, "Input/output error")
+    monkeypatch.setattr(P, "drop_pages", fail)
+    run = run_pipeline(**community.args(copy_cache(base_run, tmp_path / "out")))
+    assert run.log.count("chunk tables' temporary file") == 1 and "not needed for the results" in run.log
+    assert differing_files(base_run.out, run.out) == []

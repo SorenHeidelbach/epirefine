@@ -306,13 +306,16 @@ memory.
 memory as the tables did, and on the whole-table scoring paths above the contig tables are then held twice (about
 5.9 GiB more than in memory on ZymoFecal). Use an output directory on disk for large samples.
 
-**Errors.** If the contig-table file cannot be made, or a write to it fails (`pwrite`; on a local disk this is where
-a full disk or quota shows), the tables go back to memory (one warning; the file is synced before the rows written
-so far are read back). If a write-back fails (`fdatasync`, in the background or at the end; usual for quota or space
-errors on network file systems, and for I/O errors), the run stops with one line naming the folder and the space
-needed: after a failed write-back the system may drop the unwritten pages, and the file can no longer be trusted.
-The chunk-table file falls back to the array still in memory if it cannot be written; if its background write-back
-fails, the run stops in the same way before the file is read (the regional step), and goes on if it is never read.
+**Errors.** If the contig-table file cannot be made, or its first write fails (nothing is in it yet), the tables
+stay in memory (one warning). Any later error writing it, from `pwrite` or from a write-back (`fdatasync`, in the
+background or at the end), stops the run with one line naming the folder (and, for a space or quota error, the
+space needed); the file is never read back. After a failed write-back the system may drop the unwritten pages,
+and on NFS a `pwrite` can itself report an earlier failed write-back, after which a sync returns no error and the
+lost range reads as zeros. So a disk that fills up half way stops the run instead of continuing in memory. Where
+`posix_fadvise` is missing (macOS) the files are still synced, so these errors are seen there too. The chunk-table
+file falls back to the array still in memory if it cannot be written; if its background write-back fails, the run
+stops in the same way before the file is read (the regional step), and if nothing reads it, the run ends with one
+warning (the outputs do not depend on it).
 
 Outputs are byte-identical whether the tables are on disk or in memory (tests force the disk path on the synthetic
 community with 1 and 3 workers, down-weighted groups, the unbinned prior and without the kernels; the small suites

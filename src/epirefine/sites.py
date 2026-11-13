@@ -743,19 +743,27 @@ PREFETCH_BLOCK = 8 << 20
 
 def drop_pages(fd: int, sync: bool = True, offset: int = 0, length: int = 0) -> None:
     """Write a file's dirty pages to disk and drop its pages (offset, length; 0 = to the end) from the page cache,
-    so that they are no longer charged to the process's memory (cgroup). A no-op where posix_fadvise does not
-    exist (macOS)."""
-    if not hasattr(os, "posix_fadvise"):
-        return
+    so that they are no longer charged to the process's memory (cgroup). Where posix_fadvise does not exist (macOS)
+    the pages are only written back: the sync is what reports a failed write-back."""
     if sync:
         (os.fdatasync if hasattr(os, "fdatasync") else os.fsync)(fd)
-    os.posix_fadvise(fd, offset, length, os.POSIX_FADV_DONTNEED)
+    if hasattr(os, "posix_fadvise"):
+        os.posix_fadvise(fd, offset, length, os.POSIX_FADV_DONTNEED)
 
 
 class TableFileError(RuntimeError):
     """The temporary file of a table could not be written back to disk. Its contents can no longer be trusted
     (after a failed write-back the system may drop the unwritten pages, and a hole reads as zeros), so the run
     stops instead of reading it back."""
+
+
+def table_file_error(what: str, directory, nbytes: int, e: BaseException) -> TableFileError:
+    """The one-line message of a TableFileError; it names the free space needed only for a space or quota error."""
+    import errno
+    space = (f"; it needs about {nbytes / 1e9:.1f} GB of free space there"
+             if getattr(e, "errno", None) in (errno.ENOSPC, errno.EDQUOT, errno.EFBIG) else "")
+    return TableFileError(f"the {what} temporary file in {directory} could not be written to disk ({e}){space}. "
+                          f"The run stops: the rows already written cannot be read back safely")
 
 
 class RowFile:
@@ -778,10 +786,11 @@ class RowFile:
 
     Rows never written read as zeros, as in the np.zeros table they replace.
 
-    Errors: a failed pwrite (write_rows raises OSError) leaves the file as it was before that block, so recover()
-    can read the rows written so far into memory. A failed write-back (fdatasync, in the background or in
-    finish(); usual for quota and space errors on network file systems, and for I/O errors) raises
-    TableFileError and the file is never read again.
+    Errors: once a row has been written, any error writing the file raises TableFileError and the file is never
+    read again. A failed write-back (fdatasync, in the background or in finish(); usual for quota and space errors
+    on network file systems, and for I/O errors) can lose pages already written; on NFS even a pwrite can report,
+    and so use up, an earlier failed write-back, after which a sync returns no error and a hole reads as zeros. A
+    pwrite that fails before any row was written raises OSError (the caller keeps the table in memory).
     """
 
     def __init__(self, directory, shape, dtype=np.float32):
@@ -813,9 +822,7 @@ class RowFile:
             buf, off = buf[n:], off + n
 
     def _fatal(self, e: OSError) -> TableFileError:
-        return TableFileError(f"the contig tables' temporary file in {self.directory} could not be written to disk "
-                              f"({e}); it needs about {self.nbytes / 1e9:.1f} GB of free space there. The run stops: "
-                              f"the rows already written cannot be read back safely")
+        return table_file_error("contig tables'", self.directory, self.nbytes, e)
 
     def _writeback(self, upto: int) -> None:
         """Background: write back and drop the pages of [flushed, upto)."""
@@ -828,8 +835,8 @@ class RowFile:
     _error = None
 
     def write_rows(self, ids: np.ndarray, rows: np.ndarray) -> None:
-        """rows[i] is row ids[i]; appended to the file as one block. OSError: this block was not written (the
-        file holds the earlier ones; recover()). TableFileError: an earlier write-back failed."""
+        """rows[i] is row ids[i]; appended to the file as one block. OSError: nothing has been written to the file
+        (the caller can keep the table in memory). TableFileError: writing failed after rows were written."""
         import threading
         if self._error is not None:
             raise self._fatal(self._error)
@@ -837,7 +844,12 @@ class RowFile:
             raise ValueError(f"rows of shape {rows.shape} for {len(ids)} rows of a table of shape {self.shape}")
         rows = np.ascontiguousarray(rows, dtype=self.dtype)
         start = self._end
-        self._pwrite(memoryview(rows.reshape(-1).view(np.uint8)), start)
+        try:
+            self._pwrite(memoryview(rows.reshape(-1).view(np.uint8)), start)
+        except OSError as e:
+            if start:  # rows already written may be lost with it (see the class notes): not read back
+                raise self._fatal(e) from e
+            raise
         self._where[ids] = start // self._row + np.arange(len(ids))
         self._end = start + rows.nbytes
         if self._end - self._flushed >= DISK_FLUSH_BYTES and (self._flusher is None or not self._flusher.is_alive()):
@@ -857,20 +869,6 @@ class RowFile:
             raise self._fatal(e) from e
         self._flushed = self._end
         return self
-
-    def recover(self) -> np.ndarray:
-        """After a failed pwrite: the table written so far, as an array. Only after the whole file has been
-        written back without error (a write-back that the system started by itself and that failed is reported
-        here); otherwise TableFileError, as for a failed read."""
-        if self._flusher is not None:
-            self._flusher.join()
-        if self._error is not None:
-            raise self._fatal(self._error)
-        try:
-            (os.fdatasync if hasattr(os, "fdatasync") else os.fsync)(self._fd)
-            return self[:]
-        except OSError as e:
-            raise self._fatal(e) from e
 
     def prefetch(self) -> None:
         """Read the file back into the page cache in the background (sequential blocks, PREFETCH_THREADS readers)."""
@@ -941,9 +939,9 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
     target_weight: float32 group weights [M] multiplied into the target rows as they arrive (the same float32
     product as multiplying the finished table). targets_dir: when given and L_t has at least
     TARGETS_DISK_MIN_BYTES, L_t is a RowFile in that directory (written as the parts arrive, its pages dropped
-    from memory) instead of an array. If the file cannot be made, or a write to it fails, the table goes back to
-    memory; if writing it back to disk fails (or reading it back after a failed write), the run stops with
-    TableFileError.
+    from memory) instead of an array. If the file cannot be made, or the first write to it fails, the table is
+    kept in memory; any later error writing the file stops the run with TableFileError (the file is never read
+    back after an error).
     """
     G = grid_size
     cfg = {"grid_size": G, "n_groups": n_groups, "min_cov": min_cov, "chunk_size": chunk_size, "drop_groups": list(drop_groups),
@@ -992,11 +990,11 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
                             if disk is not None:
                                 try:
                                     disk.write_rows(t["ids"], L)
-                                except OSError as e:  # this block was not written: the earlier ones go to memory
-                                    res["L_t"] = disk.recover()
+                                except OSError as e:  # the first block: nothing written yet, the table goes to memory
                                     disk.close()
                                     disk = None
-                                    log(f"WARNING: contig tables moved back to memory: writing their file failed ({e})")
+                                    res["L_t"] = np.zeros((n_targets, n_groups, G), np.float32)
+                                    log(f"WARNING: contig tables kept in memory: writing their file failed ({e})")
                             if disk is None:
                                 res["L_t"][t["ids"]] = L
                             del L
