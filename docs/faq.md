@@ -169,9 +169,11 @@ sets of calibration pieces), so check these two log lines on every sample; `--ca
 
 Memory is that of the largest single process; the worker processes come on top (an early version needed up to 54 GB
 in total on the fecal sample with 8 workers). Most of the time on large samples is the first read of the pileup; a
-rerun from the cache is much faster. On large samples EpiRefine keeps two large tables in temporary files in the
-output directory while it runs (about 12 GB on the fecal sample above), so leave that much free space there. Do not put the output directory in memory (tmpfs, `/dev/shm`) for large
-samples: the files then take memory instead of disk.
+rerun from the cache is much faster. On large samples EpiRefine keeps two large tables in temporary files while it
+runs (about 12 GB on the fecal sample above), in the output directory or in the folder `--temp-dir` names, so leave
+that much free space there. Do not put that folder in memory (tmpfs, `/dev/shm`; the log warns): the files then take
+memory instead of disk. `--tables-in-memory` keeps the tables in memory instead, as before 0.12: no disk wait, about
+6 GB more memory on that sample, the same results.
 
 ### Can I rerun with other thresholds without reading the pileup again?
 

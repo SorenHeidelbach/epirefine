@@ -273,7 +273,7 @@ Two tables of the main process are large and read only in row batches late in th
 
 - **Contig tables** (`L_t`, contigs x groups x grid, float32; 5.9 GiB on ZymoFecal). Built in the unit tables and
   read only after the calibration (scores, then per-group summaries). From 256 MiB on they are a `sites.RowFile`:
-  an unlinked temporary file in the output directory.
+  an unlinked temporary file in the output directory (or `--temp-dir`).
   - *Writing.* Each part's rows are appended as they arrive (one sequential stream, group weights multiplied in;
     an index maps each contig to its place in the file). Writing each row at its own offset made the writes, and
     on a rotational or virtual disk the later reads, scattered. Every 256 MiB a background thread writes the new
@@ -297,14 +297,21 @@ Two tables of the main process are large and read only in row batches late in th
   sync took about 40 s on ZymoFecal (5.5 GB; 7.2-7.8 s per GB measured on the test server's disk), inside the
   robust-profile stage.
 
-**Space.** A run needs free space in the output directory for both files: about 12 GB on ZymoFecal-size samples.
-Both are removed when the run ends, also when it fails (on NFS an unlinked open file shows as `.nfsXXXX` while the
-run goes, and stays only if the node crashes). There is no option for another folder or to keep the tables in
-memory.
+**Where, and how to switch it off.** `--temp-dir DIR` puts both files in DIR (default: the output directory;
+created if missing; a folder in which no file can be made stops the run at the start with one line).
+`--tables-in-memory` takes the path of 0.11 instead: the contig tables stay in memory (about 5.9 GiB more in the
+main process on ZymoFecal, from the unit tables to the scores) and the chunk tables' file is memory-mapped as
+before, without write-back or page drop, so its pages stay in the page cache. The outputs are the same either way.
+Both are recorded in `params.json` (`temp_dir`, `tables_in_memory`) and replayed by `epirefine rerun`.
 
-**tmpfs.** On an output directory in memory (tmpfs, `/dev/shm`) the pages cannot be dropped: the files take as much
+**Space.** A run needs free space in the temporary folder for both files: about 12 GB on ZymoFecal-size samples.
+Both are removed when the run ends, also when it fails (on NFS an unlinked open file shows as `.nfsXXXX` while the
+run goes, and stays only if the node crashes).
+
+**tmpfs.** In a folder in memory (tmpfs, `/dev/shm`) the pages cannot be dropped: the files take as much
 memory as the tables did, and on the whole-table scoring paths above the contig tables are then held twice (about
-5.9 GiB more than in memory on ZymoFecal). Use an output directory on disk for large samples.
+5.9 GiB more than in memory on ZymoFecal). The log warns when the first table file is made on tmpfs or ramfs.
+For large samples give `--temp-dir` a folder on disk, or use `--tables-in-memory`.
 
 **Errors.** If the contig-table file cannot be made, or its first write fails (nothing is in it yet), the tables
 stay in memory (one warning). Any later error writing it, from `pwrite` or from a write-back (`fdatasync`, in the

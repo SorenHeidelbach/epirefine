@@ -15,7 +15,19 @@ effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the d
 - **Lock on the cache directory.** Two runs no longer write one cache at once: a run that rebuilds the cache holds
   an exclusive lock, runs that read it a shared one, so readers do not wait for each other.
 
+### Changed
+- **Large tables on disk.** On large samples the contig tables (5.9 GiB on ZymoFecal) are written to a temporary
+  file as they are built and read back in row batches, and the chunk tables' temporary file is written back to disk
+  in the background with its pages dropped, so neither sits in memory under the run's peaks. A run needs free space
+  for both files (about 12 GB on ZymoFecal), removed when it ends. A disk error while writing them stops the run with
+  one line. Outputs are byte-identical to the tables in memory (development: synthetic tests, monoculture training
+  suite, ZymoOral and look-alikes). Details: `docs/development/scalability.md`, section 7.
+
 ### Added
+- `--temp-dir DIR`: the folder of those temporary files (default: the output folder; created if missing; checked at
+  the start). The log warns when it is on tmpfs or ramfs, where the files take memory. `--tables-in-memory` keeps
+  the tables in memory as before 0.12 (about 6 GiB more memory on ZymoFecal, no disk wait, the same outputs). Both
+  are recorded in `params.json` and replayed by `epirefine rerun` (which takes its own `--temp-dir`).
 - `--calibration-seed` (default: the value of `--seed`): draws the calibration pieces and nothing else. The
   motif-grouping sample and the calibration pieces now have their own random generators; up to 0.11.1 one generator
   drew both, so another `--seed` also changed the motif grouping and, on an assembly larger than the grouping sample
