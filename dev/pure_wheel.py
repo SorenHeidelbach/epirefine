@@ -23,6 +23,10 @@ import zipfile
 from pathlib import Path
 
 DROP = re.compile(r"^epirefine/_kernels/_core[.].*$|^[^/]+\.dist-info/sboms/")
+# what must not remain in a py3-none-any wheel: compiled code by name (an extension, a shared library, the
+# auditwheel/delocate folders of grafted libraries) or by content (ELF, Mach-O, PE headers)
+BINARY_NAME = re.compile(r"\.(so|pyd|dylib|dll)$|\.so\.[0-9]|(^|/)[^/]*\.(libs|dylibs)/")
+BINARY_MAGIC = (b"\x7fELF", b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b"MZ")
 
 
 def _hash(data: bytes) -> str:
@@ -43,6 +47,12 @@ def pure_wheel(src: Path, out_dir: Path) -> Path:
         files = [(i, z.read(i)) for i in infos
                  if not DROP.match(i.filename) and i.filename not in (f"{dist_info}/RECORD", f"{dist_info}/WHEEL")]
         wheel = z.read(f"{dist_info}/WHEEL").decode()
+    tags = [ln for ln in wheel.splitlines() if ln.startswith("Tag:")]
+    if len(tags) != 1 or "-abi3-" not in tags[0]:
+        sys.exit(f"{src.name}: expected one abi3 Tag in WHEEL, found {tags}")
+    binaries = [i.filename for i, data in files if BINARY_NAME.search(i.filename) or data.startswith(BINARY_MAGIC)]
+    if binaries:
+        sys.exit(f"{src.name}: compiled files besides the extension would go into the pure wheel: {binaries}")
     keep = [ln for ln in wheel.splitlines() if ln and not ln.startswith(("Root-Is-Purelib:", "Tag:", "Generator:"))]
     wheel = "\n".join(["Wheel-Version: 1.0" if ln.startswith("Wheel-Version:") else ln for ln in keep]
                       + ["Generator: epirefine dev/pure_wheel.py", "Root-Is-Purelib: true", "Tag: py3-none-any"]) + "\n"
