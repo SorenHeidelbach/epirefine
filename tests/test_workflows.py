@@ -53,3 +53,22 @@ def test_pure_wheel_runs_with_the_lowest_pins_on_python_310():
     assert '{ python: "3.10", lowest: true }' in r
     for text in (t, r):
         assert "--resolution lowest-direct" in text and "tomllib.load" in text
+
+
+def test_build_tools_are_pinned_and_the_lock_file_is_used():
+    """maturin and the Rust toolchain are fixed versions, the same in both workflows; every build uses Cargo.lock as
+    it is (--locked); release.yml checks the bundled licences against Cargo.lock before any upload (B6 review P4)."""
+    pins = []
+    for name in ("release.yml", "tests.yml"):
+        text = (WF / name).read_text()
+        m, r = re.search(r'MATURIN_VERSION: "([0-9.]+)"', text), re.search(r'RUST_TOOLCHAIN: "([0-9.]+)"', text)
+        assert m and r, name
+        pins.append((m.group(1), r.group(1)))
+        assert "dtolnay/rust-toolchain@stable" not in text and "maturin>=" not in text
+        for line in re.findall(r"maturin build[^\n]*|args: --release[^\n]*", text):
+            assert "--locked" in line, line
+        assert len(re.findall(r"^\s+toolchain: \$\{\{ env.RUST_TOOLCHAIN \}\}$", text, re.M)) == text.count("dtolnay/rust-toolchain@")
+    assert pins[0] == pins[1]
+    j = jobs("release.yml")
+    assert "maturin-version: ${{ env.MATURIN_VERSION }}" in j["wheels"] and "rust-toolchain: ${{ env.RUST_TOOLCHAIN }}" in j["wheels"]
+    assert "bundle_licenses.py --check" in j["licences"] and "cargo fetch --locked" in j["licences"]

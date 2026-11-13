@@ -28,6 +28,9 @@ concurrency:
 
 env:
   EPIREFINE_RS_COMMIT: ${{ github.sha }}
+  # the build tools of every published file, fixed (B6 review P4): change them in tests.yml too, in one commit
+  MATURIN_VERSION: "1.16.0"
+  RUST_TOOLCHAIN: "1.99.1"
 
 jobs:
   version:
@@ -66,7 +69,9 @@ jobs:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos }}
         with:
           command: build
-          args: --release --out dist
+          args: --release --locked --out dist
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux || 'auto' }}
           docker-options: -e EPIREFINE_RS_COMMIT
@@ -93,7 +98,7 @@ jobs:
           path: compiled
       - name: Derive the pure wheel; build the sdist
         run: |
-          python -m pip install "maturin>=1.16,<2" twine
+          python -m pip install "maturin==$MATURIN_VERSION" twine
           mkdir -p dist
           python dev/pure_wheel.py compiled/*manylinux*x86_64*.whl --out dist
           maturin sdist --out dist
@@ -102,6 +107,22 @@ jobs:
         with:
           name: pure-and-sdist
           path: dist/*
+
+  licences:
+    name: Third-party licences match Cargo.lock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: Cargo.lock agrees with Cargo.toml; the bundled licence file is that of Cargo.lock
+        run: |
+          (cd rust && cargo fetch --locked)
+          python dev/bundle_licenses.py --check
 
   test-wheels:
     name: Test ${{ matrix.wheel }} on Python ${{ matrix.python }}${{ matrix.lowest && ' (lowest pins)' || '' }}
@@ -228,7 +249,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: actions/download-artifact@v4
         with:
           name: pure-and-sdist
@@ -265,7 +288,7 @@ jobs:
   testpypi:
     name: Publish to TestPyPI
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [version, pure-and-sdist, test-wheels, test-musl, test-pure, test-sdist]
+    needs: [version, licences, pure-and-sdist, test-wheels, test-musl, test-pure, test-sdist]
     runs-on: ubuntu-latest
     environment:
       name: testpypi

@@ -12,6 +12,11 @@ on:
     tags: ["v*"]
   pull_request:
 
+env:
+  # the build tools, the same as release.yml's (B6 review P4)
+  MATURIN_VERSION: "1.16.0"
+  RUST_TOOLCHAIN: "1.99.1"
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -25,7 +30,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
@@ -37,8 +44,8 @@ jobs:
         env:
           EPIREFINE_RS_COMMIT: ${{ github.sha }}
         run: |
-          python -m pip install "maturin>=1.16,<2"
-          maturin build --release --out dist
+          python -m pip install "maturin==$MATURIN_VERSION"
+          maturin build --release --locked --out dist
           python dev/pure_wheel.py dist/*-abi3-*.whl
           ls -l dist
       - uses: actions/upload-artifact@v4
