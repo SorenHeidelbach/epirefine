@@ -22,7 +22,7 @@ from . import io as pio
 from . import runinfo
 from .calibrate import (DEFAULT_LENGTHS, DEFAULT_SIGMAS, DEFAULT_TAUS, ContigScores, CoreOptions, SitesLaw,
                         calibrate, calibrate_decisions, contig_chunks, fragment_chunks,
-                        calibration_guard, fragments_per_bin, select_fragments)
+                        calibration_guard, calibration_guard_law, fragments_per_bin, select_fragments)
 from .detection import detection_table, fit_detection_by_bin
 from .grid import Grid
 from .assignability import contig_evidence
@@ -579,10 +579,13 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
             fit = dict(fit, temperature=float(temperature), curve=None)
         temperature = cal["temperature"] if temperature is None else temperature
         # the guard for calibrations without a usable temperature (calibrate.calibration_guard): on the default
-        # path only (the deprecated switch reproduces 0.11.1), and not when the user fixed the temperature
+        # path only (the deprecated switch reproduces 0.11.1), and not when the user fixed the temperature. With
+        # --temperature-law sites the decisions use the law's temperature, not the grid's: that guard is checked on
+        # the law after it is fitted (calibration_guard_law, below)
         params["calibration_guard"] = None
         threshold_given = contamination_threshold   # the false-flag report below stays at the threshold as given
-        if relatives != "switch" and user_temperature is None:
+        guarded = relatives != "switch" and user_temperature is None
+        if guarded and temperature_law == "grid":
             guard = params["calibration_guard"] = calibration_guard(
                 temperature, ffit.temps, int(ffit.kept.sum()), int((ffit.distinct & ffit.kept).sum()))
             if guard["fired"]:
@@ -778,6 +781,21 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                                        or core_fit.get("curve") is not None):
         raise ValueError("the calibration core path expects the unknown model the contigs were scored with")
     res = calibrate_decisions(ffit, contigs, rules, core, fit=core_fit, log=_log)
+    if do_calibrate and guarded and res.law is not None:
+        # the guard on the temperature the decisions use (--temperature-law sites); fallback as above: the same
+        # decisions again (the law is deterministic) with every threshold beyond 1
+        guard = params["calibration_guard"] = calibration_guard_law(
+            res.law, int(ffit.kept.sum()), int((ffit.distinct & ffit.kept).sum()))
+        if guard["fired"]:
+            _log(f"WARNING: calibration guard: the temperature law is at its cap ({guard['cap']:g} at 1000 sites; "
+                 f"{guard['pieces']} calibration pieces, {guard['test_b_pieces']} in test B): the calibration "
+                 f"gives no usable temperature, so no contig is flagged, included or moved in this run "
+                 f"(posteriors are written for inspection only); --temperature overrides this with an "
+                 f"uncalibrated temperature")
+            inf = float("inf")
+            res = calibrate_decisions(ffit, contigs, dict(rules, contamination_threshold=inf, include_threshold=inf,
+                                                          include_threshold_unmethylated=inf),
+                                      core, fit=core_fit, log=lambda *a, **k: None)
     ref = res.refinement
     if not core.decisions_default:
         temperature = res.T_contig

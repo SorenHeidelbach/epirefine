@@ -4,6 +4,8 @@ makes no call (no flag, inclusion or move). It never fires on a normal calibrati
 by the user, and never on the deprecated `--relatives switch` path (which reproduces 0.11.1)."""
 import json
 
+import pytest
+
 import polars as pl
 
 from epirefine.calibrate import DEFAULT_TEMPS, calibration_guard
@@ -124,3 +126,39 @@ def test_guard_lists_no_inclusion_candidate_even_at_high_probability(community, 
                       & (pl.col("status") == "unbinned")).height > 0
     got = pl.read_csv(run.out / "include_contigs.tsv", separator="\t")
     assert got.columns == want.columns and got.height == 0
+
+
+def test_law_guard_fires_only_at_the_law_cap():
+    import numpy as np
+
+    from epirefine.calibrate import LAW_T_MAX, SitesLaw, calibration_guard_law
+    g = calibration_guard_law(SitesLaw(float(np.log(LAW_T_MAX)), 0.3), 4, 2)
+    assert g["fired"] and g["fallback"] == "no calls" and g["cap"] == LAW_T_MAX == 100.0
+    assert g["temperature"] == pytest.approx(100.0) and g["pieces"] == 4 and g["test_b_pieces"] == 2
+    for T in (1.082, 20.0, 90.0):   # 20 is the grid's cap, not the law's
+        g = calibration_guard_law(SitesLaw(float(np.log(T)), 0.3), 4, 2)
+        assert not g["fired"] and g["reason"] is None and g["temperature"] == pytest.approx(T)
+
+
+def test_with_a_sites_law_the_guard_reads_the_law(community, base_run, tmp_path, monkeypatch):
+    """Review F6: with --temperature-law sites the decisions use the law's temperature, so the guard is checked on
+    the law, not on the grid temperature. A grid fit at its cap with a usable law makes calls; a law at its own cap
+    makes none, whatever the grid temperature."""
+    import numpy as np
+
+    import epirefine.calibrate as C
+    _at_cap(monkeypatch)
+    out = copy_cache(base_run, tmp_path / "law_ok")
+    run = run_pipeline(**community.args(out), cache_dir=str(out / "cache"), temperature_law="sites")
+    g = _params(run)["calibration_guard"]
+    assert g["fired"] is False and g["cap"] == 100.0 and "calibration guard" not in run.log
+    assert _calls(run) > 0
+    monkeypatch.undo()
+    monkeypatch.setattr(C, "fit_sites_law", lambda *a, **k: C.SitesLaw(float(np.log(C.LAW_T_MAX)), 0.0))
+    out = copy_cache(base_run, tmp_path / "law_cap")
+    run = run_pipeline(**community.args(out), cache_dir=str(out / "cache"), temperature_law="sites")
+    par = _params(run)
+    assert par["calibration_guard"]["fired"] is True and par["temperature"] == pytest.approx(100.0)
+    assert run.log.count("WARNING: calibration guard:") == 1
+    assert _calls(run) == 0
+    assert pl.read_csv(run.out / "include_contigs.tsv", separator="\t").height == 0

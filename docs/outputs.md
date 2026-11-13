@@ -161,6 +161,8 @@ outputs can read EpiRefine's.
   - `calibration_guard` (since 0.12): `fired` (true when the calibrated temperature is at the cap of the grid; the
     run then makes no call), `reason`, `temperature`, `cap` (20), `pieces` (calibration pieces used),
     `test_b_pieces` (pieces in test B) and `fallback` (`"no calls"` when fired); `null` without calibration, with
-    `--temperature` or with the deprecated `--relatives switch`. See the FAQ, "Known limitations".
+    `--temperature` or with the deprecated `--relatives switch`. With `--temperature-law sites` the guard reads the law, whose
+    temperature the decisions use: `fired` when the law's temperature at 1,000 sites is at the upper bound of its
+    search, `temperature` is that value and `cap` 100. See the FAQ, "Known limitations".
   - The file is strict JSON: an infinite value is written as the string `"inf"` (a `tau` of `"inf"` means no
     variation between a contig and its bin), a missing one as `null`.

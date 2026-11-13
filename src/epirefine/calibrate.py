@@ -71,6 +71,19 @@ def _relatives_statistic(gain: float, se: float, relatives_row: dict, community_
             "switch_choice": "relatives" if best_is_relatives and gain > 2 * se else "community only"}
 
 
+def calibration_guard_law(law, n_pieces: int, n_test_b: int) -> dict:
+    """The guard of calibration_guard for --temperature-law sites, whose decisions do not use the grid temperature:
+    it fires when the law's temperature at the reference site count (exp(a), T at 1,000 sites) is at the upper
+    bound of the law's own search (LAW_T_MAX, 100): no tempering the search allows predicted the pieces better.
+    The record has the keys of calibration_guard; temperature is the law's T at 1,000 sites."""
+    cap = float(LAW_T_MAX)
+    T = float(np.exp(law.a))
+    fired = law.a >= np.log(cap) - 1e-3
+    return {"fired": bool(fired), "reason": f"temperature law at its cap ({cap:g} at {N_REF_SITES:g} sites)" if fired
+            else None, "temperature": T, "cap": cap, "pieces": int(n_pieces), "test_b_pieces": int(n_test_b),
+            "fallback": "no calls" if fired else None}
+
+
 def calibration_guard(temperature, temps, n_pieces: int, n_test_b: int) -> dict:
     """The guard for calibrations that carry no usable temperature (0.12; dev log proposal 2026-11-13 calib_guard).
 
@@ -772,6 +785,7 @@ def _expand(values, idx, n):
 
 T_MIN = 1.082          # smallest temperature used: the grid's smallest value >= 1 (never sharpen, D7)
 N_REF_SITES = 1000.0   # reference site count of the temperature law (log T = a + b log(n / N_REF_SITES))
+LAW_T_MAX = 100.0      # upper bound of the temperature law's search at the reference site count (exp(a))
 
 
 @dataclass(frozen=True)
@@ -855,7 +869,7 @@ def fit_sites_law(ff: FragmentFit, eta, lam, priors, t_start: float, log=print) 
             la, lb = la + wa * pa, lb + wb * pb
         return float(np.mean(la) + (np.mean(lb) if np.size(lb) else 0.0))
 
-    lo, hi = np.log(T_MIN) - 3.0, np.log(100.0)
+    lo, hi = np.log(T_MIN) - 3.0, np.log(LAW_T_MAX)
     best = None
     for b in np.linspace(0.0, 1.0, 11):
         r = minimize_scalar(lambda a: obj(a, b), bounds=(lo, hi), method="bounded", options={"xatol": 1e-4})

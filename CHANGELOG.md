@@ -80,7 +80,9 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
   says nothing about how far the scores can be trusted. Such a run now makes no call (no flag, inclusion or move;
   the posteriors are still written, for inspection only; `include_contigs.tsv` lists no candidate), writes one log line `WARNING: calibration guard: ...`
   and records `params.json` `calibration_guard` (`fired`, `reason`, `temperature`, `cap`, the numbers of
-  calibration pieces and of test-B pieces, `fallback`). `--temperature` bypasses it. It is checked on the default
+  calibration pieces and of test-B pieces, `fallback`). `--temperature` bypasses it. With the experimental
+  `--temperature-law sites` it checks the law instead (its temperature at 1,000 sites at the law's cap, 100), since
+  the decisions then use the law's temperature, not the grid's. It is checked on the default
   path only (not with the deprecated `--relatives switch`). Measured (development data): it fires on none of the
   normal development runs (temperature at most 5.9 on the monoculture training set, ZymoOral, the simulated
   look-alikes, ZymoFecal and its 600 bin resamples, fecal_inhouse) and on 3 of the 653 stress-set-2 runs that
