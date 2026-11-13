@@ -236,7 +236,7 @@ def provenance(args: dict) -> dict:
     inputs = {"assembly": args["assembly"], "pileup": args["pileup"], "contig_bin": args["contig_bin"],
               "motifs": args["motifs_path"]}
     given = {"p_unknown": "p_unknown_given", "tau": "tau_given", "temperature": "temperature_given"}
-    skip = {"assembly", "pileup", "contig_bin", "motifs_path", "out", "workers", "cache_dir"}
+    skip = {"assembly", "pileup", "contig_bin", "motifs_path", "out", "workers", "cache_dir", "temp_dir"}
     prov = {
         "version": package_version(),
         "command_line": list(sys.argv),
@@ -245,6 +245,8 @@ def provenance(args: dict) -> dict:
         "inputs": {k: _input(v) for k, v in inputs.items()},
         "out": str(Path(args["out"]).resolve()),
         "cache_dir": str(Path(args["cache_dir"]).resolve()) if args["cache_dir"] else None,
+        # folder of the temporary table files (null: the output folder); tables_in_memory is among the options
+        "temp_dir": str(Path(args["temp_dir"]).resolve()) if args.get("temp_dir") else None,
         "workers": n_workers(args["workers"]),
         "python": sys.version.split()[0],
     }
@@ -351,11 +353,12 @@ _GIVEN = {"p_unknown": "p_unknown_given", "tau": "tau_given", "temperature": "te
 _INPUT_KEYS = {"assembly": "assembly", "pileup": "pileup", "contig_bin": "contig_bin", "motifs_path": "motifs"}
 
 
-def rerun_arguments(params: dict, out, workers=None, cache_dir=None, log=log) -> dict:
+def rerun_arguments(params: dict, out, workers=None, cache_dir=None, log=log, temp_dir=None) -> dict:
     """Keyword arguments of pipeline.run that repeat the run params.json describes (inputs from their recorded
     paths, every option as it was given), with a new output folder. Says in the log what differs from the
-    recorded run: the inputs' size or time, the version, the commit. The worker count and the cache do not change
-    decisions; they are taken from the arguments (default: as recorded)."""
+    recorded run: the inputs' size or time, the version, the commit. The worker count, the cache and the folder of
+    the temporary tables do not change decisions; they are taken from the arguments (default: as recorded; a run
+    that kept its temporary tables in its output folder keeps them in the new one)."""
     import inspect
     from .pipeline import run
     names = [n for n in inspect.signature(run).parameters]
@@ -378,6 +381,8 @@ def rerun_arguments(params: dict, out, workers=None, cache_dir=None, log=log) ->
             # the recorded run's cache (its default was <out>/cache): a rerun reads the pileup again only if that is gone
             kw[name] = cache_dir if cache_dir is not None else (params.get("cache_dir")
                                                                 or str(Path(params["out"]) / "cache"))
+        elif name == "temp_dir":
+            kw[name] = temp_dir if temp_dir is not None else params.get("temp_dir")
         elif _GIVEN.get(name, name) in params:
             v = params[_GIVEN.get(name, name)]
             kw[name] = tuple(v) if isinstance(v, list) else v

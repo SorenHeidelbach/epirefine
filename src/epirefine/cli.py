@@ -153,6 +153,14 @@ def build_parser() -> argparse.ArgumentParser:
     g = r.add_argument_group("speed and extra output")
     g.add_argument("--workers", type=int, help="processes for the pileup and table passes (default: CPUs, max 16)")
     g.add_argument("--cache-dir", help="site cache (default: <out>/cache); reused when inputs are unchanged")
+    g.add_argument("--temp-dir",
+                   help="folder for the temporary files of the two large tables, on large samples (default: the "
+                        "output folder; created if missing; about 12 GB on a 35,000-contig fecal sample, removed "
+                        "when the run ends). Use a folder on disk, not in memory (tmpfs, /dev/shm)")
+    g.add_argument("--tables-in-memory", action="store_true",
+                   help="keep the contig tables in memory and the chunk tables' file in the page cache, as before "
+                        "0.12, instead of writing them back to disk: no disk wait, but about 6 GB more memory on a "
+                        "35,000-contig fecal sample; results are the same")
     g.add_argument("--motif-fit", action="store_true",
                    help="also write motif_fit.tsv: each contig's methylated fraction per motif group next to its bin's")
 
@@ -213,6 +221,8 @@ def build_parser() -> argparse.ArgumentParser:
     rr.add_argument("--out", required=True, help="output folder of the rerun")
     rr.add_argument("--workers", type=int, help="processes (default: as recorded; decisions do not depend on it)")
     rr.add_argument("--cache-dir", help="site cache (default: the recorded run's cache)")
+    rr.add_argument("--temp-dir", help="folder of the temporary table files (default: as recorded; the new output "
+                                       "folder if the run used its own)")
 
     c = sub.add_parser("cache", help="site cache: check whether a run would reuse it, or upgrade an old one",
                        formatter_class=_Help)
@@ -278,7 +288,8 @@ def main(argv=None):
                     params = json.loads(Path(a.params).read_text())
                 except (OSError, ValueError) as e:
                     raise InputError(f"cannot read {a.params}: {e}") from None
-                pipeline.run(**rerun_arguments(params, a.out, workers=a.workers, cache_dir=a.cache_dir))
+                pipeline.run(**rerun_arguments(params, a.out, workers=a.workers, cache_dir=a.cache_dir,
+                                               temp_dir=a.temp_dir))
                 return
             pipeline.run(
                 a.assembly, a.pileup, a.contig_bin, a.motifs, a.out, min_cov=a.min_cov, chunk_size=a.chunk_size,
@@ -299,7 +310,8 @@ def main(argv=None):
                 gate_leave_out=a.gate_leave_out, gate_unweighted=a.gate_unweighted, eps_gated=a.eps_gated,
                 redundancy_order=a.redundancy_order, unlisted_genome=a.unlisted_genome,
                 inclusion_support=a.inclusion_support, tau_support=a.tau_support, unknown_prior=a.unknown_prior,
-                unknown_prior_strength=a.unknown_prior_strength)
+                unknown_prior_strength=a.unknown_prior_strength, temp_dir=a.temp_dir,
+                tables_in_memory=a.tables_in_memory)
         except InputError as e:
             # a problem with the inputs or options: the message says what; no traceback needed
             log(f"ERROR: {e}")

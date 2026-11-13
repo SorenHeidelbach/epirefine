@@ -91,7 +91,8 @@ def copy_cache(src: Run, out) -> Path:
 RUN_SPECIFIC_PARAMS = ("command_line", "start_time", "inputs", "out", "cache_dir", "workers", "python", "elapsed_s",
                        "peak_rss_gb", "peak_rss_worker_gb",
                        "threads", "kernels",  # what ran where (0.12): differ with --workers and EPIREFINE_RS by design
-                       "write_motif_fit")  # an extra output file, asked for by the command-line test run only
+                       "write_motif_fit",  # an extra output file, asked for by the command-line test run only
+                       "temp_dir", "tables_in_memory")  # where the large tables were kept (0.12): no result changes
 
 
 def _comparable_lines(path: Path) -> list[str]:

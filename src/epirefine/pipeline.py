@@ -286,11 +286,12 @@ class _SpillWriteback:
         return self.error
 
 
-def _spill(a: np.ndarray, directory, writebacks: list | None = None) -> np.ndarray:
+def _spill(a: np.ndarray, directory, writebacks: list | None = None, keep_pages: bool = False) -> np.ndarray:
     """a as a read-only memory map of an unlinked temporary file in `directory` (the same values; its memory is freed
     when the caller drops its last reference to the array), or a itself when it is small or the file cannot be written.
     The file is written back and its pages dropped: here, or with `writebacks` given in the background (the
-    _SpillWriteback is appended to it; call its check() before reading the map)."""
+    _SpillWriteback is appended to it; call its check() before reading the map). keep_pages (--tables-in-memory):
+    neither, the file's pages stay in the page cache as before 0.12."""
     if a.nbytes < SPILL_MIN_BYTES:
         return a
     import tempfile
@@ -298,14 +299,54 @@ def _spill(a: np.ndarray, directory, writebacks: list | None = None) -> np.ndarr
         fh = tempfile.TemporaryFile(dir=directory)
         a.tofile(fh)
         fh.flush()
-        if writebacks is None:
+        if writebacks is None and not keep_pages:
             drop_pages(fh.fileno())  # written out and dropped: the page cache is charged to the run's memory too
         m = np.memmap(fh, dtype=a.dtype, mode="r", shape=a.shape)
     except OSError:
         return a
-    if writebacks is not None:
+    if writebacks is not None and not keep_pages:
         writebacks.append(_SpillWriteback(fh, directory, a.nbytes))
     return m
+
+
+_MEMORY_FILE_SYSTEMS = ("tmpfs", "ramfs")
+
+
+def memory_file_system(path) -> str | None:
+    """The type of the file system that holds `path` when it keeps its files in memory (tmpfs, ramfs; /dev/shm and
+    often an HPC job's $TMPDIR), else None (also where /proc/self/mounts cannot be read). There the pages of the
+    temporary tables cannot be dropped: they take memory instead of disk."""
+    try:
+        target = os.path.realpath(path)
+        best, kind = "", None
+        with open("/proc/self/mounts") as f:
+            for line in f:
+                fields = line.split()
+                if len(fields) < 3:
+                    continue
+                mnt = fields[1].replace("\\040", " ")
+                if (target == mnt or target.startswith(mnt.rstrip("/") + "/")) and len(mnt) >= len(best):
+                    best, kind = mnt, fields[2]
+    except OSError:
+        return None
+    return kind if kind in _MEMORY_FILE_SYSTEMS else None
+
+
+def temp_dir_for(temp_dir, out: Path) -> Path:
+    """The folder of the temporary table files: --temp-dir (created if missing) or the output folder. A folder in
+    which no file can be made stops the run here, with one line, instead of after the hours of the pileup pass."""
+    from .io import InputError
+    if temp_dir is None:
+        return out
+    tmp = Path(temp_dir)
+    import tempfile
+    try:
+        tmp.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryFile(dir=tmp):
+            pass
+    except OSError as e:
+        raise InputError(f"--temp-dir {tmp}: cannot write a file there ({e.strerror or e})") from None
+    return tmp
 
 
 
@@ -344,13 +385,17 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         regional_tempered=False, gate_leave_out="none", gate_unweighted=False, eps_gated=False,
         redundancy_order="independent", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all",
         unknown_prior="bins", unknown_prior_strength=5.0,
-        calibration="default", siteless_bin_guard=False, calibration_seed=None):
+        calibration="default", siteless_bin_guard=False, calibration_seed=None, temp_dir=None, tables_in_memory=False):
     """calibration: 'default' (the calibration of 0.10 with the parsimony test of the unknown model resampled over
     bins, since 0.11.1), 'legacy' (the calibration of 0.10 and 0.11.0), 'consistent', 'coherent', or a comma-separated
     list of calibrate.FEATURES; see calibrate.parse_features.
 
     seed: the motif-grouping sample (and the calibration pieces unless calibration_seed is given);
-    calibration_seed: the calibration pieces only (default: seed). Each random step has its own generator."""
+    calibration_seed: the calibration pieces only (default: seed). Each random step has its own generator.
+
+    temp_dir: folder of the temporary files of the large tables (default: out); tables_in_memory: keep the contig
+    tables in memory and the chunk tables' file in the page cache, as before 0.12 (about 6 GiB more memory on a
+    ZymoFecal-size sample). Neither changes a result."""
     args = dict(locals())  # first statement: the options as given
     runinfo.begin(args, _log)  # first log lines (version, command, inputs) and option ranges, before any work
     # the inputs are checked before anything is read or written: a missing file or a wrong table must not
@@ -366,6 +411,16 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     out = Path(out)
     (out / "calibration").mkdir(parents=True, exist_ok=True)
     runinfo.write_params(out / "params.json", provenance)  # a run that does not finish leaves its settings
+    tmp = temp_dir_for(temp_dir, out)
+    tmp_fs = None if tables_in_memory else memory_file_system(tmp)
+
+    def tables_on_tmpfs():  # once, when the first table goes to a file there
+        nonlocal tmp_fs
+        if tmp_fs:
+            _log(f"WARNING: the temporary table files in {tmp} are on {tmp_fs}, a file system in memory: they take "
+                 f"memory instead of disk there (on large samples up to twice the tables' size). Give --temp-dir a "
+                 f"folder on disk, or use --tables-in-memory")
+            tmp_fs = None
     if calibration_seed is None:
         calibration_seed = seed
     group_rng = np.random.default_rng(seed)
@@ -542,14 +597,18 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # pass 2: site cache -> likelihood tables
     tabs = unit_tables(parts, n_groups=n_groups, det=det, grid_size=grid_size, min_cov=min_cov, drop_groups=drop,
                        chunk_offset=chunk_offset, chunk_size=chunk_size, n_chunks=n_chunks_all, target_of=target_of,
-                       n_targets=len(targets), frags=frags, workers=workers, log=_log, targets_dir=out,
-                       target_weight=group_w.astype(np.float32) if group_weights and (group_w < 1).any() else None)
+                       n_targets=len(targets), frags=frags, workers=workers, log=_log,
+                       targets_dir=None if tables_in_memory else tmp,
+                       target_weight=(group_w.astype(np.float32) if group_weights and (group_w < 1).any()
+                                      and not tables_in_memory else None))
     if isinstance(tabs["L_t"], RowFile):  # closed (removed) also if the run fails from here on
         _OPEN_TABLES.append(tabs["L_t"])
-    # (the contig tables L_t got their weights row by row as the parts arrived, in unit_tables)
+        tables_on_tmpfs()
+    # (on disk the contig tables L_t got their weights row by row as the parts arrived, in unit_tables; with
+    # --tables-in-memory they are weighted here, as before 0.12)
     if group_weights and (group_w < 1).any():
         wf = group_w.astype(np.float32)[None, :, None]
-        for key in ("L_chunks", "L_frag"):
+        for key in ("L_chunks", "L_frag") + (("L_t",) if tables_in_memory else ()):
             tabs[key] *= wf
         tabs["H_frag"] = (tabs["H_frag"][0] * wf, tabs["H_frag"][1] * wf)
     L_all = tabs.pop("L_chunks")
@@ -624,7 +683,11 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     # from here on the chunk tables are read only for the few mixed contigs of the regional step: kept in a temporary
     # file (memory-mapped, removed when the run ends) instead of memory, next to the model's own marginal copy
     spill_sync: list = []  # its write-back runs in the background (checked before the map is read)
-    L_chunks = _spill(L_chunks, out, spill_sync)
+    spilled = _spill(L_chunks, tmp, spill_sync, keep_pages=tables_in_memory)
+    if spilled is not L_chunks:
+        tables_on_tmpfs()
+    L_chunks = spilled
+    del spilled
     p_foreign = 1 - model.w
     _write(pl.DataFrame({"contig": [asm.names[i] for i in chunk_contig], "start": chunk_no * chunk_size,
                          "bin": [bins[b] for b in chunk_bin], "p_foreign": p_foreign}),
