@@ -293,6 +293,22 @@ def _bin_prior_scope(f):
     return wrapped
 
 
+def _kernels_scope(f):
+    """Runs f and ends the run's kernels decision afterwards (epirefine._rs.end_run), also when the run fails, so
+    that a later run or call in this process decides afresh."""
+    import functools
+
+    @functools.wraps(f)
+    def wrapped(*args, **kwargs):
+        from . import _rs
+        try:
+            return f(*args, **kwargs)
+        finally:
+            _rs.end_run()
+    return wrapped
+
+
+@_kernels_scope
 @_bin_prior_scope
 @_releases_cache_locks
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,

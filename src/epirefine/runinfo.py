@@ -112,7 +112,8 @@ def begin(args: dict, log=log) -> None:
     log("inputs: " + ", ".join(f"{k.removesuffix('_path')}={args[k]}" for k in INPUT_NAMES) + f"; out={args['out']}; "
         f"workers={n_workers(args['workers'])}; seed={args['seed']}"
         + (f"; calibration seed={args['calibration_seed']}" if args.get("calibration_seed") is not None else ""))
-    from . import _rs  # which code runs: the compiled kernels, or numpy and why (one warning when not asked for)
+    from . import _rs  # which code runs: the compiled kernels, or numpy and why (one warning when not asked for);
+    _rs.start_run()    # decided here, once for the whole run and its worker processes
     log(_rs.summary())
     if (warn := _rs.notice()) is not None:
         log(warn)
@@ -333,10 +334,11 @@ def tool_commit(root=None) -> dict:
 
 
 def kernels() -> dict:
-    """Whether the compiled kernels (epirefine._kernels, built into the platform wheels) are available and used, and
-    if not, why; and which build: the commit it was built from, the CPU path of the model kernels (avx2_fma or
-    generic), the API level, the features and the SHA-256 of the compiled module (identifies the build exactly).
-    `used` follows EPIREFINE_RS and the kernels' interface, as the model code does (epirefine._rs)."""
+    """Whether the compiled kernels (epirefine._kernels, built into the platform wheels) are available and chosen for
+    this run (`used`; decided once at its start, epirefine._rs.start_run), and if not, why; and which build: the
+    commit it was built from, the CPU path of the model kernels (avx2_fma or generic), the API level, the features
+    and the SHA-256 of the loaded compiled module (identifies the build exactly). Which code each kernel's calls
+    actually took is not recorded yet."""
     from . import _rs
     rs, _ = _rs.load()
     used = _rs.kernels() is not None
@@ -350,9 +352,7 @@ def kernels() -> dict:
         rec["features"] = sorted(rs.features())
     except Exception:
         rec["cpu_path"], rec["features"] = None, None
-    so = sorted(Path(rs.__file__).parent.glob("_core*"))
-    if so:
-        rec["module_sha256"] = hashlib.sha256(so[0].read_bytes()).hexdigest()
+    rec["module_sha256"] = _rs.module_sha256(rs)
     return rec
 
 

@@ -84,6 +84,7 @@ def test_old_interface_is_refused(monkeypatch):
         pytest.skip("no compiled kernels in this install")
     monkeypatch.delenv("EPIREFINE_RS", raising=False)
     monkeypatch.setattr(R, "REQUIRED_API", rs.API + 1)
+    R.reset()
     assert R.kernels() is None and R.reason().startswith(f"the compiled extension has interface {rs.API}")
 
 
@@ -103,8 +104,10 @@ def test_stale_build_is_refused(monkeypatch):
         pytest.skip("no compiled kernels in this install")
     monkeypatch.delenv("EPIREFINE_RS", raising=False)
     monkeypatch.setattr(rs._core, "API", R.REQUIRED_API - 1)
+    R.reset()  # the import is kept once per process: look again
     assert R.kernels() is None and R.reason().startswith(f"the compiled extension has interface {R.REQUIRED_API - 1}")
     monkeypatch.delattr(rs._core, "API")
+    R.reset()
     assert R.kernels() is None and R.reason().startswith("the compiled extension has interface 0")
 
 
@@ -116,6 +119,7 @@ def test_build_without_cpu_path_does_not_load(monkeypatch):
         pytest.skip("no compiled kernels in this install")
     monkeypatch.delenv("EPIREFINE_RS", raising=False)
     monkeypatch.delattr(rs._core, "cpu_path")
+    R.reset()
     why = R.reason()
     assert R.kernels() is None and why.startswith("the compiled extension does not load: AttributeError")
     assert R.summary() == f"kernels: numpy ({why})"

@@ -7,6 +7,16 @@ from small_community import write_community
 from helpers import Run, logged, run_pipeline
 
 
+@pytest.fixture(autouse=True)
+def _kernels_state():
+    """Each test starts with a fresh kernels state (epirefine._rs keeps the import once per process, and a run's
+    decision until the run ends), so that tests which hide or patch the build see their own."""
+    from epirefine import _rs
+    _rs.reset()
+    yield
+    _rs.reset()
+
+
 @pytest.fixture(scope="session")
 def community(tmp_path_factory):
     """The default synthetic community (seed 1): input files plus the planted truth."""
