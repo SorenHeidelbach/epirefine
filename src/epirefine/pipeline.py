@@ -919,7 +919,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         _write(pl.DataFrame(ffit.deployed_reliability(dfit, p_unknown, ref.eps)), out / "calibration" / "reliability_deployed.tsv")
     write_outputs(out, targets, lengths, given, bins, ref, n_sites, sole_contig, P, diff, redundancy,
                   evidence=evidence, min_evidence=min_evidence, coverage=coverage, low_coverage=low_cov, too_short=short,
-                  regional=regional)
+                  regional=regional,
+                  withhold_candidates=bool((params.get("calibration_guard") or {}).get("fired")))
     _write(bin_ev, out / "bin_evidence.tsv")
     _log(f"refinement: p_unknown={p_unknown:.3f}, contamination rate={ref.eps:.3f}; "
          f"{int(ref.contaminant.sum())} of {int(testable.sum())} testable binned contigs flagged, "

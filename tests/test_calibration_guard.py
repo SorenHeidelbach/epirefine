@@ -95,3 +95,32 @@ def test_no_calibration_records_no_guard(community, base_run, tmp_path):
     out = copy_cache(base_run, tmp_path / "n")
     run = run_pipeline(**community.args(out), cache_dir=str(out / "cache"), do_calibrate=False)
     assert _params(run)["calibration_guard"] is None
+
+
+def test_guard_lists_no_inclusion_candidate_even_at_high_probability(community, base_run, tmp_path, monkeypatch):
+    """Review F1: when the guard fires, include_contigs.tsv (Nanomotif-compatible) keeps its columns and has no row,
+    also when candidates reach P >= 0.95 (a tool that applies the file by its confidence labels would otherwise
+    include them). The guard is made to fire at the run's own, sharp temperature by cutting the grid there."""
+    import dataclasses
+
+    import epirefine.pipeline as P
+    real = P.calibrate
+
+    def grid_ends_at_the_fit(*a, **k):
+        cal = real(*a, **k)
+        ff = cal["fragment_fit"]
+        cal["fragment_fit"] = dataclasses.replace(ff, temps=tuple(t for t in ff.temps if t <= cal["temperature"]))
+        return cal
+    want = pl.read_csv(base_run.out / "include_contigs.tsv", separator="\t")
+    assert (want["prob"] >= 0.95).sum() > 0          # the normal run lists high-probability candidates
+    monkeypatch.setattr(P, "calibrate", grid_ends_at_the_fit)
+    out = copy_cache(base_run, tmp_path / "f1")
+    run = run_pipeline(**community.args(out), cache_dir=str(out / "cache"))
+    assert _params(run)["calibration_guard"]["fired"] is True
+    assert _calls(run) == 0
+    dec = pl.read_csv(run.out / "contig_decisions.tsv", separator="\t")
+    # candidates at P >= 0.95 exist in this run (without the fix they were listed, some as high_confidence)
+    assert dec.filter((pl.col("best_alternative") != "unknown") & (pl.col("p_best_alternative") >= 0.95)
+                      & (pl.col("status") == "unbinned")).height > 0
+    got = pl.read_csv(run.out / "include_contigs.tsv", separator="\t")
+    assert got.columns == want.columns and got.height == 0

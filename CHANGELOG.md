@@ -75,7 +75,7 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
 - **Guard for calibrations without a usable temperature.** When the calibrated temperature ends at the cap of the
   grid (20), the calibration pieces were not predicted better by any temperature the grid allows, and the fit
   says nothing about how far the scores can be trusted. Such a run now makes no call (no flag, inclusion or move;
-  the posteriors are still written, for inspection only), writes one log line `WARNING: calibration guard: ...`
+  the posteriors are still written, for inspection only; `include_contigs.tsv` lists no candidate), writes one log line `WARNING: calibration guard: ...`
   and records `params.json` `calibration_guard` (`fired`, `reason`, `temperature`, `cap`, the numbers of
   calibration pieces and of test-B pieces, `fallback`). `--temperature` bypasses it. It is checked on the default
   path only (not with the deprecated `--relatives switch`). Measured (development data): it fires on none of the

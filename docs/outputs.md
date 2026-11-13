@@ -73,7 +73,8 @@ outputs can read EpiRefine's.
   `medium_confidence` ≥ 0.8, `low_confidence` ≥ 0.5; `dropped_redundant` for a candidate that reached the inclusion
   threshold but was not added because the bin already holds its sequence). This lists candidates, not decisions:
   inclusion is applied at 0.9 (0.95 for a bin without detected methylation), so some `medium_confidence` rows are
-  applied and the contigs actually added are those with status `included` or `moved` in `contig_decisions.tsv`.
+  applied and the contigs actually added are those with status `included` or `moved` in `contig_decisions.tsv`. When
+  the calibration guard fires (`params.json` `calibration_guard.fired`), the file has its header and no row.
 - **`decontaminated_contig_bin.tsv`**: `contig`, `bin`: the input bins minus the flagged contigs.
 
 ## Bins and motifs

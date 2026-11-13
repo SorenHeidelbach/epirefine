@@ -291,8 +291,10 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
                   n_sites: np.ndarray, sole: set, P: np.ndarray, methylome_difference: np.ndarray | None = None,
                   redundancy: np.ndarray | None = None, evidence: np.ndarray | None = None, min_evidence: float = 3.0,
                   coverage: np.ndarray | None = None, low_coverage: np.ndarray | None = None,
-                  too_short: np.ndarray | None = None, regional: dict | None = None):
-    """Nanomotif-compatible files + epirefine's per-contig decision table."""
+                  too_short: np.ndarray | None = None, regional: dict | None = None, withhold_candidates: bool = False):
+    """Nanomotif-compatible files + epirefine's per-contig decision table. withhold_candidates (the calibration
+    guard fired, so the run makes no call): include_contigs.tsv is written with its header and no row, so that no
+    candidate reads as an inclusion to a tool that applies the file by its confidence labels."""
     H = len(bins)
     labels = bins + ["unknown"]
     given_lbl = np.array([bins[g] if g >= 0 else "" for g in given], dtype=object)
@@ -324,7 +326,8 @@ def write_outputs(out, contigs: list[str], lengths: dict, given: np.ndarray, bin
     dropped = (np.zeros(len(contigs), bool) if redundancy is None
                else ~np.isnan(redundancy) & (ref.include_bin < 0))
     rows = []
-    for i in np.flatnonzero(ref.candidate & (ref.best_alt < H) & (ref.p_best_alt >= CONFIDENCE[-1][0])):
+    listed = ref.candidate & (ref.best_alt < H) & (ref.p_best_alt >= CONFIDENCE[-1][0]) & (not withhold_candidates)
+    for i in np.flatnonzero(listed):
         p = float(ref.p_best_alt[i])
         # a dropped candidate is not added to any bin, so it must not read as a high-confidence inclusion
         rows.append({"contig": contigs[i], "bin": given_lbl[i] or "unbinned", "assigned_bin": labels[ref.best_alt[i]],
