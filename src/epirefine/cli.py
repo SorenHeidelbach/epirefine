@@ -204,29 +204,32 @@ def build_parser() -> argparse.ArgumentParser:
                         "posterior is its prior share)")
 
     g = r.add_argument_group("calibration core (experimental)",
-                             "options of the calibration redesign (mission WP3); every default is the behaviour of 0.11.1")
+                             "options of the calibration redesign (mission WP3); --relatives and --unknown-share default to option E "
+                             "(community only, unknown share at T = 1, since 0.12), the others to the behaviour of 0.11.1")
     g.add_argument("--tau-select", choices=["per-group", "inf"], default="per-group",
                    help="between-contig variation: a tau per motif group chosen on the calibration pieces, or none "
                         "(tau = inf fitted inside the calibration; no tau scan)")
     g.add_argument("--npmle-start", choices=["warm", "cold"], default="warm",
                    help="population-prior fits start from the previous fit's solution (warm) or from the uniform (cold)")
-    g.add_argument("--unknown-share", choices=["deployed", "t1"], default="deployed",
-                   help="the share of unbinned contigs from genomes without a bin: estimated at the calibrated temperature "
-                        "(deployed; it then rises with the temperature) or at T = 1 and used with the untempered bin prior (t1)")
+    g.add_argument("--unknown-share", choices=["deployed", "t1"], default=None,
+                   help="the share of unbinned contigs from genomes without a bin: estimated at T = 1 and used with the "
+                        "untempered bin prior (t1, the default since 0.12), or at the calibrated temperature (deployed, "
+                        "0.11; it then rises with the temperature; the default with --relatives switch or per-bin)")
     g.add_argument("--temperature-law", choices=["grid", "sites"], default="grid",
                    help="one temperature from a grid (grid), or a temperature that grows smoothly with a contig's number "
                         "of motif sites, log T = a + b log(sites / 1000) with b in [0, 1] and T >= 1.082 (sites)")
     g.add_argument("--evidence-temperature", choices=["median", "contig"], default="median",
                    help="temperature of the methylation-evidence cut-off (--min-evidence): the median over contigs, or each "
                         "contig's own (only differs with --temperature-law sites)")
-    g.add_argument("--relatives", choices=["switch", "per-bin", "slot", "community-only"], default="switch",
-                   help="model of genomes without a bin: one model for all bins, relatives or community only by a 2-SE "
-                        "test (switch), or one mixture with a relatives weight per bin fitted on the calibration pieces "
-                        "(per-bin; also writes hidden_relative.tsv: the probability that an unbinned relative of the bin "
-                        "explains each contig, report only), or the slot model (slot: each bin's slot holds its own "
-                        "genome or an unbinned relative, a weight per bin fitted with the temperature; needs "
-                        "--unknown-share t1), or the switch removed: community only always, the relatives test "
-                        "logged only (community-only)")
+    # 'switch' (the unknown-model switch of 0.11.1) is accepted but not listed: deprecated, kept for ablation only
+    g.add_argument("--relatives", choices=["community-only", "per-bin", "slot", "switch"], default=None,
+                   metavar="{community-only,per-bin,slot}",
+                   help="model of genomes without a bin: community only on every run, the relatives test reported as "
+                        "a number (community-only, the default since 0.12; params.json relatives_statistic), or one "
+                        "mixture with a relatives weight per bin fitted on the calibration pieces (per-bin; also writes "
+                        "hidden_relative.tsv: the probability that an unbinned relative of the bin explains each contig, "
+                        "report only), or the slot model (slot: each bin's slot holds its own genome or an unbinned "
+                        "relative, a weight per bin fitted with the temperature; needs --unknown-share t1)")
     g.add_argument("--slot-objective", choices=["legacy", "averaged"], default="legacy",
                    help="calibration objective of the slot model: prior 0.1, host-present and host-absent pieces 1 : 1 (legacy), or "
                         "averaged over priors 0.1 ... 0.9, the host-absent pieces scored with a proper prior (averaged)")

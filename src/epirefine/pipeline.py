@@ -297,6 +297,38 @@ def _bin_prior_scope(f):
     return wrapped
 
 
+# calibration features the community-only path (option E) cannot be combined with
+_SWITCH_ONLY_FEATURES = frozenset({"sites-temperature", "prior-matched", "prior-averaged", "unit-temperature",
+                                   "deployed-unknown"})
+
+
+def resolve_unknown_model(relatives, unknown_share, features=frozenset(), do_calibrate=True, unlisted_genome=False,
+                          regional_inclusion=False, log=print) -> tuple[str, str]:
+    """The unknown model and unknown-share estimate a run uses (pipeline.run's relatives / unknown_share; None = the
+    default). Default since 0.12 (option E, D63): 'community-only' with the share at T = 1. The removed switch
+    ('switch', deprecated) stays for ablation: it reproduces 0.11.1, and its share default is 'deployed'. A run with
+    an option that predates option E and needs the switch path gets 'switch' when relatives is not given."""
+    if relatives is None:
+        blockers = sorted(features & _SWITCH_ONLY_FEATURES)
+        if not do_calibrate:
+            blockers.append("no calibration")
+        if unlisted_genome:
+            blockers.append("--unlisted-genome")
+        if regional_inclusion:
+            blockers.append("--regional-inclusion")
+        relatives = "community-only"
+        if blockers:
+            relatives = "switch"
+            log(f"unknown model: the unknown-model switch of 0.11.1 (--relatives switch) is used, because "
+                f"{', '.join(blockers)} needs it")
+    elif relatives == "switch":
+        log("WARNING: --relatives switch is deprecated (ablation only): it restores the unknown-model switch of "
+            "0.11.1, which flips under resampling of the calibration (D63)")
+    if unknown_share is None:
+        unknown_share = "t1" if relatives == "community-only" else "deployed"
+    return relatives, unknown_share
+
+
 @_bin_prior_scope
 @_releases_cache_locks
 def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50_000, grid_size=64,
@@ -310,14 +342,24 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         redundancy_order="independent", unlisted_genome=False, inclusion_support="none", two_state_warning=0.2, tau_support="all",
         unknown_prior="bins", unknown_prior_strength=5.0,
         calibration="default", siteless_bin_guard=False,
-        tau_select="per-group", npmle_start="warm", calibration_exclusion=True, unknown_share="deployed",
-        temperature_law="grid", evidence_temperature="median", relatives="switch", slot_objective="legacy",
+        tau_select="per-group", npmle_start="warm", calibration_exclusion=True, unknown_share=None,
+        temperature_law="grid", evidence_temperature="median", relatives=None, slot_objective="legacy",
         slot_test_b="decidable", slot_kappa=None, calibration_seed=None):
     """calibration: 'default' (the calibration of 0.10 with the parsimony test of the unknown model resampled over
     bins, since 0.11.1), 'legacy' (the calibration of 0.10 and 0.11.0), 'consistent', 'coherent', or a comma-separated
     list of calibrate.FEATURES; see calibrate.parse_features.
 
-    Calibration core options (WP3, experimental; each default is the behaviour of 0.11.1):
+    The unknown model (option E of question U13, the default since 0.12): relatives None = 'community-only' (the
+    unknown-model switch of 0.11 removed: contigs from genomes without a bin are modelled as random community draws
+    on every run; the relatives test is reported as a number, params.json relatives_statistic) and unknown_share
+    None = 't1' (the share of unbinned contigs from genomes without a bin estimated at T = 1). The methylation-evidence
+    check uses the temperature of that community-only fit. Runs with an option the community-only path does not
+    support (no calibration, --unlisted-genome, --regional-inclusion, the calibration features sites-temperature,
+    prior-matched, prior-averaged, unit-temperature, deployed-unknown) fall back to relatives 'switch' when relatives
+    is not given. relatives 'switch' (deprecated; ablation only) is the path of 0.11.1; with it unknown_share None =
+    'deployed', so '--relatives switch' alone reproduces 0.11.1. The values used are recorded in params.json.
+
+    Calibration core options (WP3, experimental; the defaults of the others are the behaviour of 0.11.1):
     tau_select: 'per-group' (the tau scan and a tau per motif group) or 'inf' (no between-contig variation: the
     calibration fits tau = inf only; the seed's main route into the scores, dev log model_diagnostics.md 6a).
     npmle_start: 'warm' or 'cold' (every population-prior fit from the uniform; model.FittedModel).
@@ -341,6 +383,10 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     runinfo.check_inputs(args)
     provenance = runinfo.provenance(args)
     features = parse_features(calibration)
+    relatives, unknown_share = resolve_unknown_model(relatives, unknown_share, features, do_calibrate=do_calibrate,
+                                                     unlisted_genome=unlisted_genome,
+                                                     regional_inclusion=regional_inclusion, log=_log)
+    provenance.update(relatives=relatives, unknown_share=unknown_share)   # the values used (rerun repeats them)
     core = CoreOptions(tau_select=tau_select, npmle_start=npmle_start, unknown_share=unknown_share,
                        temperature_law=temperature_law, evidence_temperature=evidence_temperature,
                        relatives=relatives, slot_objective=slot_objective, slot_test_b=slot_test_b,
@@ -597,6 +643,15 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
                      "assignability", "fragments"):
             _write(cal[name], out / "calibration" / f"{name}.tsv")
         tau = cal["tau"] if tau is None else tau
+        params["relatives_statistic"] = rs = cal["relatives_test"]
+        if rs is None:
+            _log("relatives statistic: not computed (no unknown model with relatives to test: a single bin)")
+        else:
+            z = "n/a" if rs["statistic"] is None else f"{rs['statistic']:.2f}"
+            _log(f"relatives statistic: {z} (log-loss gain of relatives over community only {rs['gain']:.4f} "
+                 f"+- {rs['se']:.4f}{' over bins' if rs['se_over_bins'] else ''}; the 2-SE switch of 0.11 would choose "
+                 f"{rs['switch_choice']}; " + ("used by --relatives switch)" if relatives == "switch" else
+                                               "report only, the switch is removed)"))
         if relatives == "community-only" and fit["lam"] < 1:
             # the switch removed (WP3, U13 option E): the community-only row the 2-SE rule falls back to; the
             # relatives test above stays in the log and in params.json as a report
@@ -625,6 +680,8 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
     else:
         warm, unknown_params = {}, (None, 1.0)
         community_fit = None
+        params["relatives_statistic"] = None
+        _log("relatives statistic: not computed (no calibration)")
     tabs = None
     tau = (100.0 if variation == "beta" else 0.3) if tau is None else tau
     temperature = 1.0 if temperature is None else temperature
@@ -914,7 +971,9 @@ def run(assembly, pileup, contig_bin, motifs_path, out, min_cov=1, chunk_size=50
         params.update(temperature=temperature, unknown_eta=fit["eta"], unknown_lam=fit["lam"],
                       temperature_by_sites=fit["curve"].table() if fit.get("curve") is not None else None)
     if core_late:
-        evidence, coverage = methylation_evidence(temperature, per_contig=core.evidence_temperature == "contig")
+        # only the evidence: the coverage column stays the contig coverage computed above (all sites), as on the
+        # 0.11 path (a3560c4 overwrote it with the evidence routine's own, NaN for a contig without motif sites)
+        evidence, _ = methylation_evidence(temperature, per_contig=core.evidence_temperature == "contig")
     if unlisted_genome:
         sc.Su = ref.Su
         params["unlisted_share"] = ref.unlisted_share

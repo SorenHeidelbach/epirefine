@@ -381,6 +381,12 @@ def rerun_arguments(params: dict, out, workers=None, cache_dir=None, log=log) ->
         elif _GIVEN.get(name, name) in params:
             v = params[_GIVEN.get(name, name)]
             kw[name] = tuple(v) if isinstance(v, list) else v
+    if "relatives" not in params:
+        # a run from before option E (0.12) had the unknown-model switch and the share at the deployed temperature;
+        # the defaults changed since, so the old path is passed explicitly
+        kw.update(relatives="switch", unknown_share=params.get("unknown_share", "deployed"))
+        log("rerun: the recorded run predates option E (no 'relatives' in params.json): the unknown-model switch "
+            "of 0.11.1 is used (--relatives switch)")
     if params.get("version") != package_version():
         log(f"WARNING: the recorded run used epirefine {params.get('version')}, this is {package_version()}")
     rec, now = (params.get("commit") or {}).get("commit"), tool_commit().get("commit")

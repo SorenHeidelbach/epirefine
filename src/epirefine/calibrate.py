@@ -91,6 +91,25 @@ CONSISTENT = ("temper-then-mix", "common-tau", "em-priors")
 DEFAULT = ("bin-parsimony",)
 
 
+def _relatives_statistic(gain: float, se: float, relatives_row: dict, community_row: dict, best_is_relatives: bool,
+                         over_bins: bool) -> dict:
+    """The relatives test of 0.11 as a number (params.json relatives_statistic). gain: mean log-loss gain per
+    calibration piece of the best unknown model with relatives (lam < 1) over the best community-only one (lam = 1),
+    each at its own grid temperature; se: its standard error (resampled over bins with the feature bin-parsimony,
+    the default). statistic = gain / se. The 2-SE switch of 0.11 chose relatives when the best row had relatives and
+    statistic > 2; since option E (0.12) the switch is removed and the number is a report only. Large positive
+    values say that some calibration pieces are explained better by an unbinned relative of a bin than by a random
+    community genome: the sample may hold an unbinned genome with (nearly) the same methylation as a bin, whose
+    contigs EpiRefine then places in that bin (development data: 4.4-5.4 on the simulated look-alikes, 0.4-1.9 on
+    ZymoFecal)."""
+    z = float(gain / se) if se > 0 else None   # None: no spread to divide by (a single bin or piece)
+    return {"gain": float(gain), "se": float(se), "statistic": z, "se_over_bins": bool(over_bins),
+            "relatives_eta": float(relatives_row["eta"]), "relatives_lam": float(relatives_row["lam"]),
+            "relatives_temperature": float(relatives_row["temperature"]),
+            "community_temperature": float(community_row["temperature"]),
+            "switch_choice": "relatives" if best_is_relatives and gain > 2 * se else "community only"}
+
+
 def clustered_se(dA, dB, cluster_a, cluster_b, n_boot: int = 400, seed: int = 0) -> float:
     """Standard error of mean(dA) + mean(dB) by a bootstrap that resamples whole clusters (the bins the fragments
     were cut from): the evidence for relatives is carried by sibling pairs of bins, a few of which hold most of
@@ -371,16 +390,25 @@ class FragmentFit:
         fitted = min(rows, key=lambda r: r["log_loss"])
         fit = min((r for r in rows if r["temperature"] in ok_T), key=lambda r: r["log_loss"])
         simple = [r for r in rows if r["lam"] >= 1 and r["temperature"] in ok_T]
+        flexible = [r for r in rows if r["lam"] < 1 and r["temperature"] in ok_T]
+        relatives_test = None
         if fit["lam"] < 1 and simple:  # parsimony (D28): relatives only when they beat community-only by 2 SE
             alt = min(simple, key=lambda r: r["log_loss"])
             gain, se = self._paired_gain((fit["temperature"], fit["eta"], fit["lam"]),
                                          (alt["temperature"], alt["eta"], alt["lam"]), priors,
                                          by_bin="bin-parsimony" in self.features)
+            relatives_test = _relatives_statistic(gain, se, fit, alt, True, "bin-parsimony" in self.features)
             keep_flexible = gain > 2 * se
             log(f"  unknown model: relatives (eta={fit['eta']:g}, lam={fit['lam']:g}) vs community only: log-loss gain "
                 f"{gain:.4f} +- {se:.4f} -> {'relatives' if keep_flexible else 'community only (not significant)'}")
             if not keep_flexible:
                 fit = alt
+        elif simple and flexible:  # community only fits best: the statistic is still reported (gain <= 0)
+            rel = min(flexible, key=lambda r: r["log_loss"])
+            gain, se = self._paired_gain((rel["temperature"], rel["eta"], rel["lam"]),
+                                         (fit["temperature"], fit["eta"], fit["lam"]), priors,
+                                         by_bin="bin-parsimony" in self.features)
+            relatives_test = _relatives_statistic(gain, se, rel, fit, False, "bin-parsimony" in self.features)
         if "conservative-temperature" in self.features:
             # The fragments are cut from binned contigs and are easier to place than real unbinned contigs
             # (D7): they can show overconfidence but cannot justify confidence. So where they cannot tell
@@ -399,7 +427,7 @@ class FragmentFit:
             fit = chosen
         out = {"temperature": float(fit["temperature"]), "eta": float(fit["eta"]), "lam": float(fit["lam"]),
                "fitted_temperature": float(fitted["temperature"]), "temperature_fit": rows, "curve": None,
-               "priors": priors}
+               "priors": priors, "relatives_test": relatives_test}
         out["by_length"] = self.by_length(out, priors, temps)
         if "sites-temperature" in self.features:
             out["curve"] = self._curve(out, priors, ok_T, log)
@@ -833,6 +861,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         return la.mean() + lb.mean(), la.mean(), lb.mean()
 
     flen = frags_k["length"].to_numpy()
+    relatives_test = None   # the relatives statistic (_relatives_statistic); None: no model with relatives to test
     if not features - {"common-tau", "em-priors", "deployed-unknown", "bin-parsimony", "tempered-bin-prior"}:  # no feature that touches the temperature / unknown-model fit
         # the calibration of 0.10: prior p_unknown as passed (0.1), tests A and B weighted 1 : 1, the unknown's
         # mixture summed before tempering
@@ -860,9 +889,14 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         # the flexible model then absorbed nearly all unbinned contigs (p_unknown 0.98-0.995; inclusions
         # 1-16 of the 380 that Hi-C places, against 42 of 42 correct with lam = 1).
         simple = [r for r in temp_rows if r["lam"] >= 1 and (allow_sharpening or r["temperature"] >= 1.0)]
-        if fit["lam"] < 1 and simple:
+        flexible = [r for r in temp_rows if r["lam"] < 1 and (allow_sharpening or r["temperature"] >= 1.0)]
+        if simple and flexible:
+            # the relatives test (the 2-SE switch of 0.11): best row with relatives against the best community-only
+            # row. Computed on every run, also when community only fits best (gain <= 0 then), so that the statistic
+            # can be reported as a number (relatives_statistic) whatever the unknown model used
             alt = min(simple, key=lambda r: r["log_loss"])
-            la1, lb1 = fragment_losses(fit["temperature"], *Su_by[(fit["eta"], fit["lam"])])
+            rel = fit if fit["lam"] < 1 else min(flexible, key=lambda r: r["log_loss"])
+            la1, lb1 = fragment_losses(rel["temperature"], *Su_by[(rel["eta"], rel["lam"])])
             la0, lb0 = fragment_losses(alt["temperature"], *Su_by[(alt["eta"], alt["lam"])])
             dA, dB = la0 - la1, lb0 - lb1   # > 0: the flexible model is better on that fragment
             gain = dA.mean() + (dB.mean() if len(dB) else 0.0)
@@ -872,12 +906,14 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             se = float(np.std(boots))
             if "bin-parsimony" in features:
                 se = clustered_se(dA, dB, fbin, fbin[distinct] if len(dB) else fbin[:0])
-            keep_flexible = gain > 2 * se
-            log(f"  unknown model: relatives (eta={fit['eta']:g}, lam={fit['lam']:g}) vs community only: log-loss gain "
-                f"{gain:.4f} +- {se:.4f}{' (over bins)' if 'bin-parsimony' in features else ''} -> "
-                f"{'relatives' if keep_flexible else 'community only (not significant)'}")
-            if not keep_flexible:
-                fit = alt
+            relatives_test = _relatives_statistic(gain, se, rel, alt, fit["lam"] < 1, "bin-parsimony" in features)
+            if fit["lam"] < 1:
+                keep_flexible = gain > 2 * se
+                log(f"  unknown model: relatives (eta={fit['eta']:g}, lam={fit['lam']:g}) vs community only: log-loss gain "
+                    f"{gain:.4f} +- {se:.4f}{' (over bins)' if 'bin-parsimony' in features else ''} -> "
+                    f"{'relatives' if keep_flexible else 'community only (not significant)'}")
+                if not keep_flexible:
+                    fit = alt
         temperature, eta, lam = fit["temperature"], fit["eta"], fit["lam"]
         Su, Su_b = Su_by[(eta, lam)]
         # diagnostic: the temperature each fragment length would want. A temperature that rises with
@@ -904,6 +940,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
         temperature, eta, lam = first_fit["temperature"], first_fit["eta"], first_fit["lam"]
         fitted_temperature = first_fit["fitted_temperature"]
         temp_rows, by_length = first_fit["temperature_fit"], first_fit["by_length"]
+        relatives_test = first_fit.get("relatives_test")
     # the best community-only unknown model (lam = 1) at temperatures that may be used: the fallback when an unknown
     # model with relatives fails at its deployed prior (feature deployed-unknown, checked in pipeline.run)
     simple_rows = [r for r in temp_rows if r["lam"] >= 1 and (allow_sharpening or r["temperature"] >= 1.0)]
@@ -972,7 +1009,7 @@ def calibrate(L_chunks, chunk_bin, n_bins, group_modtype, grid, frags: pl.DataFr
             "reliability": reliability, "assignability": pl.DataFrame(assign_rows),
             "fragments": frags.with_columns(pl.Series("foreign_excluded", ~keep), **{
                 k: pl.Series(_expand(v, kidx, len(keep))) for k, v in frag_extra.items()}), "model": best_model,
-            "fragment_fit": ff, "fit": first_fit, "report": report,
+            "fragment_fit": ff, "fit": first_fit, "report": report, "relatives_test": relatives_test,
             "community": None if community is None else {"temperature": float(community["temperature"]),
                                                           "eta": float(community["eta"]), "lam": 1.0}}
 

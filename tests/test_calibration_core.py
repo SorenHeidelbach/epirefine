@@ -1,5 +1,6 @@
-"""Calibration core options (mission WP3; dev log proposals/2026-11-12/wp3_designs): each is off by default, and
-switched on it changes only what it names."""
+"""Calibration core options (mission WP3; dev log proposals/2026-11-12/wp3_designs): switched on, each changes only
+what it names. Since 0.12 --relatives community-only and --unknown-share t1 are the default (option E,
+tests/test_option_e.py); the others are off by default."""
 import json
 
 import numpy as np
