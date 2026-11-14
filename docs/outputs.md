@@ -82,7 +82,9 @@ stored as single strands count double here, so the coverage does not depend on h
 ## Flag and inclusion files
 
 Three files with fixed names and columns, for downstream scripts that need only the flags, the inclusion candidates
-or the bins without their contaminants.
+or the bins without their contaminants. The four files `bin_contamination.tsv`, `include_contigs.tsv`,
+`decontaminated_contig_bin.tsv` and `new_contig_bin.tsv` keep the Nanomotif-compatible format (same names and
+columns), so scripts written for that format read them unchanged.
 
 - **`bin_contamination.tsv`**: one row per flagged contig: `contig`, `bin`, `method` (`epirefine`), `cluster` (the
   best alternative), `bin_cluster`, `bin_length`, `n_contigs_bin`, `fraction_contigs`, `fraction_length`,

@@ -28,8 +28,8 @@ coverage, and in bins without methylated motifs the remaining signal follows GC 
 pip install epirefine
 ```
 
-Python 3.10 or newer; Linux and macOS. Check it works with `epirefine --version`. A Bioconda recipe follows the
-PyPI release; until it is there, install with pip (also inside a conda environment).
+Python 3.10 or newer; Linux and macOS. Check it works with `epirefine --version`. A Bioconda package is coming
+soon; until then, install with pip (also inside a conda environment).
 
 The wheels for Linux (x86_64, aarch64; glibc 2.17 or newer, and musl on x86_64) and macOS (Apple silicon and Intel)
 carry compiled kernels, which EpiRefine uses by default. On any other platform pip installs the pure-Python wheel
