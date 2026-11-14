@@ -6,8 +6,8 @@ Everything EpiRefine writes into `--out`. For most uses you need only the first 
 |---|---|
 | [`new_contig_bin.tsv`](#new_contig_bintsv) | **The refined binning.** |
 | [`contig_decisions.tsv`](#contig_decisionstsv) | **Every contig's decision, with probabilities.** |
-| [`decontaminated_contig_bin.tsv`](#nanomotif-compatible-files) | The bins with contaminants removed, nothing added. |
-| [`bin_contamination.tsv`, `include_contigs.tsv`](#nanomotif-compatible-files) | Nanomotif-format flags and inclusion candidates. |
+| [`decontaminated_contig_bin.tsv`](#flag-and-inclusion-files) | The bins with contaminants removed, nothing added. |
+| [`bin_contamination.tsv`, `include_contigs.tsv`](#flag-and-inclusion-files) | Flags and inclusion candidates in a fixed column format. |
 | [`bin_evidence.tsv`, `host_profiles.tsv`, `motif_fit.tsv`](#bins-and-motifs) | What each bin's methylation looks like (`motif_fit.tsv` with `--motif-fit`). |
 | [`motif_groups.tsv`, `motif_noise.tsv`, `group_weights.tsv`, `detection_model.tsv`](#bins-and-motifs) | How the motifs were grouped, filtered and modelled. |
 | [`host_chunk_outliers.tsv`](#diagnostics) | Pieces of binned contigs that look foreign to their bin. |
@@ -79,10 +79,10 @@ median mixes the two kinds in the proportions the contig's motifs have. Valid ca
 filtered or could not call at the site, so they are below the read depth. With `--strand-sites auto` the sites
 stored as single strands count double here, so the coverage does not depend on how the strands were split.
 
-## Nanomotif-compatible files
+## Flag and inclusion files
 
-Same names and columns as Nanomotif's `detect_contamination` and `include_contigs`, so tools built for those
-outputs can read EpiRefine's.
+Three files with fixed names and columns, for downstream scripts that need only the flags, the inclusion candidates
+or the bins without their contaminants.
 
 - **`bin_contamination.tsv`**: one row per flagged contig: `contig`, `bin`, `method` (`epirefine`), `cluster` (the
   best alternative), `bin_cluster`, `bin_length`, `n_contigs_bin`, `fraction_contigs`, `fraction_length`,

@@ -26,7 +26,8 @@ are needed.
 ### Must the motifs come from Nanomotif?
 
 No. EpiRefine needs only the list of motifs: any TSV with the columns `motif`, `mod_type` and `mod_position` works.
-Nanomotif's `bin-motifs.tsv` is the usual source. Motifs missing from the list cannot be used, so a genome whose
+Nanomotif's `bin-motifs.tsv` is the usual source; the benchmarks of 0.12 used tables from Nanomotif 1.3.0, and
+another motif table can change the results a lot. Motifs missing from the list cannot be used, so a genome whose
 motifs are all missing looks unmethylated. Extra motifs that no bin methylates are not harmless: on the development
 benchmarks, adding motifs from another sample's motif table left flag precision at 99.5% or more but lowered the
 share of removed contigs put back on the training communities from 89.3% to 77.1% (100 added motifs), 40.4% (400) and
@@ -61,7 +62,7 @@ Unbinned contigs are still tested for inclusion into the bin.
 
 EpiRefine declines rather than guesses. A contig gets no decision (`low_coverage`, `too_short` or
 `no_methylation_evidence`) when it has fewer than 5 reads per motif site, is shorter than 1 kb, or carries too few
-informative motif sites to tell bins apart. On a complex fecal sample (ZymoFecal, a development sample) that was
+informative motif sites to tell bins apart. On a complex fecal sample (ZymoFecal, a development sample, version 0.8.0) that was
 76% of the contigs and 31% of the assembled sequence, mostly short, low-coverage contigs. Binned contigs without a
 decision stay in their bin: a no call never changes a bin. On samples with an unbinned genome that shares a bin's methylation, the share of
 `no_methylation_evidence` can be much larger (see [known limitations](#known-limitations)).
@@ -122,9 +123,11 @@ were looked at during development, so they are no longer an unseen evaluation; v
 On a fecal sample with Hi-C (ZymoFecal, version 0.8.0 with a Nanomotif 1.1.3 motif table), 7 of 8 flags (88%, 95%
 interval 53-98%) and 23 of 24 inclusions (96%, 80-99%) that Hi-C could check at ≥ 10x agreed with it; with the
 Nanomotif 1.3.0 table and version 0.11.1 it is 7 of 8 flags and 24 of 26 inclusions. Hi-C could check only these 8 of
-the 139 flagged contigs and 24 of the 485 inclusions, the flag figure moves between 67% and 88% with the version of
+the 139 flagged contigs and 24 of the 485 inclusions of the 0.8.0 run, the flag figure moves between 67% and 88% with the version of
 the Hi-C reference (the inclusion figure stays at 92-100%), and the same sample was used to choose several defaults (the 0.4 methylome difference, the 0.9
-inclusion threshold, the 5x cut-off), so it is not an independent check. Things to keep in mind:
+inclusion threshold, the 5x cut-off), so it is not an independent check. With 0.12.0rc1 (Nanomotif 1.3.0 table, calibration seed 1) the
+sample gets 147 flags and 589 inclusions (0.11.1: 147 and 503), and the share of them that Hi-C confirms is
+unchanged. Things to keep in mind:
 
 - **A high `p_contaminant` is no guarantee**: the 5 wrong flags on the test and validation communities (spent) all had `p_contaminant`
   ≥ 0.9999. Sorting by `p_contaminant` shows the least certain flags first, but wrong flags are not only among them.
@@ -186,6 +189,17 @@ inclusion threshold, the 5x cut-off), so it is not an independent check. Things 
   of the calibration were resampled, about one resample in six landed one step away from the full fit, and its
   inclusions moved by about 17%. A finer search was tried and is not in 0.12. Running a few values of
   `--calibration-seed` shows how much a sample's inclusions depend on it.
+- **Confident errors on planted fecal scenarios.** On planted scenarios built from the fecal development sample
+  (ZymoFecal s4-s8: binned contigs hidden or swapped), 0.12 returned more hidden contigs to their bin than the
+  0.11.1-equivalent model (56.3% against 52.4%, 534 against 497 of 949), but its inclusion precision was 95.018% (534 of 562)
+  against 95.029% (497 of 523), and it made 30 wrong placements at P ≥ 0.99 against 28. Each difference comes from
+  one contig (m2_u19042189ctg placed in a wrong bin twice; m2_u10058973ctg placed in the same wrong bin at P 0.996-0.997
+  where 0.11.1 placed it at 0.984-0.985), and for both the planted truth is contradicted by the runs without planting.
+  Details: [CHANGELOG](../CHANGELOG.md), 0.12.0rc1, Known limitations.
+- **Some small samples cannot be calibrated.** A run stops with "no calibration fragments" when no calibration
+  piece can be cut from the bins (see [Something went wrong](#something-went-wrong)). On a stress set of 690 runs
+  on development genomes (replicate seeds included), 37 runs stopped this way, all on contigs cut into 1-2 kb
+  pieces, the same 37 with 0.12 as with 0.10.1.
 - **Bins merged from two genomes that differ in one motif are not detected.** On development sets built by merging
   two isolates' bins, a second genome that differed in several motifs had all its contigs flagged up to at least 40%
   of the bin; one that differed in a single motif was mostly missed (at most half of its contigs flagged at any
@@ -203,6 +217,8 @@ inclusion threshold, the 5x cut-off), so it is not an independent check. Things 
 | Benchmark community of 25-35 Mb | 4-6 GB | 0.5-3 min (0.8.0); about 16 s from the site cache (0.11.0, 4 workers) | ≤ 2.2 GB (0.8.0); 0.6-1.0 GB (0.11.0) |
 | Fecal sample, 2.6 Gb assembly, 490 bins | 330 GB | first read of the pileup: 2.4 h with 2 workers (0.10.1); everything after it: 13.5 min with 12 workers (0.11.0, from the site cache) | 25.5 GB in the main process (0.11.0), plus the workers |
 
+The rows give the version each was measured with; this table has no row for 0.12 yet. Since
+0.12 the two largest tables are kept on disk (below), which lowers the main process's peak memory on large samples.
 Memory is that of the largest single process; the worker processes come on top (an early version needed up to 54 GB
 in total on the fecal sample with 8 workers). Most of the time on large samples is the first read of the pileup; a
 rerun from the cache is much faster. On large samples EpiRefine keeps two large tables in temporary files while it

@@ -1,6 +1,7 @@
 # Options
 
-All options of `epirefine run`, grouped by what they control. The defaults were chosen during development, on
+All options of `epirefine run` (version 0.12.0), grouped by what they control, then `epirefine cache` and
+`epirefine rerun`. The defaults were chosen during development, on
 monoculture benchmarks with known truth and on one fecal sample with Hi-C (ZymoFecal). Several thresholds (the 0.4
 methylome difference, the 0.9 inclusion threshold, the 5x coverage cut-off) were set on that fecal sample, so its Hi-C
 agreement is not an independent check of them. Most users only set the inputs, `--out` and `--workers`.
@@ -107,6 +108,11 @@ Removed in 0.12 (they lost on the development benchmarks; see `CHANGELOG.md`): `
 | `--tables-in-memory` | off | Keep the contig tables in memory and the chunk tables' file in the page cache, as before 0.12: no wait for the disk, but about 6 GB more memory on a 35,000-contig fecal sample. The results are the same. |
 | `--cache-dir` | `<out>/cache` | Where the site cache goes. A rerun with the same assembly, pileup and motifs reuses it and skips reading the pileup, so reruns with other thresholds are fast. Point several runs at the same cache to share it: runs that read it share a lock on it and run at the same time; a run that has to rebuild it waits until they are done (and they wait for a rebuild). |
 
+**Compiled kernels.** No option is needed: the platform wheels carry the compiled kernels and use them, and the
+pure wheel (every other platform) runs the numpy code, with the same decisions, more slowly. The environment variable
+`EPIREFINE_RS=0` forces the numpy code; `EPIREFINE_RS_NO_SIMD=1` makes the kernels skip their AVX2/FMA path (the
+same bits, for testing). The log's third line and `params.json` (`kernels`) say which code ran.
+
 ### The site cache
 
 The cache is reused when its key matches: the assembly and the pileup (path, size and modification time, plus a
@@ -123,6 +129,9 @@ epirefine cache check --cache-dir run1/cache --assembly asm.fasta --pileup pileu
 # add the fingerprints to a cache written before 0.12 (only if it was built from these very files)
 epirefine cache upgrade --cache-dir run1/cache --assembly asm.fasta --pileup pileup.bed
 ```
+
+`cache check` also takes the run's `--seed`, `--group-sample-mb`, `--min-jaccard`, `--shared-sites`,
+`--complement-pairs` and `--strand-sites`; give them when the run did not use the defaults.
 
 ## Repeating a run
 

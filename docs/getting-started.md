@@ -19,7 +19,8 @@ from the reads; if you already have a modkit pileup and Nanomotif's `bin-motifs.
   one line per binned contig, `contig<TAB>bin`, no header. Contigs not in the table are unbinned.
 - **Tools:** EpiRefine (`pip install epirefine`), [minimap2](https://github.com/lh3/minimap2) and
   [samtools](https://www.htslib.org/), [modkit](https://github.com/nanoporetech/modkit) and
-  [Nanomotif](https://github.com/MicrobialDarkMatter/nanomotif).
+  [Nanomotif](https://github.com/MicrobialDarkMatter/nanomotif) (the benchmarks of EpiRefine 0.12 used Nanomotif
+  1.3.0).
 
 ## Try it on the example data
 
@@ -112,7 +113,9 @@ What happens, in order (the log shows each step):
 **Time and memory.** A community of 25-35 Mb with a 4-6 GB pileup takes a few minutes at most and about 1-2 GB.
 For a complex fecal sample (2.6 Gb assembly, 490 bins, 330 GB pileup), the first read of the pileup took 2.4 hours
 with 2 workers (0.10.1) and everything after it 13.5 minutes with 12 workers (0.11.0), with 25.5 GB in the main
-process plus the workers. Measurements per version are in the [FAQ](faq.md#how-long-does-it-take-and-how-much-memory).
+process plus the workers. Since 0.12 the two largest tables are kept in temporary files in the output folder while
+the run goes (about 12 GB on that sample; `--temp-dir` puts them elsewhere, `--tables-in-memory` keeps them in
+memory). Measurements per version are in the [FAQ](faq.md#how-long-does-it-take-and-how-much-memory).
 
 ## 4. Read the results
 
