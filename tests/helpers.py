@@ -90,7 +90,9 @@ def copy_cache(src: Run, out) -> Path:
 # runs by construction (start time, command line, paths, worker count, time and memory used)
 RUN_SPECIFIC_PARAMS = ("command_line", "start_time", "inputs", "out", "cache_dir", "workers", "python", "elapsed_s",
                        "peak_rss_gb", "peak_rss_worker_gb",
-                       "write_motif_fit")  # an extra output file, asked for by the command-line test run only
+                       "threads", "kernels",  # what ran where (0.12): differ with --workers and EPIREFINE_RS by design
+                       "write_motif_fit",  # an extra output file, asked for by the command-line test run only
+                       "temp_dir", "tables_in_memory")  # where the large tables were kept (0.12): no result changes
 
 
 def _comparable_lines(path: Path) -> list[str]:
@@ -128,5 +130,12 @@ def assert_same_outputs_to_rounding(a: Path, b: Path, rel: float = 1e-9):
             continue
         if isinstance(pa[key], float):
             assert pb[key] == pytest.approx(pa[key], rel=rel, abs=1e-12), key
+        elif isinstance(pa[key], dict):  # e.g. relatives_statistic: its floats to `rel`, the rest as written
+            assert pa[key].keys() == pb[key].keys(), key
+            for k, v in pa[key].items():
+                if isinstance(v, float):
+                    assert pb[key][k] == pytest.approx(v, rel=rel, abs=1e-12), (key, k)
+                else:
+                    assert pb[key][k] == v, (key, k)
         else:
             assert pa[key] == pb[key], key

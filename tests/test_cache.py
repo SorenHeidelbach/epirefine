@@ -86,10 +86,9 @@ def test_changed_pileup_rebuilds_the_cache(community, tmp_path, monkeypatch):
     assert row["n_sites"] == 0 and row["status"] == "low_coverage"
 
 
-@pytest.mark.xfail(strict=True, reason="the cache key holds the pileup's path, size and mtime in whole seconds, no content "
-                   "fingerprint: a pileup replaced by one of the same size and mtime is not noticed and the old sites "
-                   "are reused (review 08, section 3.2)")
 def test_changed_pileup_of_same_size_and_mtime_rebuilds_the_cache(community, tmp_path, monkeypatch):
+    """The content fingerprint (format 2) notices a pileup replaced by one of the same size and modification time
+    (review 08, section 3.2; a strict expected failure until 0.12)."""
     com = _private_copy(community, tmp_path / "in")
     out = tmp_path / "out"
     _until_cache(monkeypatch, **com.args(out))
@@ -161,3 +160,137 @@ def test_pairing_rule_that_pairs_the_same_motifs_shares_the_cache(community, bas
     run = run_pipeline(**community.args(out), complement_pairs="position")
     assert run.reused_cache
     assert_same_outputs(base_run.out, run.out, DECISION_FILES)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# format, fingerprint, old caches, lock and the check without a run
+
+def _as_format_1(cache):
+    """The manifest as 0.11 wrote it: inputs and parts only."""
+    man = json.loads((cache / "manifest.json").read_text())
+    (cache / "manifest.json").write_text(json.dumps({"inputs": man["inputs"], "parts": man["parts"]}))
+
+
+def test_new_manifest_has_format_and_fingerprints(base_run):
+    from epirefine import sitecache
+    man = _manifest(base_run.out)
+    assert man["format"] == sitecache.FORMAT == 2
+    assert set(man["fingerprints"]) == {"assembly", "pileup"}
+    assert man["fingerprints"]["pileup"]["blocks"] == "all"  # a small file is hashed whole
+
+
+def test_format_1_cache_is_reused_and_upgraded_without_a_pileup_pass(community, base_run, tmp_path, monkeypatch):
+    """A cache written by 0.11 (no format, no fingerprints) is reused as it is; the upgrade adds the fingerprints
+    and the upgraded cache is reused too. The same decisions throughout."""
+    from epirefine import sitecache
+    out = copy_cache(base_run, tmp_path / "out")
+    _as_format_1(out / "cache")
+    run = run_pipeline(**community.args(out))
+    assert run.reused_cache and not run.ran_pileup_pass and "format 1" in run.log
+    assert "format" not in _manifest(out)  # a run does not write into a cache it reuses
+    assert_same_outputs(base_run.out, run.out, DECISION_FILES)
+    paths = {"assembly": str(community.assembly), "pileup": str(community.pileup)}
+    assert sitecache.upgrade(out / "cache", paths) == "upgraded to format 2"
+    assert _manifest(out)["fingerprints"] == _manifest(base_run.out)["fingerprints"]
+    assert sitecache.upgrade(out / "cache", paths) == "already format 2"
+    again = _until_cache(monkeypatch, **community.args(out))
+    assert again.reused_cache and "key and fingerprints match" in again.log
+
+
+def test_upgrade_refuses_other_inputs(community, base_run, tmp_path):
+    from epirefine import sitecache
+    out = copy_cache(base_run, tmp_path / "out")
+    _as_format_1(out / "cache")
+    com = _private_copy(community, tmp_path / "in")
+    msg = sitecache.upgrade(out / "cache", {"assembly": str(com.assembly), "pileup": str(com.pileup)})
+    assert msg.startswith("not upgraded") and "format" not in _manifest(out)
+
+
+def test_newer_format_is_not_overwritten(community, base_run, tmp_path):
+    from epirefine.io import InputError
+    out = copy_cache(base_run, tmp_path / "out")
+    man = _manifest(out)
+    man["format"] = 99
+    (out / "cache" / "manifest.json").write_text(json.dumps(man))
+    with pytest.raises(InputError, match="newer epirefine"):
+        run_pipeline(**community.args(out))
+
+
+def test_missing_part_file_rebuilds_the_cache(community, base_run, tmp_path, monkeypatch):
+    out = copy_cache(base_run, tmp_path / "out")
+    next((out / "cache" / "sites").glob("*.parquet")).unlink()
+    run = _until_cache(monkeypatch, **community.args(out))
+    assert run.ran_pileup_pass and "part files missing" in run.log
+
+
+def test_check_cache_says_reused_or_rebuild(community, base_run, tmp_path):
+    from epirefine.pipeline import check_cache
+    out = copy_cache(base_run, tmp_path / "out")
+    args = dict(assembly=str(community.assembly), pileup=str(community.pileup), motifs_path=str(community.motifs))
+    assert check_cache(out / "cache", **args)[0]
+    _as_format_1(out / "cache")
+    ok, why = check_cache(out / "cache", **args)
+    assert ok and "format 1" in why
+    more = tmp_path / "bin-motifs.tsv"
+    more.write_text(community.motifs.read_text() + "binA\tm\tGGCC\t2\t900\t100\tpalindrome\tNA\tNA\tNA\tNA\n")
+    ok, why = check_cache(out / "cache", **{**args, "motifs_path": str(more)})
+    assert not ok and "motifs" in why
+    assert not check_cache(tmp_path / "nothing", **args)[0]
+
+
+def test_cli_cache_check(community, base_run, tmp_path, capsys):
+    from epirefine.cli import main
+    out = copy_cache(base_run, tmp_path / "out")
+    main(["cache", "check", "--cache-dir", str(out / "cache"), "--assembly", str(community.assembly),
+          "--pileup", str(community.pileup), "--motifs", str(community.motifs)])
+    assert capsys.readouterr().out.startswith("reused")
+
+
+def test_lock_shared_readers_exclusive_writer(tmp_path):
+    """Readers share the lock; a writer cannot take it while a reader holds it, and readers wait for a writer."""
+    from epirefine.sitecache import CacheLock
+    a, b, w = CacheLock(tmp_path), CacheLock(tmp_path), CacheLock(tmp_path)
+    a.shared(); b.shared()
+    assert not w.try_exclusive()
+    a.release()
+    assert not w.try_exclusive()
+    b.release()
+    assert w.try_exclusive()
+    r = CacheLock(tmp_path)
+    import fcntl
+    with pytest.raises(BlockingIOError):
+        r._open(); fcntl.flock(r.fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    w.release(); r.release()
+
+
+def test_run_releases_its_lock(community, base_run, tmp_path, monkeypatch):
+    """After a run, finished or stopped, nothing holds the cache's lock."""
+    from epirefine.sitecache import CacheLock
+    out = copy_cache(base_run, tmp_path / "out")
+    _until_cache(monkeypatch, **community.args(out))
+    w = CacheLock(out / "cache")
+    assert w.try_exclusive()
+    w.release()
+
+
+def test_rebuild_waits_for_a_reader(community, base_run, tmp_path):
+    """A run that must rebuild a cache another run reads waits for it (here: gives up waiting = blocks)."""
+    import threading
+    from epirefine.sitecache import CacheLock
+    out = copy_cache(base_run, tmp_path / "out")
+    reader = CacheLock(out / "cache")
+    reader.shared()
+    more = tmp_path / "bin-motifs.tsv"
+    more.write_text(community.motifs.read_text() + "binA\tm\tGGCC\t2\t900\t100\tpalindrome\tNA\tNA\tNA\tNA\n")
+    done = threading.Event()
+
+    def other():
+        run_pipeline(**{**community.args(out, do_calibrate=False), "motifs_path": str(more)})
+        done.set()
+    t = threading.Thread(target=other, daemon=True)
+    t.start()
+    assert not done.wait(3)  # blocked on the reader's lock
+    assert "GGCC_m-2" not in json.dumps(_manifest(out))
+    reader.release()
+    t.join(120)
+    assert done.is_set() and "GGCC_m-2" in json.dumps(_manifest(out))

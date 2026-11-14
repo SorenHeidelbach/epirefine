@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import polars as pl
 
 from epirefine.assignability import expected_tables, margin_vs_competitors
@@ -321,36 +322,29 @@ def test_site_terms_blocks_are_bit_identical():
         assert np.array_equal(site_terms(keys, det, grid, block=block), first)
 
 
-def test_summed_scores_same_bits_whatever_the_memory_budget(monkeypatch):
-    monkeypatch.setenv("EPIREFINE_RS", "0")  # the numpy sums (the kernel of epirefine-rs: tests/test_rs_model.py)
-    """Scores don't depend on how many group blocks run at once, and equal the block-wise sums they replace."""
+@pytest.mark.parametrize("cores", [1, 4, 12])
+def test_summed_scores_do_not_depend_on_the_thread_count(monkeypatch, cores):
+    """The numpy sums (the compiled kernel: tests/test_rs_model.py) are the same bits for any number of
+    threads, and equal the sum over groups in ascending order of the per-group terms to rounding. Up to 0.11 they
+    were summed in one block of groups per thread, so the last bits followed the core count (review 08, F4)."""
     from epirefine import model as md
+    monkeypatch.setenv("EPIREFINE_RS", "0")
     rng = np.random.default_rng(11)
     U, M, G, H = 400, 37, 64, 30
     Lp = (-rng.gamma(2.0, 20.0, (U, M, G))).astype(np.float32)
     prof = np.log(rng.dirichlet(np.ones(G) * 0.3, (H, M)))
     Au = -rng.gamma(2.0, 5.0, (U, M))
     eta = 0.05
-    # the sums as they were formed before: one accumulator per block of groups, then the blocks added up
     A = md.group_scores(Lp, prof)                                   # [U, H, M]
     RA = np.logaddexp(A + np.log1p(-eta), (np.log(eta) + Au)[:, None, :])
-    blocks = [b for b in np.array_split(np.arange(M), min(M, md._n_threads())) if len(b)]
-
-    def blockwise(X):
-        parts = []
-        for b in blocks:
-            acc = np.zeros((U, H))
-            for m in b:
-                acc += X[:, :, m]
-            parts.append(acc)
-        return sum(parts)
-    S0, R0 = blockwise(A), blockwise(RA)
-    per_block = 3 * 8 * U * H
-    for budget in (1, per_block, 3 * per_block, 7 * per_block, 1 << 40, None):
-        S, R = md.summed_scores(Lp, prof, rel=(eta, Au), max_bytes=budget)
-        assert np.array_equal(S, S0) and np.array_equal(R, R0), budget
-        assert np.array_equal(md.summed_scores(Lp, prof, max_bytes=budget), S0), budget
-    assert np.allclose(S0, A.sum(-1), rtol=1e-12, atol=0)
+    monkeypatch.setattr(md, "_cores", lambda: 1)
+    S1, R1 = md.summed_scores(Lp, prof, rel=(eta, Au))
+    monkeypatch.setattr(md, "_cores", lambda: cores)
+    S, R = md.summed_scores(Lp, prof, rel=(eta, Au))
+    assert np.array_equal(S, S1) and np.array_equal(R, R1)
+    assert np.array_equal(md.summed_scores(Lp, prof), S1)
+    np.testing.assert_allclose(S, A.sum(-1), rtol=1e-13, atol=0)
+    np.testing.assert_allclose(R, RA.sum(-1), rtol=1e-13, atol=0)
 
 
 def test_scores_keep_lp_rows_of_chosen_units_only():

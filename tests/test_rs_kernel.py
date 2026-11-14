@@ -1,17 +1,17 @@
-"""The optional compiled pileup reader (package epirefine-rs): used when importable and the run has the site
+"""The compiled pileup reader (epirefine._kernels): used when the install has it and the run has the site
 definition it implements, switched off by EPIREFINE_RS=0, and never needed. The comparison tests are skipped
-when the package is not installed; the fallback tests always run."""
-import importlib.util
+when the install has no compiled extension (pure wheel); the fallback tests always run."""
 import sys
 
 import polars as pl
 import pytest
 
+from epirefine import _rs as R
 from epirefine import sites
 from helpers import assert_same_outputs_to_rounding, run_pipeline
 
-HAVE_RS = importlib.util.find_spec("epirefine_rs") is not None
-needs_rs = pytest.mark.skipif(not HAVE_RS, reason="epirefine-rs is not installed")
+HAVE_RS = R.load()[0] is not None
+needs_rs = pytest.mark.skipif(not HAVE_RS, reason="no compiled kernels in this install")
 LEGACY = {"group_rank": None, "pairing": "sequence", "strand_sites": "sum", "motifs": [("GATC", 1, "a")]}
 
 
@@ -23,7 +23,7 @@ def test_switched_off_by_the_environment(monkeypatch):
 
 def test_absent_package_means_the_python_pass(monkeypatch):
     monkeypatch.delenv("EPIREFINE_RS", raising=False)
-    monkeypatch.setitem(sys.modules, "epirefine_rs", None)  # import epirefine_rs -> ImportError
+    monkeypatch.setitem(sys.modules, "epirefine._kernels", None)  # import -> ImportError, as in the pure wheel
     assert sites._rs() is None and sites._rs(LEGACY) is None
 
 
@@ -57,7 +57,7 @@ def test_kernel_and_python_pass_give_the_same_sites_and_outputs(community, tmp_p
     py = run_pipeline(**community.args(tmp_path / "py"), workers=2, **kernel_sites)
     monkeypatch.setenv("EPIREFINE_RS", "1")
     rs = run_pipeline(**community.args(tmp_path / "rs"), workers=2, **kernel_sites)
-    assert "epirefine-rs" in rs.log and "epirefine-rs" not in py.log
+    assert "(compiled reader)" in rs.log and "(compiled reader)" not in py.log
     a, b = _site_rows(py), _site_rows(rs)
     assert a.schema == b.schema and a.equals(b)
     assert_same_outputs_to_rounding(py.out, rs.out)

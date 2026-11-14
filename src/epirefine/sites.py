@@ -27,7 +27,10 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
+from . import _rs as _rs_state
+from ._rs import kernels as _rs_kernels
 from .model import _cores
+from .runinfo import note_worker_peaks
 from .motifs import Motif, MotifMatcher, _CODE, canonical_index, group_sizes
 
 MOD_CODE = {"a": 0, "m": 1, "21839": 2, "h": 3}
@@ -507,24 +510,18 @@ def same_pairs(motifs, pairing: str) -> bool:
 
 
 def _rs(cfg: dict | None = None):
-    """The optional compiled kernels (package epirefine-rs), or None when they are not installed, are switched
-    off (EPIREFINE_RS=0), do not provide the interface this code was written for, or (cfg given) do not
-    implement the site definition of the run: the kernel builds the sites of 0.10 (complement pairs by
-    sequence, strands summed, shared positions by the motifs' record counts), so --shared-sites motif,
-    --strand-sites auto or split, and a --complement-pairs rule that pairs this motif list differently are read
-    by the Python pass, which is the reference."""
-    if os.environ.get("EPIREFINE_RS", "1").strip().lower() in ("0", "false", "no", "off"):
-        return None
+    """The compiled pileup reader (epirefine._kernels, through epirefine._rs), or None when the Python pass runs:
+    switched off (EPIREFINE_RS=0), no compiled extension in this install, or (cfg given) a site definition the
+    reader does not implement: it builds the sites of 0.10 (complement pairs by sequence, strands summed, shared
+    positions by the motifs' record counts), so --shared-sites motif, --strand-sites auto or split, and a
+    --complement-pairs rule that pairs this motif list differently are read by the Python pass, which is the
+    reference."""
     if cfg is not None:
         if cfg.get("group_rank") is not None or cfg.get("strand_sites", "sum") != "sum":
             return None
         if not same_pairs(cfg["motifs"], cfg.get("pairing", "sequence")):
             return None
-    try:
-        import epirefine_rs
-    except ImportError:
-        return None
-    return epirefine_rs if epirefine_rs.supports("api>=1") and epirefine_rs.supports("pileup_reader") else None
+    return _rs_kernels("pileup_reader")
 
 
 def _run_range_rs(rs, cfg: dict, path: str, start: int, end: int, out_prefix: str, flush_rows: int):
@@ -540,11 +537,12 @@ def _run_range_rs(rs, cfg: dict, path: str, start: int, end: int, out_prefix: st
         parts.append(f)
     names = reader.contigs
     return {"parts": parts, "contigs": sorted(names), "first": names[0] if names else None,
-            "last": names[-1] if names else None}
+            "last": names[-1] if names else None, "kernel_counts": _rs_state.take_counts()}
 
 
 def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, block: int, flush_rows: int):
     rs = _rs(cfg)
+    _rs_state.count("pileup_reader", rs is not None)
     if rs is not None:
         return _run_range_rs(rs, cfg, path, start, end, out_prefix, flush_rows)
     w = _Worker(cfg)
@@ -591,7 +589,8 @@ def _run_range(cfg: dict, path: str, start: int, end: int, out_prefix: str, bloc
         if s is not None:
             buf.append(s)
     flush()
-    return {"parts": parts, "contigs": sorted(seen), "first": first_contig, "last": last_contig}
+    return {"parts": parts, "contigs": sorted(seen), "first": first_contig, "last": last_contig,
+            "kernel_counts": _rs_state.take_counts()}
 
 
 def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: list[int], motif_rank,
@@ -609,7 +608,7 @@ def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: l
            "pairing": pairing, "strand_sites": strand_sites}
     rs = _rs(cfg)
     log(f"  pileup pass: {len(ranges)} byte ranges on {min(workers, len(ranges))} workers"
-        + (f" (epirefine-rs {rs.__version__} reader)" if rs is not None else ""))
+        + (" (compiled reader)" if rs is not None else ""))
     env_before = os.environ.get("POLARS_MAX_THREADS")
     os.environ["POLARS_MAX_THREADS"] = "1"
     try:
@@ -619,8 +618,10 @@ def extract_sites(asm: EncodedAssembly, pileup, motifs: list[Motif], group_of: l
             results = []
             for i, f in enumerate(futs):
                 results.append(f.result())
+                _rs_state.add_counts(results[-1].pop("kernel_counts", None))  # which code the worker ran
                 if (i + 1) % max(1, len(futs) // 10) == 0:
                     log(f"  pileup pass: {i + 1}/{len(futs)} ranges done")
+            note_worker_peaks()
     finally:
         if env_before is None:
             os.environ.pop("POLARS_MAX_THREADS", None)
@@ -732,16 +733,217 @@ def _unit_part(part: str, cfg: dict) -> dict:
         units, rows = _fragment_rows(cid, pos, fr)
         if len(rows):
             out["frags"] = tables(units, rows, True)
+    out["kernel_counts"] = _rs_state.take_counts()  # which code this worker ran, for params.json
     return out
+
+
+TARGETS_DISK_MIN_BYTES = 256 << 20  # contig tables from this size on are written to a file as the parts arrive
+DISK_FLUSH_BYTES = 256 << 20  # written bytes between two background writebacks that drop the file's pages from memory
+PREFETCH_THREADS = 8  # parallel sequential readers that bring the file back into the page cache (one stream: 48 MB/s, 8: about 450 MB/s on the test server)
+PREFETCH_BLOCK = 8 << 20
+
+
+def drop_pages(fd: int, sync: bool = True, offset: int = 0, length: int = 0) -> None:
+    """Write a file's dirty pages to disk and drop its pages (offset, length; 0 = to the end) from the page cache,
+    so that they are no longer charged to the process's memory (cgroup). Where posix_fadvise does not exist (macOS)
+    the pages are only written back: the sync is what reports a failed write-back."""
+    if sync:
+        (os.fdatasync if hasattr(os, "fdatasync") else os.fsync)(fd)
+    if hasattr(os, "posix_fadvise"):
+        os.posix_fadvise(fd, offset, length, os.POSIX_FADV_DONTNEED)
+
+
+class TableFileError(RuntimeError):
+    """The temporary file of a table could not be written back to disk. Its contents can no longer be trusted
+    (after a failed write-back the system may drop the unwritten pages, and a hole reads as zeros), so the run
+    stops instead of reading it back."""
+
+
+def table_file_error(what: str, directory, nbytes: int, e: BaseException) -> TableFileError:
+    """The one-line message of a TableFileError; it names the free space needed only for a space or quota error."""
+    import errno
+    space = (f"; it needs about {nbytes / 1e9:.1f} GB of free space there"
+             if getattr(e, "errno", None) in (errno.ENOSPC, errno.EDQUOT, errno.EFBIG) else "")
+    return TableFileError(f"the {what} temporary file in {directory} could not be written to disk ({e}){space}. "
+                          f"The run stops: the rows already written cannot be read back safely")
+
+
+class RowFile:
+    """A float32 table [U, M, G] in an unlinked temporary file: written as unit-table parts arrive and read back in
+    row slices.
+
+    The contig tables (L_t, 5.9 GiB on ZymoFecal) are built during the unit tables but read only after the
+    calibration (scores and per-group summaries, both in row batches). Held in memory they sat under the two
+    peaks of the run. Here:
+
+    - Rows are appended in the order they arrive (one sequential stream; an index maps each row to its place).
+      Writing them at their own row offsets instead made the writes, and on this kind of disk the later
+      sequential reads, scattered: the parts' rows interleave across the whole table.
+    - Every DISK_FLUSH_BYTES a background thread writes the new pages back and drops them from the page cache,
+      so the main process never waits for the disk while it collects results.
+    - prefetch() (at the final fit) reads the file back into the page cache with PREFETCH_THREADS sequential
+      readers in the background; reads then copy from the cache with pread into fresh arrays (not a memory map,
+      whose touched pages would count as the main process's resident memory). The pages stay cached until
+      close(): the table is read twice (scores, then per-group summaries).
+
+    Rows never written read as zeros, as in the np.zeros table they replace.
+
+    Errors: once a row has been written, any error writing the file raises TableFileError and the file is never
+    read again. A failed write-back (fdatasync, in the background or in finish(); usual for quota and space errors
+    on network file systems, and for I/O errors) can lose pages already written; on NFS even a pwrite can report,
+    and so use up, an earlier failed write-back, after which a sync returns no error and a hole reads as zeros. A
+    pwrite that fails before any row was written raises OSError (the caller keeps the table in memory).
+    """
+
+    def __init__(self, directory, shape, dtype=np.float32):
+        import tempfile
+        import threading
+        self.shape, self.dtype = tuple(int(x) for x in shape), np.dtype(dtype)
+        self.ndim = len(self.shape)
+        self._row = int(np.prod(self.shape[1:], dtype=np.int64)) * self.dtype.itemsize
+        self.directory = directory
+        self._fh = tempfile.TemporaryFile(dir=directory)
+        self._fd = self._fh.fileno()
+        self._where = np.full(self.shape[0], -1, np.int64)  # row -> its slot in the file (-1: never written)
+        self._end = 0           # bytes appended
+        self._flushed = 0       # bytes written back and dropped (by the flusher)
+        self._flusher = None    # the running background writeback, if any
+        self._stop = threading.Event()
+        self._readers: list = []
+
+    @property
+    def nbytes(self) -> int:
+        return self.shape[0] * self._row
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def _pwrite(self, buf: memoryview, off: int) -> None:
+        while len(buf):
+            n = os.pwrite(self._fd, buf, off)
+            buf, off = buf[n:], off + n
+
+    def _fatal(self, e: OSError) -> TableFileError:
+        return table_file_error("contig tables'", self.directory, self.nbytes, e)
+
+    def _writeback(self, upto: int) -> None:
+        """Background: write back and drop the pages of [flushed, upto)."""
+        try:
+            drop_pages(self._fd, True, self._flushed, upto - self._flushed)
+            self._flushed = upto
+        except OSError as e:  # the main thread raises it (as TableFileError) at its next write or in finish()
+            self._error = e
+
+    _error = None
+
+    def write_rows(self, ids: np.ndarray, rows: np.ndarray) -> None:
+        """rows[i] is row ids[i]; appended to the file as one block. OSError: nothing has been written to the file
+        (the caller can keep the table in memory). TableFileError: writing failed after rows were written."""
+        import threading
+        if self._error is not None:
+            raise self._fatal(self._error)
+        if rows.shape != (len(ids),) + self.shape[1:]:
+            raise ValueError(f"rows of shape {rows.shape} for {len(ids)} rows of a table of shape {self.shape}")
+        rows = np.ascontiguousarray(rows, dtype=self.dtype)
+        start = self._end
+        try:
+            self._pwrite(memoryview(rows.reshape(-1).view(np.uint8)), start)
+        except OSError as e:
+            if start:  # rows already written may be lost with it (see the class notes): not read back
+                raise self._fatal(e) from e
+            raise
+        self._where[ids] = start // self._row + np.arange(len(ids))
+        self._end = start + rows.nbytes
+        if self._end - self._flushed >= DISK_FLUSH_BYTES and (self._flusher is None or not self._flusher.is_alive()):
+            self._flusher = threading.Thread(target=self._writeback, args=(self._end,), daemon=True)
+            self._flusher.start()
+
+    def finish(self) -> "RowFile":
+        """All rows written: write the rest back and drop it from the page cache. TableFileError if any write-back
+        failed."""
+        if self._flusher is not None:
+            self._flusher.join()
+        if self._error is not None:
+            raise self._fatal(self._error)
+        try:
+            drop_pages(self._fd, True, self._flushed, 0)
+        except OSError as e:
+            raise self._fatal(e) from e
+        self._flushed = self._end
+        return self
+
+    def prefetch(self) -> None:
+        """Read the file back into the page cache in the background (sequential blocks, PREFETCH_THREADS readers)."""
+        import threading
+        if self._readers or not self._end:
+            return
+        blocks = list(range(0, self._end, PREFETCH_BLOCK))
+
+        def read(k):
+            buf = bytearray(PREFETCH_BLOCK)
+            for off in blocks[k::PREFETCH_THREADS]:
+                if self._stop.is_set():
+                    return
+                try:
+                    os.preadv(self._fd, [buf], off)
+                except OSError:
+                    return
+        self._readers = [threading.Thread(target=read, args=(k,), daemon=True) for k in range(PREFETCH_THREADS)]
+        for t in self._readers:
+            t.start()
+
+    def __getitem__(self, key):
+        if not isinstance(key, slice) or key.step not in (None, 1):
+            raise TypeError("RowFile reads row slices only")
+        a, b, _ = key.indices(self.shape[0])
+        b = max(a, b)
+        out = np.zeros((b - a,) + self.shape[1:], self.dtype)
+        where = self._where[a:b]
+        rows = np.flatnonzero(where >= 0)
+        if len(rows):  # runs of rows that lie next to each other in the file: one read each
+            cut = np.flatnonzero((np.diff(rows) != 1) | (np.diff(where[rows]) != 1)) + 1
+            flat = out.reshape(len(out), -1)
+            for i, j in zip(np.r_[0, cut], np.r_[cut, len(rows)]):
+                buf = memoryview(flat[rows[i]:rows[j - 1] + 1].reshape(-1).view(np.uint8))
+                off = int(where[rows[i]]) * self._row
+                while len(buf):
+                    n = os.preadv(self._fd, [buf], off)
+                    if n == 0:
+                        raise OSError(f"short read from the contig-table file at byte {off}")
+                    buf, off = buf[n:], off + n
+        return out
+
+    def __array__(self, dtype=None, copy=None):
+        if copy is False:  # numpy 2: a copy is always made here
+            raise ValueError("a RowFile is read into a new array; it cannot be returned without a copy")
+        a = self[:]
+        return a if dtype is None else a.astype(dtype)
+
+    def close(self) -> None:
+        """Stop the background threads and close (and so remove) the file; may be called again."""
+        self._stop.set()
+        for t in self._readers:
+            t.join()
+        if self._flusher is not None:
+            self._flusher.join()
+        self._fh.close()
 
 
 def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, min_cov: int, drop_groups=(),
                 chunk_offset: np.ndarray, chunk_size: int, n_chunks: int, target_of: np.ndarray, n_targets: int,
-                frags: pl.DataFrame | None, workers: int | None = None, log=print) -> dict:
+                frags: pl.DataFrame | None, workers: int | None = None, log=print,
+                target_weight: np.ndarray | None = None, targets_dir=None) -> dict:
     """Likelihood tables for host chunks, targets and calibration fragments, in parallel over parts.
 
     Returns float32 arrays L_chunks [K, M, G], L_t [U, M, G], L_frag, H_frag = (H1, H0), and site
     counts per chunk, per target, per (target, group) and per fragment.
+
+    target_weight: float32 group weights [M] multiplied into the target rows as they arrive (the same float32
+    product as multiplying the finished table). targets_dir: when given and L_t has at least
+    TARGETS_DISK_MIN_BYTES, L_t is a RowFile in that directory (written as the parts arrive, its pages dropped
+    from memory) instead of an array. If the file cannot be made, or the first write to it fails, the table is
+    kept in memory; any later error writing the file stops the run with TableFileError (the file is never read
+    back after an error).
     """
     G = grid_size
     cfg = {"grid_size": G, "n_groups": n_groups, "min_cov": min_cov, "chunk_size": chunk_size, "drop_groups": list(drop_groups),
@@ -751,12 +953,22 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
     n_frags = frags.height if frags is not None else 0
     res = {"L_chunks": np.zeros((n_chunks, n_groups, G), np.float32),
            "chunk_sites": np.zeros(n_chunks, np.int64),
-           "L_t": np.zeros((n_targets, n_groups, G), np.float32),
+           "L_t": None,
            "n_sites_t": np.zeros(n_targets, np.int64),
            "n_sites_group_t": np.zeros((n_targets, n_groups), np.int32),
            "L_frag": np.zeros((n_frags, n_groups, G), np.float32),
            "H_frag": (np.zeros((n_frags, n_groups, G), np.float32), np.zeros((n_frags, n_groups, G), np.float32)),
            "frag_sites": np.zeros(n_frags, np.int64)}
+    disk = None
+    if (targets_dir is not None and hasattr(os, "pwrite") and hasattr(os, "preadv") and n_targets
+            and n_targets * n_groups * G * 4 >= TARGETS_DISK_MIN_BYTES):
+        try:
+            disk = RowFile(targets_dir, (n_targets, n_groups, G), np.float32)
+        except OSError as e:
+            log(f"WARNING: contig tables kept in memory: cannot write a file in {targets_dir} ({e})")
+    if disk is None:
+        res["L_t"] = np.zeros((n_targets, n_groups, G), np.float32)
+    wf = None if target_weight is None else np.asarray(target_weight, np.float32)[None, :, None]
     workers = workers or min(16, _cores())
     env = {k: os.environ.get(k) for k in ("POLARS_MAX_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")}
     os.environ.update({k: "1" for k in env})
@@ -766,26 +978,50 @@ def unit_tables(parts: list[str], *, n_groups: int, det: dict, grid_size: int, m
             # behind a slow one waited unpickled in this process. Parts hold whole contigs, so each
             # chunk, target and fragment is written by exactly one part and the order does not matter.
             pending, i = {ex.submit(_unit_part, p, cfg) for p in parts}, 0
-            while pending:
-                done, pending = wait(pending, return_when=FIRST_COMPLETED)
-                while done:
-                    r = done.pop().result()
-                    if "chunks" in r:
-                        c = r["chunks"]
-                        res["L_chunks"][c["ids"]] = c["L"]; res["chunk_sites"][c["ids"]] = c["n_sites"]
-                    if "targets" in r:
-                        t = r["targets"]
-                        res["L_t"][t["ids"]] = t["L"]; res["n_sites_t"][t["ids"]] = t["n_sites"]
-                        u, g, n = t["n_sites_group"]
-                        res["n_sites_group_t"][u, g] = n
-                    if "frags" in r:
-                        f = r["frags"]
-                        res["L_frag"][f["ids"]] += f["L"]; res["frag_sites"][f["ids"]] += f["n_sites"]
-                        res["H_frag"][0][f["ids"]] += f["H"][0]; res["H_frag"][1][f["ids"]] += f["H"][1]
-                    i += 1
-                    if i % max(1, len(parts) // 5) == 0:
-                        log(f"  unit tables: {i}/{len(parts)} parts")
-                    del r
+            try:
+                while pending:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    while done:
+                        r = done.pop().result()
+                        _rs_state.add_counts(r.pop("kernel_counts", None))
+                        if "chunks" in r:
+                            c = r["chunks"]
+                            res["L_chunks"][c["ids"]] = c["L"]; res["chunk_sites"][c["ids"]] = c["n_sites"]
+                        if "targets" in r:
+                            t = r["targets"]
+                            L = t["L"] if wf is None else t["L"] * wf
+                            if disk is not None:
+                                try:
+                                    disk.write_rows(t["ids"], L)
+                                except OSError as e:  # the first block: nothing written yet, the table goes to memory
+                                    disk.close()
+                                    disk = None
+                                    res["L_t"] = np.zeros((n_targets, n_groups, G), np.float32)
+                                    log(f"WARNING: contig tables kept in memory: writing their file failed ({e})")
+                            if disk is None:
+                                res["L_t"][t["ids"]] = L
+                            del L
+                            res["n_sites_t"][t["ids"]] = t["n_sites"]
+                            u, g, n = t["n_sites_group"]
+                            res["n_sites_group_t"][u, g] = n
+                        if "frags" in r:
+                            f = r["frags"]
+                            res["L_frag"][f["ids"]] += f["L"]; res["frag_sites"][f["ids"]] += f["n_sites"]
+                            res["H_frag"][0][f["ids"]] += f["H"][0]; res["H_frag"][1][f["ids"]] += f["H"][1]
+                        i += 1
+                        if i % max(1, len(parts) // 5) == 0:
+                            log(f"  unit tables: {i}/{len(parts)} parts")
+                        del r
+            except BaseException:  # the run stops: parts not yet started are not computed first
+                ex.shutdown(wait=False, cancel_futures=True)
+                raise
+            note_worker_peaks()
+        if disk is not None:
+            res["L_t"] = disk.finish()
+    except BaseException:
+        if disk is not None:
+            disk.close()
+        raise
     finally:
         for k, v in env.items():
             if v is None:

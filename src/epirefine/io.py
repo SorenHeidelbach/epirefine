@@ -64,7 +64,7 @@ def read_contig_bin(path, log=None) -> dict[str, str]:
     """Two tab-separated columns, contig and bin, no header (Nanomotif/DAS Tool style). A header line is
     tolerated, as are Windows line ends and empty lines. Rows that are not contig<TAB>bin are counted and
     reported through log; a table without any such row (comma- or space-separated, say) is an error."""
-    out, bad, n = {}, [], 0
+    out, bad, n, conflict = {}, [], 0, []
     with _open(path) as fh:
         for line in fh:
             line = line.rstrip("\r\n")
@@ -77,7 +77,12 @@ def read_contig_bin(path, log=None) -> dict[str, str]:
             if len(parts) < 2 or not parts[0] or not parts[1]:
                 bad.append(line)
                 continue
+            if out.get(parts[0], parts[1]) != parts[1]:
+                conflict.append(f"{parts[0]} ({out[parts[0]]}, {parts[1]})")
             out[parts[0]] = parts[1]
+    if conflict:
+        raise InputError(f"contig-bin table {path}: {len(conflict)} contigs are listed in more than one bin (e.g. "
+                         f"{', '.join(conflict[:3])}); a contig belongs to one bin")
     if not out:
         raise InputError(f"contig-bin table {path} has no row with two tab-separated columns (contig<TAB>bin, no "
                          f"header)" + (f"; first row: {bad[0][:80]!r}" if bad else ": it is empty"))
@@ -108,7 +113,9 @@ def read_motifs(path, log=None) -> list[Motif]:
         raise InputError(f"motif table {path}: no valid motif (the file is empty)") from None
     need = {"motif", "mod_type", "mod_position"}
     if not need <= set(df.columns):
-        raise InputError(f"{path}: needs columns {sorted(need)}, found {df.columns}")
+        raise InputError(f"motif table {path} lacks the column(s) {', '.join(sorted(need - set(df.columns)))} (it needs "
+                         f"motif, mod_type and mod_position, as in Nanomotif's bin-motifs.tsv; found: "
+                         f"{', '.join(df.columns[:6])}{', ...' if len(df.columns) > 6 else ''})")
     seen, motifs, invalid, unknown = set(), [], [], {}
     n = [0]
 

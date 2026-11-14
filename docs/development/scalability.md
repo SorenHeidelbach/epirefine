@@ -1,6 +1,12 @@
 # EpiRefine: scalability evaluation and speed-up plan
 
-This document evaluates how EpiRefine v2 scales, measured on this server (16 cores, 62 GB RAM), and
+> **Status (0.12).** Sections 1-6 are the plan and the measurements of October 2026, made on EpiRefine's
+> predecessor (before 0.5.0) and kept as the record of why the code is built as it is. Parts they name that no
+> longer exist (plasmid scoring, the δ × τ_p fit, the HTML report, the scripts under `scripts/`) were removed
+> later; their timings are not those of the current version. Section 7 (large tables on disk) and section 8
+> (compiled kernels) describe version 0.12.
+
+This document evaluates how EpiRefine v2 scales, measured on a 16-core server with 62 GB RAM, and
 lists concrete ways to make the critical steps faster: by lowering their complexity or by more
 efficient code. Each speed-up is estimated either from a prototype timed here or from a scaling
 argument; the table says which.
@@ -266,3 +272,87 @@ re-measured.
 - The caller fit (8 min) is limited by the 3 pooled mod-type fits.
 - Report caps (item 20) are not done: on human gut, `motif_fit.tsv` is 530 MB, too big to embed in
   the HTML report.
+
+## 7. Large tables on disk (0.12)
+
+Two tables of the main process are large and read only in row batches late in the run:
+
+- **Contig tables** (`L_t`, contigs x groups x grid, float32; 5.9 GiB on ZymoFecal). Built in the unit tables and
+  read only after the calibration (scores, then per-group summaries). From 256 MiB on they are a `sites.RowFile`:
+  an unlinked temporary file in the output directory (or `--temp-dir`).
+  - *Writing.* Each part's rows are appended as they arrive (one sequential stream, group weights multiplied in;
+    an index maps each contig to its place in the file). Writing each row at its own offset made the writes, and
+    on a rotational or virtual disk the later reads, scattered. Every 256 MiB a background thread writes the new
+    pages back (`fdatasync`) and drops them from the page cache, so the main process does not wait for the disk.
+  - *Reading.* At the final fit, 8 background readers read the file back into the page cache in sequential
+    blocks (one stream read 48 MB/s on the test server, 8 about 450 MB/s). Reads copy from the cache with `pread`
+    into fresh arrays (not a memory map, whose touched pages would count as resident memory of the main process).
+    The pages stay cached until the file is closed after the summaries: the table is read twice, from one disk
+    read. That page cache (up to the table's size) is charged to the run's cgroup from the final fit to the
+    summaries; it is clean and can be reclaimed.
+  - *Where the whole table is still read.* `FittedModel.score` reads in row batches only when the kept rows are
+    a list (the default) and the table has more than 8,192 rows, and either the row form is used or the compiled
+    kernels (`score_sums`) are in use. Otherwise it reads the file whole into memory, as the in-memory table was
+    before: with `--unknown-prior unbinned`, and on the numpy code (pure wheel or `EPIREFINE_RS=0`) on samples with
+    about 19 bins or fewer. On these paths the scoring peak is that of the in-memory table; the unit-table and calibration peaks
+    are still lower.
+- **Host chunk tables** (`L_chunks`, 5.1 GiB on ZymoFecal). After the final fit only rows of a few mixed contigs
+  are read: the table moves to a memory-mapped temporary file, written back and dropped from the page cache (the
+  page cache is charged to the run's cgroup like any other memory) by a background thread. On the main thread that
+  sync took about 40 s on ZymoFecal (5.5 GB; 7.2-7.8 s per GB measured on the test server's disk), inside the
+  robust-profile stage.
+
+**Where, and how to switch it off.** `--temp-dir DIR` puts both files in DIR (default: the output directory;
+created if missing; a folder in which no file can be made stops the run at the start with one line).
+`--tables-in-memory` takes the path used before 0.12 instead: the contig tables stay in memory (about 5.9 GiB more in the
+main process on ZymoFecal, from the unit tables to the scores) and the chunk tables' file is memory-mapped as
+before, without write-back or page drop, so its pages stay in the page cache. The outputs are the same either way.
+Both are recorded in `params.json` (`temp_dir`, `tables_in_memory`) and replayed by `epirefine rerun`.
+
+**Space.** A run needs free space in the temporary folder for both files: about 12 GB on ZymoFecal-size samples.
+Both are removed when the run ends, also when it fails (on NFS an unlinked open file shows as `.nfsXXXX` while the
+run goes, and stays only if the node crashes).
+
+**tmpfs.** In a folder in memory (tmpfs, `/dev/shm`) the pages cannot be dropped: the files take as much
+memory as the tables did, and on the whole-table scoring paths above the contig tables are then held twice (about
+5.9 GiB more than in memory on ZymoFecal). The log warns when the first table file is made on tmpfs or ramfs.
+For large samples give `--temp-dir` a folder on disk, or use `--tables-in-memory`.
+
+**Errors.** If the contig-table file cannot be made, or its first write fails (nothing is in it yet), the tables
+stay in memory (one warning). Any later error writing it, from `pwrite` or from a write-back (`fdatasync`, in the
+background or at the end), stops the run with one line naming the folder (and, for a space or quota error, the
+space needed); the file is never read back. After a failed write-back the system may drop the unwritten pages,
+and on NFS a `pwrite` can itself report an earlier failed write-back, after which a sync returns no error and the
+lost range reads as zeros. So a disk that fills up half way stops the run instead of continuing in memory. Where
+`posix_fadvise` is missing (macOS) the files are still synced, so these errors are seen there too. The chunk-table
+file falls back to the array still in memory if it cannot be written; if its background write-back fails, the run
+stops in the same way before the file is read (the regional step), and if nothing reads it, the run ends with one
+warning (the outputs do not depend on it).
+
+Outputs are byte-identical whether the tables are on disk or in memory (tests force the disk path on the synthetic
+community with 1 and 3 workers, down-weighted groups, the unbinned prior and without the kernels; the small suites
+were compared file by file).
+
+## 8. Compiled kernels (0.12)
+
+The pileup reader, the motif scan and the model's inner loops (`npmle`, `bin_loglik`, `chunk_terms`, `cell_sums`,
+`score_sums`) have compiled versions in Rust (`rust/`), built by maturin into the extension
+`epirefine._kernels._core` of the platform wheels (Linux manylinux2014 x86_64 and aarch64, musllinux_1_2 x86_64,
+macOS arm64 and x86_64; one abi3 wheel per platform for Python 3.10 and later). Every other platform gets a pure
+`py3-none-any` wheel of the same version, made from a compiled wheel without the extension, and runs the numpy code.
+Up to 0.11 the kernels were a separate, unpublished package (`epirefine_rs`); 0.12 ignores it.
+
+- **Choice.** `epirefine._rs` decides once per run whether the kernels are used (they load, offer the interface
+  this code needs and `EPIREFINE_RS` is not 0), hands that decision to the worker processes, and stops the run if a
+  worker loads another build. Each call site keeps its numpy fallback; some options and small tables take the
+  numpy code also when the kernels are in use.
+- **Same decisions.** Both paths give the same decisions; the probabilities agree to the last digits (development:
+  monoculture training suite, ZymoOral and the simulated look-alikes, every output table byte-identical, params.json
+  values within 1.7e-14). The kernels' two CPU paths, `avx2_fma` (x86-64 with AVX2 and FMA) and `generic`
+  (`EPIREFINE_RS_NO_SIMD=1` forces it), give the same bits.
+- **Record.** The log's third line (`kernels: compiled (<cpu path>; built from <commit>)` or `kernels: numpy
+  (<reason>)`) and `params.json` `kernels` (available, used, reason, build commit, CPU path, module hash, and the
+  calls per kernel on each path, `ran`) say which code ran. Two limits are in the CHANGELOG: `ran` can undercount
+  on free-threaded Python, and the site cache does not record which reader built it.
+- **Building.** An editable install or the sdist compiles the extension and needs Rust and a C compiler (libdeflate
+  is linked statically); `pip install --no-binary epirefine epirefine` does that for a platform without a wheel.

@@ -1,5 +1,9 @@
-# Unit tests on every push and pull request: every Python version EpiRefine supports, plus the lowest
-# dependency versions pyproject.toml allows (so its lower bounds stay true).
+# Unit tests on every push and pull request. One job compiles the kernels (rust/) into a linux x86_64 wheel and
+# derives the pure wheel from it (dev/pure_wheel.py); every other job installs one of these two wheels and runs the
+# tests from the checkout, so only that job needs Rust. Jobs: the compiled wheel on every Python version EpiRefine
+# supports, on both CPU paths of the model kernels; the compiled wheel with the lowest dependency versions
+# pyproject.toml allows (so its lower bounds stay true, also for the kernels' numpy ABI); the pure wheel (numpy code
+# and its warning), also with the lowest versions on Python 3.10; and EPIREFINE_RS=0. The tests import the installed package, not src/.
 name: tests
 
 on:
@@ -8,43 +12,168 @@ on:
     tags: ["v*"]
   pull_request:
 
+# read-only token by default; the jobs that publish declare their own (id-token, contents: write)
+permissions:
+  contents: read
+
+env:
+  # the build tools, the same as release.yml's (B6 review P4)
+  MATURIN_VERSION: "1.16.0"
+  RUST_TOOLCHAIN: "1.99.1"
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  build:
+    name: Build the wheels (linux x86_64 + pure)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0 (2026-11-13)
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0 (2026-11-13)
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8  # master (2026-11-13)
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0  # v2 (2026-11-13)
+        with:
+          workspaces: rust
+      - name: Rust unit tests (the 2-ulp bound of exp_fast and the logsumexp checks in rust/src/model.rs)
+        run: |
+          # the test binary links libpython: the interpreter's, found through PYO3_PYTHON and its LIBDIR
+          export PYO3_PYTHON="$(which python)"
+          export LD_LIBRARY_PATH="$(python -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))'):${LD_LIBRARY_PATH:-}"
+          cargo test --manifest-path rust/Cargo.toml --release --locked
+      - name: Third-party licences match Cargo.lock
+        run: |
+          (cd rust && cargo fetch --locked)
+          python dev/bundle_licenses.py --check
+      - name: Build the compiled wheel and derive the pure wheel
+        env:
+          EPIREFINE_RS_COMMIT: ${{ github.sha }}
+        run: |
+          python -m pip install "maturin==$MATURIN_VERSION"
+          maturin build --release --locked --out dist
+          python dev/pure_wheel.py dist/*-abi3-*.whl
+          ls -l dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2 (2026-11-13)
+        with:
+          name: test-wheels
+          path: dist/*.whl
+
   test:
-    name: Python ${{ matrix.python-version }}
+    name: Python ${{ matrix.python-version }} (compiled wheel)
+    needs: build
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0 (2026-11-13)
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0 (2026-11-13)
         with:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
           cache: pip
-      - name: Install
-        run: python -m pip install -e ".[dev]"
-      - name: Test
-        run: python -m pytest -q tests
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0 (2026-11-13)
+        with:
+          name: test-wheels
+          path: dist
+      - name: Install the compiled wheel
+        run: |
+          python -m pip install dist/*-abi3-*.whl "pytest>=8" "pytest-xdist>=3"
+          epirefine --version
+      - name: Test (kernels expected)
+        env:
+          EPIREFINE_EXPECT_KERNELS: "1"
+        run: python -m pytest -q -n auto tests
+      - name: Test the kernels on the generic CPU path
+        if: matrix.python-version == '3.10' || matrix.python-version == '3.13'
+        env:
+          EPIREFINE_EXPECT_KERNELS: "1"
+          EPIREFINE_RS_NO_SIMD: "1"
+        run: python -m pytest -q -n auto tests/test_kernels_*.py tests/test_rs_*.py tests/test_threads.py
 
   lowest-dependencies:
-    name: Lowest dependency versions (Python 3.10)
+    name: Lowest dependency versions (Python 3.10, compiled wheel)
+    needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0 (2026-11-13)
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0 (2026-11-13)
         with:
           python-version: "3.10"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0 (2026-11-13)
+        with:
+          name: test-wheels
+          path: dist
       - name: Install with the lowest versions pyproject.toml allows
         run: |
           python -m pip install uv
           uv venv .venv-min
-          VIRTUAL_ENV=.venv-min uv pip install --resolution lowest-direct -e ".[dev]"
+          # the lower bounds as direct requirements, so that lowest-direct lowers them (Python 3.10 has no tomllib)
+          deps=$(/usr/bin/python3 -c "import tomllib; print(' '.join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))")
+          VIRTUAL_ENV=.venv-min uv pip install --resolution lowest-direct dist/*-abi3-*.whl $deps "pytest>=8" "pytest-xdist>=3"
           .venv-min/bin/python -c "import numpy, scipy, polars; print('numpy', numpy.__version__, 'scipy', scipy.__version__, 'polars', polars.__version__)"
+          .venv-min/bin/epirefine --version
+      - name: Test (kernels expected)
+        env:
+          EPIREFINE_EXPECT_KERNELS: "1"
+        run: .venv-min/bin/python -m pytest -q -n auto tests
+
+  numpy-only:
+    name: ${{ matrix.name }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Pure wheel (no kernels, Python 3.12)
+            wheel: "*-py3-none-any.whl"
+            rs: ""
+            python: "3.12"
+            lowest: false
+          - name: Pure wheel with the lowest dependency versions (Python 3.10)
+            wheel: "*-py3-none-any.whl"
+            rs: ""
+            python: "3.10"
+            lowest: true
+          - name: EPIREFINE_RS=0 (compiled wheel, Python 3.12)
+            wheel: "*-abi3-*.whl"
+            rs: "0"
+            python: "3.12"
+            lowest: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0 (2026-11-13)
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0 (2026-11-13)
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0 (2026-11-13)
+        with:
+          name: test-wheels
+          path: dist
+      - name: Install
+        run: |
+          python -m pip install uv
+          uv venv .venv-np
+          if [ "${{ matrix.lowest }}" = "true" ]; then
+            # the numpy code is what users of the pure wheel run: its lower bounds must hold too (B6 review P3)
+            deps=$(/usr/bin/python3 -c "import tomllib; print(' '.join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))")
+            VIRTUAL_ENV=.venv-np uv pip install --resolution lowest-direct dist/${{ matrix.wheel }} $deps "pytest>=8" "pytest-xdist>=3"
+          else
+            VIRTUAL_ENV=.venv-np uv pip install dist/${{ matrix.wheel }} "pytest>=8" "pytest-xdist>=3"
+          fi
+          .venv-np/bin/python -c "import numpy, scipy, polars; print('numpy', numpy.__version__, 'scipy', scipy.__version__, 'polars', polars.__version__)"
+          .venv-np/bin/epirefine --version
+      - name: Which path runs
+        env:
+          EPIREFINE_RS: ${{ matrix.rs }}
+        run: .venv-np/bin/python -c "from epirefine import _rs; print(_rs.summary()); assert _rs.kernels() is None"
       - name: Test
-        run: .venv-min/bin/python -m pytest -q tests
+        env:
+          EPIREFINE_RS: ${{ matrix.rs }}
+        run: .venv-np/bin/python -m pytest -q -n auto tests

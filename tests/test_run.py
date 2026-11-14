@@ -35,7 +35,7 @@ def test_params_json_is_valid_json_with_provenance(small_community, finished):
     assert p["include_threshold"] == 0.91 and p["contamination_threshold"] == 0.5
     for k in ("include_threshold_unmethylated", "min_methylome_difference", "max_redundancy", "min_evidence",
               "min_contig_coverage", "min_contig_length", "motif_noise_filter", "group_weights", "regional_model",
-              "regional_inclusion", "do_calibrate", "frag_lengths", "frags_per_bin", "frag_budget", "allow_sharpening",
+              "do_calibrate", "frag_lengths", "frags_per_bin", "frag_budget", "allow_sharpening",
               "min_jaccard", "variation", "group_sample_bp", "p_unknown_given", "tau_given", "temperature_given",
               "start_time", "command_line", "peak_rss_gb", "elapsed_s"):
         assert k in p, k

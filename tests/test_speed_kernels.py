@@ -360,8 +360,8 @@ def test_two_state_share_threads_bits(monkeypatch, threads):
 @pytest.mark.parametrize("threads", ["1", "4"])
 def test_summed_scores_row_form(monkeypatch, threads):
     """The row form of summed_scores (one-thread BLAS products on unit slices, one logarithm for the relatives)
-    agrees with the group form to rounding, does not depend on the thread count, and leaves BLAS's thread count
-    as it found it."""
+    agrees with the per-group terms summed in ascending order to rounding, does not depend on the thread count,
+    and leaves BLAS's thread count as it found it."""
     monkeypatch.setenv("OMP_NUM_THREADS", threads)
     rng = np.random.default_rng(7)
     U, Mg, H = 300, 11, 7
@@ -372,7 +372,9 @@ def test_summed_scores_row_form(monkeypatch, threads):
     Au = np.minimum(Au, Lp.max(-1))  # Au <= max of the unit's table, as for a community draw
     api = M._blas_thread_api()
     before = api[1]() if api else None
-    S0, R0 = M.summed_scores(Lp, lp, rel=(0.05, Au), form="groups")
+    A = M.group_scores(Lp, lp)                                       # [U, H, M]
+    S0 = A.sum(-1)
+    R0 = np.logaddexp(A + np.log1p(-0.05), (np.log(0.05) + Au)[:, None, :]).sum(-1)
     S1, R1 = M.summed_scores(Lp, lp, rel=(0.05, Au), form="rows")
     np.testing.assert_allclose(S1, S0, rtol=1e-12)
     np.testing.assert_allclose(R1, R0, rtol=1e-12)
@@ -452,6 +454,40 @@ def test_spill_keeps_values(tmp_path, monkeypatch):
     assert not list(tmp_path.iterdir())  # unlinked temporary file
 
 
+
+def test_spill_writeback_in_the_background(tmp_path, monkeypatch):
+    """With a list for its write-back, _spill returns the map at once and syncs the file in a background thread
+    (the sync of 5.5 GB on the main thread cost about 40 s on ZymoFecal); check() waits for it. A failed sync
+    stops the run with TableFileError before the map is read (it is not trusted)."""
+    import errno
+    import threading
+    import epirefine.pipeline as P
+    from epirefine.sites import TableFileError
+    monkeypatch.setattr(P, "SPILL_MIN_BYTES", 1)
+    a = np.random.default_rng(14).random((50, 7, 64)).astype(np.float32)
+    go, synced = threading.Event(), []
+
+    def slow(fd, *args):
+        go.wait(10)
+        synced.append(threading.current_thread() is not threading.main_thread())
+    monkeypatch.setattr(P, "drop_pages", slow)
+    wb = []
+    m = P._spill(a, tmp_path, wb)
+    assert len(wb) == 1 and not synced  # returned before the sync
+    go.set()
+    wb[0].check()
+    assert synced == [True] and np.array_equal(m, a)
+
+    for err in (OSError(errno.EDQUOT, "Disk quota exceeded"), ValueError("not an OSError")):
+        def fail(fd, *args):
+            raise err
+        monkeypatch.setattr(P, "drop_pages", fail)
+        wb = []
+        P._spill(a, tmp_path, wb)
+        with pytest.raises(TableFileError):  # any error, also one that is not an OSError
+            wb[0].check()
+
+
 def test_spilled_chunk_tables_same_outputs(community, base_run, tmp_path, monkeypatch):
     """A run whose chunk tables go to a temporary file after the final fit writes the same tables."""
     import filecmp
@@ -502,6 +538,7 @@ def test_threads_follow_cpu_affinity(monkeypatch):
 
 def test_prefetch_cache_reads_parts(tmp_path):
     import json
+    from pathlib import Path
     import epirefine.pipeline as P
     assert P._prefetch_cache(tmp_path) is None  # no manifest
     (tmp_path / "sites").mkdir()
@@ -509,6 +546,11 @@ def test_prefetch_cache_reads_parts(tmp_path):
         (tmp_path / "sites" / f"p{i}.parquet").write_bytes(b"x" * 1000)
     (tmp_path / "manifest.json").write_text(json.dumps({"parts": [f"elsewhere/sites/p{i}.parquet" for i in range(3)]}))
     th = P._prefetch_cache(tmp_path)
+    if not Path("/proc/meminfo").exists():
+        # By design: without /proc/meminfo (macOS) the free memory is unknown, so the optional prefetch (a speed-up
+        # only; nothing reads its result) is skipped and the run reads the cache from disk as before.
+        assert th is None
+        return
     th.join(10)
     assert not th.is_alive()
 

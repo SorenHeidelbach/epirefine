@@ -1,11 +1,11 @@
-"""Calibration coherence (dev log proposal 2026-11-10): order of tempering and mixing, the prior the
-calibration is fitted under, tau compared on common fragments, the EM priors and the false-flag diagnostic."""
+"""Calibration coherence (dev log proposal 2026-11-10): order of tempering and mixing, the EM priors, the gated
+contamination rate and the false-flag diagnostic. (The calibration features of the proposal were removed in 0.12,
+U12; their tests went with them.)"""
 import numpy as np
 import pytest
 from scipy.special import logsumexp
 
-from epirefine.calibrate import (COHERENT, FEATURES, FragmentFit, TemperatureCurve, isotonic_increasing,
-                                 loglik_on_common, parse_features)
+from epirefine.calibrate import FragmentFit
 from epirefine.model import posterior, unknown_logit, unknown_score
 from epirefine.refine import em_weight, refine
 
@@ -94,44 +94,12 @@ def test_contamination_rate_counts_only_contigs_that_pass_the_gate():
     diff = np.r_[np.full(10, 0.9), np.full(20, 0.1), np.zeros(70)]
     kw = dict(given=given, testable=np.ones(N, bool), temperature=1.0, methylome_difference=diff, p_unknown=0.5)
     before = refine(S, Su, **kw)
-    after = refine(S, Su, eps_after_gate=True, **kw)
+    after = refine(S, Su, eps_gated=True, **kw)
     assert before.contaminant.sum() == after.contaminant.sum() == 10
     assert before.eps == pytest.approx(30 / 118, abs=0.01)   # MAP with Beta(1, 19): (30 + 0) / (100 + 18)
     assert after.eps == pytest.approx(10 / 118, abs=0.01)
     # the reported probabilities stay likelihood-based for every contig
     assert (after.p_foreign[10:30] > 0.99).all()
-
-
-def test_taus_are_compared_on_the_fragments_every_fit_keeps():
-    # fit 1 drops its worst fragment and looks better on its own kept set; on the common set fit 0 wins
-    own = [np.array([-1.0, -1.0, -50.0]), np.array([-2.0, -2.0, -60.0])]
-    keeps = [np.array([True, True, True]), np.array([True, True, False])]
-    assert own[1][keeps[1]].sum() > own[0][keeps[0]].sum()
-    common, lls = loglik_on_common(own, keeps)
-    assert common.tolist() == [True, True, False]
-    assert lls[0] > lls[1]
-
-
-def test_isotonic_and_temperature_curve():
-    assert isotonic_increasing(np.array([1.0, 3.0, 2.0, 4.0]), np.ones(4)).tolist() == [1.0, 2.5, 2.5, 4.0]
-    assert isotonic_increasing(np.array([3.0, 1.0]), np.array([1.0, 3.0])).tolist() == [1.5, 1.5]
-    c = TemperatureCurve(np.log([100.0, 1000.0]), np.log([1.0, 2.0]))
-    assert c([10, 100, 1000, 1e6]) == pytest.approx([1.0, 1.0, 2.0, 2.0])   # constant outside the calibrated range
-    assert 1.0 < c([316])[0] < 2.0
-
-
-def test_parse_features():
-    assert parse_features("legacy") == frozenset()
-    assert parse_features("consistent") == {"temper-then-mix", "common-tau", "em-priors"}   # a named set, not the default
-    assert parse_features("consistent,-em-priors") == {"temper-then-mix", "common-tau"}
-    assert parse_features("coherent") == frozenset(COHERENT)
-    assert parse_features("coherent,-common-tau") == frozenset(COHERENT) - {"common-tau"}
-    assert parse_features("temper-then-mix, em-priors") == {"temper-then-mix", "em-priors"}
-    assert set(COHERENT) <= set(FEATURES)
-    with pytest.raises(ValueError):
-        parse_features("nonsense")
-    with pytest.raises(ValueError):
-        parse_features("prior-averaged,prior-matched")
 
 
 def _gaussian_fragments(rng, H=20, d=4, s2=4.0, n=4000):
@@ -145,11 +113,11 @@ def _gaussian_fragments(rng, H=20, d=4, s2=4.0, n=4000):
     return S, fb, Sc
 
 
-def _fit(S, fb, Sc, features, **kw):
+def _fit(S, fb, Sc, **kw):
     n = len(fb)
     base = dict(S=S, fbin=fb, Su_comm=Sc, R={}, kept=np.ones(n, bool), distinct=np.ones(n, bool),
                 length=np.full(n, 1000), n_sites=np.full(n, 10.0), difference=np.zeros(n),
-                features=frozenset(features), temps=tuple(np.round(np.exp(np.linspace(np.log(0.3), np.log(5), 41)), 3)),
+                temps=tuple(np.round(np.exp(np.linspace(np.log(0.3), np.log(5), 41)), 3)),
                 allow_sharpening=True)
     base.update(kw)
     return FragmentFit(**base)
@@ -157,7 +125,7 @@ def _fit(S, fb, Sc, features, **kw):
 
 def test_fragment_losses_equal_the_posterior_based_ones():
     S, fb, Sc = _gaussian_fragments(np.random.default_rng(3), H=6, n=200)
-    ff = _fit(S, fb, Sc, {"temper-then-mix"})
+    ff = _fit(S, fb, Sc)
     la, lb = ff.losses(1.7, None, 1.0, 0.3)
     Pa = posterior(S, Sc, 0.3, 1.7)
     assert la == pytest.approx(-np.log(Pa[np.arange(200), fb]))
@@ -165,40 +133,13 @@ def test_fragment_losses_equal_the_posterior_based_ones():
     mask = np.ones((200, 6), bool)
     mask[np.arange(200), fb] = False
     assert lb == pytest.approx(-np.log(posterior(S, Sc, 0.3, 1.7, host_mask=mask)[:, -1]))
-    # proper objective: the remaining H - 1 bins share 1 - p
-    la, lb = _fit(S, fb, Sc, {"prior-averaged"}).losses(1.7, None, 1.0, 0.3)
-    Z = S / 1.7
-    Z[np.arange(200), fb] = -np.inf
-    lg = np.c_[Z + np.log(0.7 / 5), Sc / 1.7 + np.log(0.3)]
-    assert lb == pytest.approx(-(lg[:, -1] - logsumexp(lg, axis=1)))
-
-
-def test_matched_prior_recovers_temperature_one_where_the_legacy_objective_does_not():
-    S, fb, Sc = _gaussian_fragments(np.random.default_rng(0))
-    ff = _fit(S, fb, Sc, {"temper-then-mix", "prior-averaged", "unit-temperature"})
-    # the calibration of 0.10: posteriors at prior 0.1, tests A and B weighted 1 : 1 (any feature that does
-    # not choose a proper objective keeps it)
-    legacy = _fit(S, fb, Sc, {"temper-then-mix", "unit-temperature"}).fit(0.1, log=lambda *_: None)["fitted_temperature"]
-    assert legacy > 1.4                          # inflated by the prior mismatch alone
-    assert ff.fit(0.5, log=lambda *_: None)["fitted_temperature"] == pytest.approx(1.0, abs=0.07)
-    matched = _fit(S, fb, Sc, {"temper-then-mix", "prior-matched", "unit-temperature"})
-    for p in (0.1, 0.5, 0.9):
-        assert matched.fit(p, log=lambda *_: None)["fitted_temperature"] == pytest.approx(1.0, abs=0.08)
-
-
-def test_never_sharpen_clips_at_exactly_one_with_unit_temperature():
-    S, fb, Sc = _gaussian_fragments(np.random.default_rng(1), n=1500)
-    # under-confident scores (half the true log-likelihoods: the fitted temperature is 0.5)
-    kw = dict(temps=(0.5, 0.928, 1.082, 2.0), allow_sharpening=False)
-    assert _fit(0.5 * S, fb, 0.5 * Sc, {"prior-averaged"}, **kw).fit(0.5, log=lambda *_: None)["temperature"] == 1.082
-    assert _fit(0.5 * S, fb, 0.5 * Sc, {"prior-averaged", "unit-temperature"}, **kw).fit(0.5, log=lambda *_: None)["temperature"] == 1.0
 
 
 def test_false_flag_rate_of_member_fragments():
     S, fb, Sc = _gaussian_fragments(np.random.default_rng(2), H=6, n=600)
     diff = np.zeros(600)
     diff[:300] = 0.9
-    ff = _fit(S, fb, Sc, {"temper-then-mix"}, difference=diff, length=np.r_[np.full(300, 2000), np.full(300, 50_000)])
+    ff = _fit(S, fb, Sc, difference=diff, length=np.r_[np.full(300, 2000), np.full(300, 50_000)])
     fit = {"temperature": 1.0, "eta": None, "lam": 1.0, "curve": None}
     rows = {(r["length"], r["fragments"]): r for r in ff.false_flags(fit, p_unknown=0.5, eps=0.05)}
     # members are rarely called foreign, and never flagged where the gate is not passed
@@ -210,17 +151,3 @@ def test_false_flag_rate_of_member_fragments():
     assert more["2000", "all"]["false_flag_rate"] >= rows["2000", "all"]["false_flag_rate"]
     rel = ff.deployed_reliability(fit, 0.5, 0.05)
     assert {r["test"] for r in rel} == {"A_any_candidate", "A_map", "B_unknown"}
-
-
-def test_conservative_temperature_takes_the_flattest_one_the_fragments_cannot_reject():
-    # 150 weakly informative fragments whose true temperature is 1.2: neighbouring values are indistinguishable
-    S, fb, Sc = _gaussian_fragments(np.random.default_rng(7), H=6, d=2, n=150)
-    kw = dict(temps=(1.0, 1.1, 1.2, 1.3, 1.4, 1.6, 4.0), allow_sharpening=False, contig=np.arange(150) // 3)
-    plain = _fit(1.2 * S, fb, 1.2 * Sc, {"prior-averaged"}, **kw).fit(0.5, log=lambda *_: None)
-    cons = _fit(1.2 * S, fb, 1.2 * Sc, {"prior-averaged", "conservative-temperature"}, **kw).fit(0.5, log=lambda *_: None)
-    assert plain["temperature"] == 1.3
-    assert cons["temperature"] == 1.6       # not 4.0: that one the fragments do reject
-    # many informative fragments: nothing above the best is within 2 SE
-    S, fb, Sc = _gaussian_fragments(np.random.default_rng(6), n=20000)
-    kw = dict(temps=(1.0, 1.5, 2.0), allow_sharpening=False, contig=np.arange(20000))
-    assert _fit(S, fb, Sc, {"prior-averaged", "conservative-temperature"}, **kw).fit(0.5, log=lambda *_: None)["temperature"] == 1.0

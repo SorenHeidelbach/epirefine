@@ -1,10 +1,10 @@
 [project]
 name = "epirefine"
-version = "0.11.1"
+version = "0.12.0"
 description = "Refine metagenome bins from nanopore methylation: flag contaminants and place unbinned contigs, with calibrated probabilities"
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "rust/THIRD_PARTY_LICENSES.txt"]
 authors = [{ name = "Søren Heidelbach", email = "shei@bio.aau.dk" }]
 maintainers = [{ name = "Søren Heidelbach", email = "shei@bio.aau.dk" }]
 keywords = ["metagenomics", "binning", "bin refinement", "nanopore", "DNA methylation", "Nanomotif", "MAG"]
@@ -40,13 +40,28 @@ Changelog = "https://github.com/SorenHeidelbach/epirefine/blob/main/CHANGELOG.md
 [project.scripts]
 epirefine = "epirefine.cli:main"
 
+# The platform wheels carry the compiled kernels (rust/, extension epirefine._kernels._core, abi3 for CPython >= 3.10;
+# D73). The pure py3-none-any wheel of the same version is derived from a compiled one by dev/pure_wheel.py (same
+# metadata, no extension: EpiRefine then runs its numpy code). An install from the sdist compiles the kernels and
+# needs Rust and a C compiler; pip and uv take a wheel whenever one fits, and the pure wheel fits everywhere.
 [build-system]
-requires = ["hatchling>=1.27"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/epirefine"]
-
+[tool.maturin]
+python-source = "src"
+manifest-path = "rust/Cargo.toml"
+module-name = "epirefine._kernels._core"
+features = ["pyo3/extension-module"]
 # the source distribution carries what is needed to build, test and judge the tool; not the dev hooks or CI files
-[tool.hatch.build.targets.sdist]
-include = ["src/epirefine", "tests", "docs", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
+include = [
+    { path = "tests/**/*", format = "sdist" },
+    { path = "docs/**/*", format = "sdist" },
+    { path = "CHANGELOG.md", format = "sdist" },
+    { path = "LICENSE", format = "sdist" },
+    { path = "rust/THIRD_PARTY_LICENSES.txt", format = "sdist" },
+]
+exclude = [
+    { path = "**/__pycache__/**", format = "sdist" },
+    { path = "**/*.so", format = "sdist" },
+]

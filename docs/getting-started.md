@@ -3,6 +3,7 @@
 This guide takes you from nanopore reads to refined bins in five steps. Steps 1 and 2 make the two inputs that come
 from the reads; if you already have a modkit pileup and Nanomotif's `bin-motifs.tsv`, go to step 3.
 
+[Try the example data](#try-it-on-the-example-data) ·
 [1. Map the reads](#1-map-the-reads-with-their-methylation-tags) ·
 [2. Pileup and motifs](#2-make-the-pileup-and-find-the-motifs) ·
 [3. Run EpiRefine](#3-run-epirefine) ·
@@ -18,7 +19,46 @@ from the reads; if you already have a modkit pileup and Nanomotif's `bin-motifs.
   one line per binned contig, `contig<TAB>bin`, no header. Contigs not in the table are unbinned.
 - **Tools:** EpiRefine (`pip install epirefine`), [minimap2](https://github.com/lh3/minimap2) and
   [samtools](https://www.htslib.org/), [modkit](https://github.com/nanoporetech/modkit) and
-  [Nanomotif](https://github.com/MicrobialDarkMatter/nanomotif).
+  [Nanomotif](https://github.com/MicrobialDarkMatter/nanomotif) (the benchmarks of EpiRefine 0.12 used Nanomotif
+  1.3.0).
+
+## Try it on the example data
+
+The repository (and the source distribution) holds a small example in `tests/data/example_community`: a
+**synthetic** community made by the test suite's generator (`tests/synth.py`, seed 1), not real reads. Five
+simulated genomes (1.1 Mb in 56 contigs); four of them have bins (`binA`, `binB`, `binC`, and `binE` of a single
+contig) and one has none. Each genome methylates its own combination of the 12 motifs in `bin-motifs.tsv` (the
+binless genome also methylates a motif that no bin has, so the table lacks it, as Nanomotif's would), and the pileup
+holds simulated read counts at the motif sites only. The binning has planted errors: four contigs put in the bin of
+another binned genome, one contig of the binless genome put in a bin, six members of `binA`, `binB` and `binC` left
+unbinned, an unbinned exact copy of a binned contig and a second copy of it in a wrong bin, an unbinned contig below
+1 kb and a binned one at about 2x coverage. The four files take 1.6 MB.
+
+```bash
+git clone https://github.com/SorenHeidelbach/epirefine.git && cd epirefine
+epirefine run \
+    --assembly tests/data/example_community/assembly.fasta.gz \
+    --pileup tests/data/example_community/pileup.bed.gz \
+    --contig-bin tests/data/example_community/contig_bin.tsv \
+    --motifs tests/data/example_community/bin-motifs.tsv \
+    --out example_out --workers 1
+```
+
+It takes a few seconds on one core (about 5 s and 0.2 GB on a development server). Near its end the log reads
+
+```
+refinement: p_unknown=0.417, contamination rate=0.102; 6 of 42 testable binned contigs flagged, 6 of 13 unbinned included, 4 contaminants moved to another bin
+```
+
+and `cut -f5 example_out/contig_decisions.tsv | sort | uniq -c` should count 35 `kept`, 6 `included`, 4 `moved`,
+2 `contaminant`, 5 `unbinned`, 1 each of `redundant`, `low_coverage`, `too_short` and `sole_contig_of_bin`. The
+six flagged contigs are the six planted ones: four are moved back to their own genome's bin, and two stay out of
+every bin (the contig of the binless genome, and the misplaced copy, whose way back is closed because its sequence
+is already in the right bin). The six missing members are included, the unbinned copy is `redundant`, and the
+binless genome's five unbinned contigs stay `unbinned`. A log line `WARNING: 1 bins show two methylation states`
+about `binA` is expected: the planted contaminants make it look like two genomes. `tests/test_example_data.py`
+checks this run. Being synthetic, these data are easy: they show the files and the workflow, not the accuracy to
+expect on real samples.
 
 ## 1. Map the reads with their methylation tags
 
@@ -73,7 +113,9 @@ What happens, in order (the log shows each step):
 **Time and memory.** A community of 25-35 Mb with a 4-6 GB pileup takes a few minutes at most and about 1-2 GB.
 For a complex fecal sample (2.6 Gb assembly, 490 bins, 330 GB pileup), the first read of the pileup took 2.4 hours
 with 2 workers (0.10.1) and everything after it 13.5 minutes with 12 workers (0.11.0), with 25.5 GB in the main
-process plus the workers. Measurements per version are in the [FAQ](faq.md#how-long-does-it-take-and-how-much-memory).
+process plus the workers. Since 0.12 the two largest tables are kept in temporary files in the output folder while
+the run goes (about 12 GB on that sample; `--temp-dir` puts them elsewhere, `--tables-in-memory` keeps them in
+memory). Measurements per version are in the [FAQ](faq.md#how-long-does-it-take-and-how-much-memory).
 
 ## 4. Read the results
 
