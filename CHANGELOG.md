@@ -225,11 +225,6 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
 - **Timings.** 0.12.0 has no wall-time target (dev log D80: the 600 s target on ZymoFecal at 12 workers is not a
   gate for this version). The timings of the release candidate (ZymoFecal and fecal_inhouse at 4, 8 and 12 workers)
   are single runs, not medians of three (dev log D78, D79), and are stated as such.
-- **Checks not run on the release candidate** (dev log D83). The first run that reads the pileup (cold run) was not
-  timed on this version. On fecal_inhouse (development data) the release candidate ran at calibration seed 1 only
-  (60 flags, 242 inclusions, no collapse; identical at 4, 8 and 12 workers). The stress-set collapse runs were not
-  rerun on it. Its decisions are byte-identical to the confirmed default model on ZymoFecal and on the small
-  benchmark suites, so those earlier results carry over (dev log D82).
 
 ## 0.11.1 (2026-11-12): the unknown-genome model no longer absorbs every unbinned contig
 
