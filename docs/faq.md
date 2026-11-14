@@ -125,7 +125,7 @@ interval 53-98%) and 23 of 24 inclusions (96%, 80-99%) that Hi-C could check at 
 Nanomotif 1.3.0 table and version 0.11.1 it is 7 of 8 flags and 24 of 26 inclusions. Hi-C could check only these 8 of
 the 139 flagged contigs and 24 of the 485 inclusions of the 0.8.0 run, the flag figure moves between 67% and 88% with the version of
 the Hi-C reference (the inclusion figure stays at 92-100%), and the same sample was used to choose several defaults (the 0.4 methylome difference, the 0.9
-inclusion threshold, the 5x cut-off), so it is not an independent check. With 0.12.0rc1 (Nanomotif 1.3.0 table, calibration seed 1) the
+inclusion threshold, the 5x cut-off), so it is not an independent check. With 0.12.0 (Nanomotif 1.3.0 table, calibration seed 1) the
 sample gets 147 flags and 589 inclusions (0.11.1: 147 and 503), and the share of them that Hi-C confirms is
 unchanged. Things to keep in mind:
 
@@ -195,7 +195,7 @@ unchanged. Things to keep in mind:
   against 95.029% (497 of 523), and it made 30 wrong placements at P ≥ 0.99 against 28. Each difference comes from
   one contig (m2_u19042189ctg placed in a wrong bin twice; m2_u10058973ctg placed in the same wrong bin at P 0.996-0.997
   where 0.11.1 placed it at 0.984-0.985), and for both the planted truth is contradicted by the runs without planting.
-  Details: [CHANGELOG](../CHANGELOG.md), 0.12.0rc1, Known limitations.
+  Details: [CHANGELOG](../CHANGELOG.md), 0.12.0, Known limitations.
 - **Some small samples cannot be calibrated.** A run stops with "no calibration fragments" when no calibration
   piece can be cut from the bins (see [Something went wrong](#something-went-wrong)). On a stress set of 690 runs
   on development genomes (replicate seeds included), 37 runs stopped this way, all on contigs cut into 1-2 kb
