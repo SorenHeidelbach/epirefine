@@ -3,11 +3,17 @@
 Versions follow semantic versioning (see `CLAUDE.md`). Each entry lists what changed and its measured
 effect on the benchmark suite (`benchmarks/benchmark_suite.py`; history in the dev log).
 
-## 0.12.0rc1 (2026-11-13): release candidate. Breaking: one unknown-genome model by default (option E), options that lost removed; compiled kernels in the wheels
+## 0.12.0 (2026-11-14): Breaking: one unknown-genome model by default (option E), options that lost removed; compiled kernels in the wheels
 
 **Breaking.** The default model changed (the unknown-model switch is gone: option E, see Changed) and the options
 that lost on the development benchmarks are removed from the command line (below). Decisions on metagenomes differ
-from 0.11.1. This is a release candidate: not tagged, not published.
+from 0.11.1.
+
+**Same outputs, timings.** The released code gives the same outputs as the runs judged during development: the
+decision tables are byte-identical to those of the confirmed default model on ZymoFecal and on the small benchmark
+suites, and identical at 4, 8 and 12 workers. Single runs (development data, compiled kernels, from the site cache):
+ZymoFecal 744 / 797 / 841 s at 12 / 8 / 4 workers (main process 18.4-18.5 GiB; all processes 29.4 / 23.4 / 18.1 GiB);
+fecal_inhouse 550 / 564 / 596 s (main process 13.4 GiB; all processes 23.2 / 19.5 / 14.8 GiB).
 
 **Benchmark effect (all numbers development data; Nanomotif 1.3.0 motif table on ZymoFecal).**
 - Monoculture training suite (`benchmarks/results.tsv`, mono_train_1..6, its standard motif tables): contaminants
@@ -175,10 +181,10 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
   `params.json` key the code writes, and defines "5x" as the code computes it (median valid calls per motif site,
   both strands summed at two-strand sites); `usage.md` lists every option of `--help`; `tests/test_docs.py` keeps
   both complete. The README and FAQ call the monoculture test and validation communities spent, not held-out.
-- `CITATION.cff` (version 0.12.0rc1 in this release candidate; no DOI yet).
+- `CITATION.cff` (no DOI yet).
 - A small synthetic example dataset, `tests/data/example_community` (1.6 MB; the golden-snapshot community of the
   tests), with a section in `getting-started.md` and a test that runs it end to end (about 5 s on one core).
-- README and docs checked against the release candidate: install text (kernels in the wheels, pure fallback, no
+- README and docs checked against this version: install text (kernels in the wheels, pure fallback, no
   Bioconda package yet), Nanomotif 1.3.0 as the motif source, versions named for every quoted number, the
   confirmation and stress limitations in the FAQ, `docs/development/scalability.md` section 8 on the kernels.
 
@@ -223,7 +229,7 @@ naming it (the same option at its old default, as every 0.11.1 record holds, is 
   could be cut from the bins; nothing beyond that message was examined. The other 653 finish; the guard fires on
   3 of them (above).
 - **Timings.** 0.12.0 has no wall-time target (dev log D80: the 600 s target on ZymoFecal at 12 workers is not a
-  gate for this version). The timings of the release candidate (ZymoFecal and fecal_inhouse at 4, 8 and 12 workers)
+  gate for this version). The timings above (ZymoFecal and fecal_inhouse at 4, 8 and 12 workers)
   are single runs, not medians of three (dev log D78, D79), and are stated as such.
 
 ## 0.11.1 (2026-11-12): the unknown-genome model no longer absorbs every unbinned contig

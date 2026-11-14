@@ -105,7 +105,7 @@ described in [docs/outputs.md](https://github.com/SorenHeidelbach/epirefine/blob
   an unseen evaluation; version 0.10.1; 0.11.0 gives the same results), 311 of 316 flags (98.4%) were true contaminants and 1,096 of 1,180 placements (92.9%) went into
   the right bin: 98.4% in the test set, 89.6% in the validation set, where contigs of genomes without a bin were
   placed into bins with few methylated motifs. It found 311 of 363 planted contaminants (85.7%). With the same
-  version, on the development benchmarks every flag and 99.8% of placements were right. With 0.12.0rc1, on the six
+  version, on the development benchmarks every flag and 99.8% of placements were right. With 0.12.0, on the six
   training communities (development) it found 94.8% of the contaminants with a flag precision of 100% and put back
   89.6% of the removed contigs ([benchmarks/results.tsv](https://github.com/SorenHeidelbach/epirefine/blob/main/benchmarks/results.tsv)).
   No evaluation on data held out from development has been run yet; the manuscript will report it.
